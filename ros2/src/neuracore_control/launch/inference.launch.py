@@ -33,11 +33,6 @@ def generate_launch_description():
             "Defaults to $NEURACORE_ROBOT_NAME or 'anvil_openarm'."
         ),
     )
-    urdf_path_arg = DeclareLaunchArgument(
-        "urdf_path",
-        default_value="",
-        description="Optional URDF path passed to nc.connect_robot",
-    )
     inference_rate_arg = DeclareLaunchArgument(
         "inference_rate_hz",
         default_value=os.environ.get("NEURACORE_INFERENCE_RATE_HZ", "50.0"),
@@ -74,23 +69,20 @@ def generate_launch_description():
     predictions_log_arg = DeclareLaunchArgument(
         "predictions_log",
         default_value="",
-        description="If set, write per-tick predictions to this CSV path (raw policy targets + current state)",
+        description=(
+            "Per-tick predictions CSV path (raw policy targets + current "
+            "state). Defaults to <package>/logs/predictions_<timestamp>.csv "
+            "when empty."
+        ),
     )
     image_log_chunks_arg = DeclareLaunchArgument(
         "image_log_chunks",
         default_value=os.environ.get("NEURACORE_IMAGE_LOG_CHUNKS", "10"),
         description=(
             "Save the camera frames that fed predict() for the first N chunks "
-            "to disk (one folder per chunk). 0 disables. Defaults to "
-            "$NEURACORE_IMAGE_LOG_CHUNKS or 10."
-        ),
-    )
-    image_log_dir_arg = DeclareLaunchArgument(
-        "image_log_dir",
-        default_value=os.environ.get("NEURACORE_IMAGE_LOG_DIR", ""),
-        description=(
-            "Directory to write per-chunk image folders into. If empty and "
-            "predictions_log is set, derives <predictions_log without .csv>_images/."
+            "to disk, into <predictions_log_dir>/images/ as "
+            "<predictions_log_stem>_chunk_<id>_<cam>.jpg. 0 disables. "
+            "Defaults to $NEURACORE_IMAGE_LOG_CHUNKS or 10."
         ),
     )
 
@@ -104,14 +96,12 @@ def generate_launch_description():
                 "model_file": LaunchConfiguration("model_file"),
                 "train_run_name": LaunchConfiguration("train_run_name"),
                 "robot_name": LaunchConfiguration("robot_name"),
-                "urdf_path": LaunchConfiguration("urdf_path"),
                 "inference_rate_hz": LaunchConfiguration("inference_rate_hz"),
                 "debug": LaunchConfiguration("debug"),
                 "max_joint_delta": LaunchConfiguration("max_joint_delta"),
                 "predictions_log": LaunchConfiguration("predictions_log"),
                 "device": LaunchConfiguration("device"),
                 "image_log_chunks": LaunchConfiguration("image_log_chunks"),
-                "image_log_dir": LaunchConfiguration("image_log_dir"),
             }
         ],
     )
@@ -121,14 +111,12 @@ def generate_launch_description():
             model_file_arg,
             train_run_name_arg,
             robot_name_arg,
-            urdf_path_arg,
             inference_rate_arg,
             debug_arg,
             max_joint_delta_arg,
             predictions_log_arg,
             device_arg,
             image_log_chunks_arg,
-            image_log_dir_arg,
             inference_node,
         ]
     )

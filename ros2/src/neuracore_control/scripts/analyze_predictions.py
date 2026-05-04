@@ -30,7 +30,7 @@ from neuracore_control.common import (
     DEFAULT_TRAIN_RUN_NAME,
     LEFT_ARM,
     LEFT_GRIPPER,
-    get_model_embodiment,
+    get_model_embodiments,
 )
 
 
@@ -133,7 +133,7 @@ def main():
     else:
         start_frame = int(args.start_frame)
 
-    embodiment = get_model_embodiment(args.train_run_name)
+    embodiment = get_model_embodiments(args.train_run_name)
 
     nc.login()
     nc.connect_robot(args.robot_name)

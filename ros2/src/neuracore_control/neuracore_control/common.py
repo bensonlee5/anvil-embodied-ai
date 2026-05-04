@@ -26,11 +26,7 @@ GRIPPER_HI = 0.05
 CMD_L_TOPIC = "/follower_l_forward_position_controller/commands"
 CMD_R_TOPIC = "/follower_r_forward_position_controller/commands"
 
-DEFAULT_CAMERA_TOPICS = [
-    "/cam_wrist_l/image_raw/compressed",
-    "/cam_waist/image_raw/compressed",
-    "/cam_chest/image_raw/compressed",
-]
+DEFAULT_CAMERA_TOPICS = [f"/{name}/image_raw/compressed" for name in CAMERAS]
 
 
 def header_time(msg) -> float:
@@ -55,15 +51,14 @@ def gripper_denormalize(value: float) -> float:
     return clamped * (GRIPPER_HI - GRIPPER_LO) + GRIPPER_LO
 
 
-def decode_compressed_image(
-    msg, size: tuple[int, int] = (640, 480)
-) -> np.ndarray:
+def decode_compressed_image(msg, size: tuple[int, int] = (640, 480)) -> np.ndarray:
     """CompressedImage (MJPEG/JPEG) → uint8 HxWx3 RGB, resized to (W, H)."""
     buf = np.frombuffer(msg.data, dtype=np.uint8)
     bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
     if bgr is None:
         raise ValueError("cv2.imdecode returned None")
-    bgr = cv2.resize(bgr, size, interpolation=cv2.INTER_AREA)
+    if bgr.shape[1::-1] != size:
+        bgr = cv2.resize(bgr, size, interpolation=cv2.INTER_AREA)
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
@@ -72,29 +67,16 @@ def camera_name_from_topic(topic: str) -> str:
     return topic.lstrip("/").split("/")[0]
 
 
-# Per-model embodiment descriptions — MUST match the training run that
-# produced the loaded checkpoint. Source for each entry: the
-# input_cross_embodiment_description / output_cross_embodiment_description
-# fields from `neuracore training inspect <name>` (the kit-block-dp*.txt
-# snapshots in this package). Inputs sort by int key to set observation
-# order; outputs use int keys as absolute tensor positions in the model's
-# prediction. Shared between the live ROS2 inference node and the offline
-# analysis script.
-#
-# To add a new trained run: copy its inspect output into a <name>.txt file,
-# transcribe the in/out descriptions into a new MODEL_EMBODIMENTS entry,
-# and pass that name as train_run_name to the inference node / scripts.
-
-
+# Per-model embodiment descriptions
 MODEL_EMBODIMENTS: dict[str, dict] = {
     "kit-block-dp": {
         "input": {
             DataType.JOINT_POSITIONS: {
-                2:  "follower_l_joint2",
-                4:  "follower_l_joint7",
-                5:  "follower_l_joint1",
-                6:  "follower_l_joint4",
-                7:  "follower_l_joint3",
+                2: "follower_l_joint2",
+                4: "follower_l_joint7",
+                5: "follower_l_joint1",
+                6: "follower_l_joint4",
+                7: "follower_l_joint3",
                 11: "follower_l_joint5",
                 13: "follower_l_joint6",
             },
@@ -162,7 +144,7 @@ MODEL_EMBODIMENTS: dict[str, dict] = {
 DEFAULT_TRAIN_RUN_NAME = "kit-block-dp"
 
 
-def get_model_embodiment(train_run_name: str) -> dict:
+def get_model_embodiments(train_run_name: str) -> dict:
     """Return {'input': ..., 'output': ...} descriptions for a known training run."""
     try:
         return MODEL_EMBODIMENTS[train_run_name]

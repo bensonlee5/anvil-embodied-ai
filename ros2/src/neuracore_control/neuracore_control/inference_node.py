@@ -1,22 +1,13 @@
 #!/usr/bin/env python3
 
-"""ROS2 node: local Neuracore policy inference → arm position commands.
-
-Designed to run on a GPU PC, discover /joint_states + camera topics from the
-Robot PC over CycloneDDS, and publish 8-element Float64MultiArray (7 arm +
-1 gripper) commands back to the Robot PC's forward_position_controllers.
-
-Mirrors the logging schema used by anvil-workcell's neuracore_bridge data
-collector: joint names, gripper normalization (0..0.05m → [0, 1]), camera
-naming ('cam_wrist_l', etc.) all match, so a model trained from that
-collector's data runs here unchanged.
-"""
+"""ROS2 node: local Neuracore policy inference → arm position commands."""
 
 import csv
 import os
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime
+from pathlib import Path
 
 import cv2
 import neuracore as nc
@@ -33,16 +24,17 @@ from .common import (
     CMD_L_TOPIC,
     DEFAULT_CAMERA_TOPICS,
     DEFAULT_TRAIN_RUN_NAME,
-    GRIPPER_HI,
     LEFT_ARM,
     LEFT_GRIPPER,
     camera_name_from_topic,
     decode_compressed_image,
-    get_model_embodiment,
+    get_model_embodiments,
     gripper_denormalize,
     gripper_normalize,
     header_time,
 )
+
+DEFAULT_LOG_ROOT = Path(__file__).resolve().parents[1] / "logs"
 
 
 class NeuracoreInferenceNode(Node):
@@ -53,7 +45,6 @@ class NeuracoreInferenceNode(Node):
         self.get_logger().info("[neura-infer] startup")
 
         self.declare_parameter("robot_name", "anvil_openarm")
-        self.declare_parameter("urdf_path", "")
         self.declare_parameter("model_file", "")
         self.declare_parameter("train_run_name", "")
         self.declare_parameter("camera_topics", DEFAULT_CAMERA_TOPICS)
@@ -63,90 +54,68 @@ class NeuracoreInferenceNode(Node):
         self.declare_parameter("predictions_log", "")
         self.declare_parameter("device", "cuda")
         self.declare_parameter("image_log_chunks", 10)
-        self.declare_parameter("image_log_dir", "")
 
-        self._debug = (
-            self.get_parameter("debug").get_parameter_value().bool_value
-        )
+        self._debug = self.get_parameter("debug").get_parameter_value().bool_value
         self._max_joint_delta = float(
-            self.get_parameter("max_joint_delta")
-            .get_parameter_value()
-            .double_value
+            self.get_parameter("max_joint_delta").get_parameter_value().double_value
         )
-        self._device = (
-            self.get_parameter("device").get_parameter_value().string_value
-        ) or "cuda"
+        self._device = (self.get_parameter("device").get_parameter_value().string_value) or "cuda"
 
         self._predictions_file = None
         self._predictions_writer = None
+        log_param = self.get_parameter("predictions_log").get_parameter_value().string_value
         log_path = (
-            self.get_parameter("predictions_log")
-            .get_parameter_value()
-            .string_value
+            Path(log_param)
+            if log_param
+            else (DEFAULT_LOG_ROOT / f"predictions_{datetime.now():%Y%m%d_%H%M%S}.csv")
         )
-        if log_path:
-            os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
-            self._predictions_file = open(log_path, "w", newline="")
-            self._predictions_writer = csv.writer(self._predictions_file)
-            header = ["t", "chunk_id", "chunk_idx"]
-            header += [f"obs_{n}" for n in LEFT_ARM]
-            header += ["obs_grip"]
-            header += [f"out_{n}" for n in LEFT_ARM]
-            header += ["out_grip"]
-            self._predictions_writer.writerow(header)
-            self._predictions_file.flush()
-            self.get_logger().info(
-                f"[neura-infer] writing predictions to {log_path}"
-            )
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._predictions_file = log_path.open("w", newline="")
+        self._predictions_writer = csv.writer(self._predictions_file)
+        header = ["t", "chunk_id", "chunk_idx"]
+        header += LEFT_ARM
+        header += [LEFT_GRIPPER]
+        header += [f"pred_target_{n}" for n in LEFT_ARM]
+        header += [f"pred_target_{LEFT_GRIPPER}"]
+        header += [f"current_{n}" for n in LEFT_ARM]
+        header += [f"current_{LEFT_GRIPPER}"]
+        header += [f"cmd_{n}" for n in LEFT_ARM]
+        header += [f"cmd_{LEFT_GRIPPER}"]
+        self._predictions_writer.writerow(header)
+        self._predictions_file.flush()
+        self.get_logger().info(f"[neura-infer] writing predictions to {log_path}")
 
         # Image logging — bounded to first N chunks so disk doesn't blow up.
         # Written synchronously between chunks (~tens of ms total); negligible
-        # next to the multi-second predict() that just ran.
+        # next to the multi-second predict() that just ran
         self._image_log_chunks = int(
-            self.get_parameter("image_log_chunks")
-            .get_parameter_value()
-            .integer_value
+            self.get_parameter("image_log_chunks").get_parameter_value().integer_value
         )
-        self._image_log_dir = (
-            self.get_parameter("image_log_dir")
-            .get_parameter_value()
-            .string_value
-        )
+        self._image_log_dir = log_path.parent / "images"
+        self._image_log_prefix = log_path.stem
         if self._image_log_chunks > 0:
-            if not self._image_log_dir and log_path:
-                self._image_log_dir = os.path.splitext(log_path)[0] + "_images"
-            if not self._image_log_dir:
-                self.get_logger().warning(
-                    "[neura-infer] image_log_chunks > 0 but no image_log_dir "
-                    "or predictions_log set — disabling image logging"
-                )
-                self._image_log_chunks = 0
-            else:
-                os.makedirs(self._image_log_dir, exist_ok=True)
-                self.get_logger().info(
-                    f"[neura-infer] saving images for first "
-                    f"{self._image_log_chunks} chunks to {self._image_log_dir}"
-                )
+            self._image_log_dir.mkdir(parents=True, exist_ok=True)
+            self.get_logger().info(
+                f"[neura-infer] saving images for first "
+                f"{self._image_log_chunks} chunks to {self._image_log_dir}/"
+                f"{self._image_log_prefix}_chunk_*_<cam>.jpg"
+            )
 
         self._policy = None
         self._chunk_id = -1
-        self._chunk_obs_arm: Optional[np.ndarray] = None
-        self._chunk_obs_grip: float = float("nan")
-        self._latest_joint_state: Optional[Tuple[float, JointState]] = None
-        self._latest_frames: Dict[str, Tuple[float, np.ndarray]] = {}
+        self._obs_arm: np.ndarray | None = None
+        self._obs_grip: float = float("nan")
+        self._latest_joint_state_msg: tuple[float, JointState] | None = None
+        self._latest_cam_msgs: dict[str, tuple[float, CompressedImage]] = {}
         self._tick_count = 0
 
-        self._camera_topics: List[str] = list(
-            self.get_parameter("camera_topics")
-            .get_parameter_value()
-            .string_array_value
+        self._camera_topics: list[str] = list(
+            self.get_parameter("camera_topics").get_parameter_value().string_array_value
         )
-        self._camera_names: List[str] = [
-            camera_name_from_topic(t) for t in self._camera_topics
-        ]
+        self._camera_names: list[str] = [camera_name_from_topic(t) for t in self._camera_topics]
 
-        self._arm_joints = LEFT_ARM
-        self._gripper_joints = [LEFT_GRIPPER]
+        self._arm_joint_namess = LEFT_ARM
+        self._gripper_joint_names = [LEFT_GRIPPER]
 
         if not self._init_neuracore():
             raise RuntimeError("[neura-infer] neuracore init failed — aborting")
@@ -156,9 +125,7 @@ class NeuracoreInferenceNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
-        self.create_subscription(
-            JointState, "/joint_states", self._on_joint_state, sensor_qos
-        )
+        self.create_subscription(JointState, "/joint_states", self._on_joint_state, sensor_qos)
         self.get_logger().info("[neura-infer] subscribed: /joint_states")
         for topic in self._camera_topics:
             self.create_subscription(
@@ -171,28 +138,14 @@ class NeuracoreInferenceNode(Node):
 
         self._cmd_l_pub = self.create_publisher(Float64MultiArray, CMD_L_TOPIC, 10)
 
-        model_file = (
-            self.get_parameter("model_file").get_parameter_value().string_value
-        )
-        train_run_name = (
-            self.get_parameter("train_run_name")
-            .get_parameter_value()
-            .string_value
-        )
-        err = self._load_policy(model_file, train_run_name)
-        if err is not None:
-            raise RuntimeError(f"[neura-infer] {err}")
+        model_file = self.get_parameter("model_file").get_parameter_value().string_value
+        train_run_name = self.get_parameter("train_run_name").get_parameter_value().string_value
+        self._load_policy(model_file, train_run_name)
 
         self._rate = float(
-            self.get_parameter("inference_rate_hz")
-            .get_parameter_value()
-            .double_value
+            self.get_parameter("inference_rate_hz").get_parameter_value().double_value
         )
-        self.get_logger().info(
-            f"[neura-infer] ready; will run inference loop @ {self._rate} Hz"
-        )
-
-    # ----------------------------------------------------------------- init
+        self.get_logger().info(f"[neura-infer] ready; will run inference loop @ {self._rate} Hz")
 
     def _init_neuracore(self) -> bool:
         api_key = os.environ.get("NEURACORE_API_KEY", "")
@@ -205,112 +158,88 @@ class NeuracoreInferenceNode(Node):
             self.get_logger().error(f"[neura-infer] login failed: {e}")
             return False
 
-        robot_name = (
-            self.get_parameter("robot_name").get_parameter_value().string_value
-        )
-        urdf_path = (
-            self.get_parameter("urdf_path").get_parameter_value().string_value
-        )
-        self.get_logger().info(
-            f"[neura-infer] connecting robot '{robot_name}' (urdf='{urdf_path}')"
-        )
+        robot_name = self.get_parameter("robot_name").get_parameter_value().string_value
+        self.get_logger().info(f"[neura-infer] connecting robot '{robot_name}'")
         try:
-            if urdf_path:
-                nc.connect_robot(robot_name, urdf_path=urdf_path)
-            else:
-                nc.connect_robot(robot_name)
+            nc.connect_robot(robot_name)
         except Exception as e:
             self.get_logger().error(f"[neura-infer] connect_robot failed: {e}")
             return False
         return True
 
-    def _load_policy(self, model_file: str, train_run_name: str) -> Optional[str]:
+    def _load_policy(self, model_file: str, train_run_name: str) -> None:
         if not model_file and not train_run_name:
-            return "no model_file or train_run_name configured"
+            raise ValueError("no model_file or train_run_name configured")
 
-        # Embodiment descriptions are model-specific and must match the trained
-        # checkpoint. With model_file alone the user still picks which run's
-        # descriptions to use; fall back to the default with a warning.
-        lookup_name = train_run_name or DEFAULT_TRAIN_RUN_NAME
-        if not train_run_name:
+        descriptions_run = train_run_name or DEFAULT_TRAIN_RUN_NAME
+        if model_file and not train_run_name:
             self.get_logger().warning(
                 f"[neura-infer] train_run_name not set; using "
                 f"'{DEFAULT_TRAIN_RUN_NAME}' embodiment descriptions for the "
                 f"local model_file. Set train_run_name explicitly if the "
                 f"checkpoint came from a different run."
             )
-        try:
-            embodiment = get_model_embodiment(lookup_name)
-        except ValueError as e:
-            return str(e)
+        embodiments = get_model_embodiments(descriptions_run)
 
-        if model_file:
-            src = f"model_file={model_file}"
-        else:
-            src = f"train_run_name={train_run_name}"
-
+        src = f"model_file={model_file}" if model_file else f"train_run_name={train_run_name}"
         self.get_logger().info(
-            f"[neura-infer] loading policy ({src}) on device={self._device}"
+            f"[neura-infer] loading policy ({src}, descriptions={descriptions_run}) "
+            f"on device={self._device}"
         )
         t0 = time.perf_counter()
-        try:
-            self._policy = nc.policy(
-                input_embodiment_description=embodiment["input"],
-                output_embodiment_description=embodiment["output"],
-                model_file=model_file or None,
-                train_run_name=train_run_name or None,
-                device=self._device,
-            )
-        except Exception as e:
-            return f"policy load failed: {e}"
-        self.get_logger().info(
-            f"[neura-infer] policy loaded in {time.perf_counter() - t0:.2f}s"
+        self._policy = nc.policy(
+            input_embodiment_description=embodiments["input"],
+            output_embodiment_description=embodiments["output"],
+            model_file=model_file or None,
+            train_run_name=None if model_file else train_run_name,
+            device=self._device,
         )
-        return None
-
-    # ------------------------------------------------------------ callbacks
+        self.get_logger().info(f"[neura-infer] policy loaded in {time.perf_counter() - t0:.2f}s")
 
     def _on_joint_state(self, msg: JointState) -> None:
-        self._latest_joint_state = (header_time(msg), msg)
+        self._latest_joint_state_msg = (header_time(msg), msg)
 
     def _on_camera(self, msg: CompressedImage, topic: str) -> None:
-        cam_name = camera_name_from_topic(topic)
-        try:
-            rgb = decode_compressed_image(msg, size=(640, 480))
-        except Exception as e:
-            self.get_logger().warning(
-                f"[neura-infer] decode {cam_name} failed: {e}",
-                throttle_duration_sec=10.0,
-            )
-            return
-        self._latest_frames[cam_name] = (header_time(msg), rgb)
+        self._latest_cam_msgs[camera_name_from_topic(topic)] = (header_time(msg), msg)
 
-    # ----------------------------------------------------------- inference
+    def _decode_frames(
+        self, cam_msgs: dict[str, tuple[float, CompressedImage]]
+    ) -> dict[str, tuple[float, np.ndarray]]:
+        out: dict[str, tuple[float, np.ndarray]] = {}
+        for cam_name, (t, msg) in cam_msgs.items():
+            try:
+                out[cam_name] = (t, decode_compressed_image(msg))
+            except Exception as e:
+                self.get_logger().warning(
+                    f"[neura-infer] decode {cam_name} failed: {e}",
+                    throttle_duration_sec=10.0,
+                )
+        return out
 
     def run_inference(self) -> None:
-        """Synchronous inference loop: predict → play 100 actions @ rate → repeat.
-
-        Runs in the main thread; ROS callbacks (joint state, cameras) run on a
-        separate spin thread so they keep flowing even while predict() blocks.
-        """
+        """Synchronous inference loop: predict → play n actions @ rate → repeat."""
         period = 1.0 / self._rate
         self.get_logger().info(
-            f"[neura-infer] inference loop starting (period={period*1e3:.1f} ms)"
+            f"[neura-infer] inference loop starting (period={period * 1e3:.1f} ms)"
         )
 
         while rclpy.ok():
             if self._policy is None:
+                self.get_logger().info("Policy not loaded yet, sleeping")
                 time.sleep(0.1)
                 continue
 
-            if self._latest_joint_state is None:
+            js_snapshot = self._latest_joint_state_msg
+            cam_snapshot = dict(self._latest_cam_msgs)
+
+            if js_snapshot is None:
                 self.get_logger().warning(
                     "[neura-infer] waiting for /joint_states",
                     throttle_duration_sec=5.0,
                 )
                 time.sleep(0.1)
                 continue
-            missing = [n for n in self._camera_names if n not in self._latest_frames]
+            missing = [n for n in self._camera_names if n not in cam_snapshot]
             if missing:
                 self.get_logger().warning(
                     f"[neura-infer] waiting for cameras: {missing}",
@@ -319,8 +248,9 @@ class NeuracoreInferenceNode(Node):
                 time.sleep(0.1)
                 continue
 
+            decoded_frames = self._decode_frames(cam_snapshot)
             try:
-                self._log_observations()
+                self._log_observations(js_snapshot, decoded_frames)
             except Exception as e:
                 self.get_logger().warning(
                     f"[neura-infer] log observations failed: {e}",
@@ -329,23 +259,15 @@ class NeuracoreInferenceNode(Node):
                 time.sleep(0.1)
                 continue
 
-            self._chunk_obs_arm = self._current_arm_positions()
-            grip_raw = self._current_gripper_position()
-            self._chunk_obs_grip = (
-                gripper_normalize(grip_raw)
-                if not np.isnan(grip_raw)
-                else float("nan")
-            )
             self._chunk_id += 1
 
+            self._obs_arm = self._arm_positions_from(js_snapshot)
+            grip_raw = self._gripper_position_from(js_snapshot)
+            self._obs_grip = gripper_normalize(grip_raw) if not np.isnan(grip_raw) else float("nan")
+
             # Save the camera frames that fed this predict (bounded; sync).
-            if (
-                self._image_log_chunks > 0
-                and self._chunk_id < self._image_log_chunks
-            ):
-                self._write_chunk_images(
-                    self._chunk_id, dict(self._latest_frames)
-                )
+            if self._image_log_chunks > 0 and self._chunk_id < self._image_log_chunks:
+                self._write_chunk_images(self._chunk_id, decoded_frames)
 
             try:
                 chunk = self._predict_chunk()
@@ -376,109 +298,90 @@ class NeuracoreInferenceNode(Node):
                 f"({len(chunk)} actions played, {self._tick_count} total ticks)"
             )
 
-    def _log_observations(self) -> None:
-        js_snapshot = self._latest_joint_state
-        frames_snapshot = dict(self._latest_frames)
-        if js_snapshot is None:
-            return
-        js_t, js = js_snapshot
-        positions: Dict[str, float] = {}
-        grippers: Dict[str, float] = {}
+    def _log_observations(
+        self,
+        joint_state: tuple[float, JointState],
+        decoded_frames: dict[str, tuple[float, np.ndarray]],
+    ) -> None:
+        js_t, js = joint_state
+        positions: dict[str, float] = {}
+        grippers: dict[str, float] = {}
         for i, name in enumerate(js.name):
             if i >= len(js.position):
                 continue
-            if name in self._gripper_joints:
+            if name in self._gripper_joint_names:
                 grippers[name] = float(js.position[i])
-            elif name in self._arm_joints:
+            elif name in self._arm_joint_namess:
                 positions[name] = float(js.position[i])
 
         if positions:
             nc.log_joint_positions(positions, timestamp=js_t)
-        for name, raw in grippers.items():
-            nc.log_parallel_gripper_open_amount(
-                name, gripper_normalize(raw), timestamp=js_t
+        if grippers:
+            nc.log_parallel_gripper_open_amounts(
+                {name: gripper_normalize(raw) for name, raw in grippers.items()},
+                timestamp=js_t,
             )
-        for cam_name, (t, rgb) in frames_snapshot.items():
+        for cam_name, (t, rgb) in decoded_frames.items():
             nc.log_rgb(cam_name, rgb, timestamp=t)
 
     def _predict_chunk(self) -> np.ndarray:
-        """Run policy and return (horizon, n_arm + n_grippers) array."""
         t0 = time.perf_counter()
         preds = self._policy.predict(timeout=5)
         predict_ms = (time.perf_counter() - t0) * 1e3
 
-        joint_preds = preds[DataType.JOINT_TARGET_POSITIONS]
-        arm_tensors = [joint_preds[n].value for n in self._arm_joints]
-        arm = torch.cat(arm_tensors, dim=2)[0]  # (horizon, n_arm)
-
-        grip_preds = preds.get(DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS, {})
-        if grip_preds:
-            grip_tensors = [grip_preds[n].open_amount for n in self._gripper_joints]
-            grip = torch.cat(grip_tensors, dim=2)[0]
-            out = torch.cat([arm, grip], dim=1)
-        else:
-            out = arm
-
+        j = preds[DataType.JOINT_TARGET_POSITIONS]
+        g = preds[DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS]
+        arm = torch.cat([j[n].value for n in self._arm_joint_namess], dim=2)[0]
+        grip = torch.cat([g[n].open_amount for n in self._gripper_joint_names], dim=2)[0]
+        out = torch.cat([arm, grip], dim=1)
         chunk = out.detach().cpu().numpy().astype(np.float64)
         self.get_logger().info(
             f"[neura-infer] predict ok: {predict_ms:.1f}ms, horizon={chunk.shape[0]}"
         )
         return chunk
 
-    def _current_arm_positions(self) -> Optional[np.ndarray]:
-        if self._latest_joint_state is None:
+    def _arm_positions_from(
+        self, joint_state: tuple[float, JointState] | None
+    ) -> np.ndarray | None:
+        if joint_state is None:
             return None
-        _, js = self._latest_joint_state
+        _, js = joint_state
         lookup = {n: p for n, p in zip(js.name, js.position)}
         try:
-            return np.array([lookup[n] for n in self._arm_joints], dtype=np.float64)
+            return np.array([lookup[n] for n in self._arm_joint_namess], dtype=np.float64)
         except KeyError:
             return None
 
-    def _current_gripper_position(self) -> float:
-        if self._latest_joint_state is None or not self._gripper_joints:
+    def _gripper_position_from(self, joint_state: tuple[float, JointState] | None) -> float:
+        if joint_state is None or not self._gripper_joint_names:
             return float("nan")
-        _, js = self._latest_joint_state
+        _, js = joint_state
         for name, pos in zip(js.name, js.position):
-            if name == self._gripper_joints[0]:
+            if name == self._gripper_joint_names[0]:
                 return float(pos)
         return float("nan")
 
     def _publish_commands(self, action: np.ndarray, chunk_idx: int) -> None:
-        n_arm = len(self._arm_joints)
+        n_arm = len(self._arm_joint_namess)
+        expected = n_arm + len(self._gripper_joint_names)
+        if action.shape[0] != expected:
+            raise ValueError(
+                f"action length {action.shape[0]} != expected {expected} "
+                f"(n_arm={n_arm}, n_grip={len(self._gripper_joint_names)})"
+            )
 
         # Raw policy output (before any clamp / denormalization).
         target_arm = action[:n_arm]
-        if action.shape[0] >= n_arm + 1:
-            left_grip_norm = float(action[n_arm])
-            left_grip_raw = gripper_denormalize(left_grip_norm)
-        else:
-            left_grip_norm = float("nan")
-            left_grip_raw = GRIPPER_HI
-
-        # CSV: always the raw action, regardless of clamp / debug.
-        if self._predictions_writer is not None and self._predictions_file is not None:
-            obs_arm_row = (
-                self._chunk_obs_arm.tolist()
-                if self._chunk_obs_arm is not None
-                else [float("nan")] * n_arm
-            )
-            row = [time.time(), self._chunk_id, chunk_idx]
-            row += obs_arm_row
-            row += [self._chunk_obs_grip]
-            row += target_arm.tolist()
-            row += [left_grip_norm]
-            self._predictions_writer.writerow(row)
-            self._predictions_file.flush()
+        left_grip_norm = float(action[n_arm])
+        left_grip_raw = gripper_denormalize(left_grip_norm)
 
         # Apply delta-clamp on top of the raw action to get the safe command.
-        current_arm = self._current_arm_positions()
+        latest_js = self._latest_joint_state_msg
+        current_arm = self._arm_positions_from(latest_js)
         if current_arm is not None and len(current_arm) == n_arm:
             raw_delta = target_arm - current_arm
             clamped = int(np.sum(np.abs(raw_delta) > self._max_joint_delta))
-            limited = np.clip(
-                raw_delta, -self._max_joint_delta, self._max_joint_delta
-            )
+            limited = np.clip(raw_delta, -self._max_joint_delta, self._max_joint_delta)
             safe_arm = (current_arm + limited).tolist()
             if clamped:
                 self.get_logger().warning(
@@ -488,6 +391,26 @@ class NeuracoreInferenceNode(Node):
                 )
         else:
             safe_arm = target_arm.tolist()
+
+        grip_raw = self._gripper_position_from(latest_js)
+        current_grip_norm = gripper_normalize(grip_raw) if not np.isnan(grip_raw) else float("nan")
+
+        # CSV: pred (raw model output) + current (this tick) + cmd (post-clamp).
+        if self._predictions_writer is not None and self._predictions_file is not None:
+            nan_arm = [float("nan")] * n_arm
+            obs_arm_row = self._obs_arm.tolist() if self._obs_arm is not None else nan_arm
+            current_arm_row = (
+                current_arm.tolist()
+                if current_arm is not None and len(current_arm) == n_arm
+                else nan_arm
+            )
+            row = [time.time(), self._chunk_id, chunk_idx]
+            row += obs_arm_row + [self._obs_grip]
+            row += target_arm.tolist() + [left_grip_norm]
+            row += current_arm_row + [current_grip_norm]
+            row += safe_arm + [left_grip_norm]  # gripper has no clamp
+            self._predictions_writer.writerow(row)
+            self._predictions_file.flush()
 
         if self._debug:
             self.get_logger().info(
@@ -502,28 +425,22 @@ class NeuracoreInferenceNode(Node):
         msg_l.data = safe_arm + [left_grip_raw]
         self._cmd_l_pub.publish(msg_l)
 
-    # ------------------------------------------------------------- image log
-
     def _write_chunk_images(
-        self, chunk_id: int, frames: Dict[str, Tuple[float, np.ndarray]]
+        self, chunk_id: int, frames: dict[str, tuple[float, np.ndarray]]
     ) -> None:
         """Save the camera frames that fed predict() for this chunk."""
-        chunk_dir = os.path.join(self._image_log_dir, f"chunk_{chunk_id:04d}")
         try:
-            os.makedirs(chunk_dir, exist_ok=True)
             for cam_name, (_, rgb) in frames.items():
                 bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-                cv2.imwrite(os.path.join(chunk_dir, f"{cam_name}.jpg"), bgr)
+                fname = f"{self._image_log_prefix}_chunk_{chunk_id:04d}_{cam_name}.jpg"
+                cv2.imwrite(str(self._image_log_dir / fname), bgr)
             self.get_logger().info(
-                f"[neura-infer] wrote {len(frames)} images for "
-                f"chunk {chunk_id} -> {chunk_dir}"
+                f"[neura-infer] wrote {len(frames)} images for chunk {chunk_id} "
+                f"-> {self._image_log_dir}/{self._image_log_prefix}_chunk_"
+                f"{chunk_id:04d}_*.jpg"
             )
         except Exception as e:
-            self.get_logger().warning(
-                f"[neura-infer] image write for chunk {chunk_id} failed: {e}"
-            )
-
-    # ------------------------------------------------------------ shutdown
+            self.get_logger().warning(f"[neura-infer] image write for chunk {chunk_id} failed: {e}")
 
     def destroy_node(self) -> None:
         self.get_logger().info("[neura-infer] destroy_node")
