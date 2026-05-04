@@ -32,11 +32,13 @@ from std_msgs.msg import Float64MultiArray
 from .common import (
     CMD_L_TOPIC,
     DEFAULT_CAMERA_TOPICS,
+    DEFAULT_TRAIN_RUN_NAME,
     GRIPPER_HI,
     LEFT_ARM,
     LEFT_GRIPPER,
     camera_name_from_topic,
     decode_compressed_image,
+    get_model_embodiment,
     gripper_denormalize,
     gripper_normalize,
     header_time,
@@ -146,45 +148,6 @@ class NeuracoreInferenceNode(Node):
         self._arm_joints = LEFT_ARM
         self._gripper_joints = [LEFT_GRIPPER]
 
-        # Embodiment descriptions — MUST match the training run that produced
-        # the loaded checkpoint. Source: `neuracore training inspect <name>`,
-        # input_cross_embodiment_description / output_cross_embodiment_description.
-        # Inputs sort by int key to set observation order; outputs use int keys
-        # as absolute tensor positions in the model's prediction.
-        self._input_desc = {
-            DataType.JOINT_POSITIONS: {
-                2:  "follower_l_joint2",
-                4:  "follower_l_joint7",
-                5:  "follower_l_joint1",
-                6:  "follower_l_joint4",
-                7:  "follower_l_joint3",
-                11: "follower_l_joint5",
-                13: "follower_l_joint6",
-            },
-            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: {
-                0: "follower_l_finger_joint1",
-            },
-            DataType.RGB_IMAGES: {
-                0: "cam_wrist_l",
-                1: "cam_waist",
-                2: "cam_chest",
-            },
-        }
-        self._output_desc = {
-            DataType.JOINT_TARGET_POSITIONS: {
-                0: "follower_l_joint2",
-                1: "follower_l_joint1",
-                2: "follower_l_joint7",
-                3: "follower_l_joint4",
-                4: "follower_l_joint3",
-                5: "follower_l_joint5",
-                6: "follower_l_joint6",
-            },
-            DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS: {
-                0: "follower_l_finger_joint1",
-            },
-        }
-
         if not self._init_neuracore():
             raise RuntimeError("[neura-infer] neuracore init failed — aborting")
 
@@ -265,6 +228,22 @@ class NeuracoreInferenceNode(Node):
         if not model_file and not train_run_name:
             return "no model_file or train_run_name configured"
 
+        # Embodiment descriptions are model-specific and must match the trained
+        # checkpoint. With model_file alone the user still picks which run's
+        # descriptions to use; fall back to the default with a warning.
+        lookup_name = train_run_name or DEFAULT_TRAIN_RUN_NAME
+        if not train_run_name:
+            self.get_logger().warning(
+                f"[neura-infer] train_run_name not set; using "
+                f"'{DEFAULT_TRAIN_RUN_NAME}' embodiment descriptions for the "
+                f"local model_file. Set train_run_name explicitly if the "
+                f"checkpoint came from a different run."
+            )
+        try:
+            embodiment = get_model_embodiment(lookup_name)
+        except ValueError as e:
+            return str(e)
+
         if model_file:
             src = f"model_file={model_file}"
         else:
@@ -276,8 +255,8 @@ class NeuracoreInferenceNode(Node):
         t0 = time.perf_counter()
         try:
             self._policy = nc.policy(
-                input_embodiment_description=self._input_desc,
-                output_embodiment_description=self._output_desc,
+                input_embodiment_description=embodiment["input"],
+                output_embodiment_description=embodiment["output"],
                 model_file=model_file or None,
                 train_run_name=train_run_name or None,
                 device=self._device,
