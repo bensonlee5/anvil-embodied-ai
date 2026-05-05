@@ -291,6 +291,10 @@ class NeuracoreInferenceNode(Node):
                 if sleep_for > 0:
                     time.sleep(sleep_for)
                 else:
+                    self.get_logger().warning(
+                        f"[neura-infer] tick overrun by {-sleep_for * 1e3:.1f}ms; resyncing",
+                        throttle_duration_sec=2.0,
+                    )
                     next_t = time.monotonic()  # we're behind; resync clock
 
             self.get_logger().info(
