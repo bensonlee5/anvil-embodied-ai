@@ -85,6 +85,23 @@ def generate_launch_description():
             "Defaults to $NEURACORE_IMAGE_LOG_CHUNKS or 10."
         ),
     )
+    image_log_individual_arg = DeclareLaunchArgument(
+        "image_log_individual",
+        default_value=os.environ.get("NEURACORE_IMAGE_LOG_INDIVIDUAL", "true"),
+        description=(
+            "If true, write one JPEG per camera per logged chunk. "
+            "Defaults to $NEURACORE_IMAGE_LOG_INDIVIDUAL or true."
+        ),
+    )
+    image_log_stitched_arg = DeclareLaunchArgument(
+        "image_log_stitched",
+        default_value=os.environ.get("NEURACORE_IMAGE_LOG_STITCHED", "true"),
+        description=(
+            "If true, write one horizontally-stitched JPEG per logged chunk "
+            "(cameras concatenated in subscription order). "
+            "Defaults to $NEURACORE_IMAGE_LOG_STITCHED or true."
+        ),
+    )
 
     inference_node = Node(
         package="neuracore_control",
@@ -102,6 +119,8 @@ def generate_launch_description():
                 "predictions_log": LaunchConfiguration("predictions_log"),
                 "device": LaunchConfiguration("device"),
                 "image_log_chunks": LaunchConfiguration("image_log_chunks"),
+                "image_log_individual": LaunchConfiguration("image_log_individual"),
+                "image_log_stitched": LaunchConfiguration("image_log_stitched"),
             }
         ],
     )
@@ -117,6 +136,8 @@ def generate_launch_description():
             predictions_log_arg,
             device_arg,
             image_log_chunks_arg,
+            image_log_individual_arg,
+            image_log_stitched_arg,
             inference_node,
         ]
     )

@@ -17,7 +17,9 @@ from neuracore_types import DataType, JointData, RGBCameraData
 
 import neuracore as nc
 
-from neuracore_control.common import CAMERAS, LEFT_ARM, LEFT_GRIPPER
+from PIL import Image
+
+from neuracore_control.common import CAMERAS, LEFT_ARM, LEFT_GRIPPER, stitch_frames
 
 
 def visualize_episode(
@@ -120,6 +122,16 @@ def main():
     ap.add_argument(
         "--episode-idx", type=int, default=0, help="Which episode in the dataset to download"
     )
+    ap.add_argument(
+        "--no-individual",
+        action="store_true",
+        help="Skip per-camera frame JPEGs (default: save them).",
+    )
+    ap.add_argument(
+        "--no-stitched",
+        action="store_true",
+        help="Skip horizontally-stitched JPEGs (default: save them).",
+    )
     args = ap.parse_args()
 
     nc.login()
@@ -147,8 +159,12 @@ def main():
     data_dir = Path(__file__).resolve().parent / "data"
     episode_dir = data_dir / f"episode_{args.episode_idx:03d}"
     images_dir = episode_dir / "images"
-    for cam in CAMERAS:
-        (images_dir / cam).mkdir(parents=True, exist_ok=True)
+    stitched_dir = episode_dir / "images_stitched"
+    if not args.no_individual:
+        for cam in CAMERAS:
+            (images_dir / cam).mkdir(parents=True, exist_ok=True)
+    if not args.no_stitched:
+        stitched_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Streaming episode {args.episode_idx} from dataset '{args.dataset}'")
     episode = synced_dataset[args.episode_idx]
@@ -183,12 +199,23 @@ def main():
             camera_data.append(step[DataType.RGB_IMAGES])
             timestamps.append(step.timestamp)
 
-            for cam, cam_data in step[DataType.RGB_IMAGES].items():
-                cam_data.frame.save(
-                    images_dir / cam / f"frame_{i:04d}.jpg", quality=95
+            rgb_step = step[DataType.RGB_IMAGES]
+            if not args.no_individual:
+                for cam, cam_data in rgb_step.items():
+                    cam_data.frame.save(
+                        images_dir / cam / f"frame_{i:04d}.jpg", quality=95
+                    )
+            if not args.no_stitched:
+                ordered_frames = [np.asarray(rgb_step[cam].frame) for cam in CAMERAS]
+                stitched = stitch_frames(ordered_frames)
+                Image.fromarray(stitched).save(
+                    stitched_dir / f"frame_{i:04d}.jpg", quality=95
                 )
 
-    print(f"saved {len(timestamps)} frames per camera to {images_dir}")
+    if not args.no_individual:
+        print(f"saved {len(timestamps)} frames per camera to {images_dir}")
+    if not args.no_stitched:
+        print(f"saved {len(timestamps)} stitched frames to {stitched_dir}")
     print(f"saved observations to {obs_path}")
     print(f"saved targets to {tgt_path}")
 

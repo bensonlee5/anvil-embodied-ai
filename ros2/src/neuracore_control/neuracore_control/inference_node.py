@@ -32,6 +32,7 @@ from .common import (
     gripper_denormalize,
     gripper_normalize,
     header_time,
+    stitch_frames,
 )
 
 DEFAULT_LOG_ROOT = Path(__file__).resolve().parents[1] / "logs"
@@ -54,6 +55,8 @@ class NeuracoreInferenceNode(Node):
         self.declare_parameter("predictions_log", "")
         self.declare_parameter("device", "cuda")
         self.declare_parameter("image_log_chunks", 10)
+        self.declare_parameter("image_log_individual", True)
+        self.declare_parameter("image_log_stitched", True)
 
         self._debug = self.get_parameter("debug").get_parameter_value().bool_value
         self._max_joint_delta = float(
@@ -91,14 +94,25 @@ class NeuracoreInferenceNode(Node):
         self._image_log_chunks = int(
             self.get_parameter("image_log_chunks").get_parameter_value().integer_value
         )
+        self._image_log_individual = bool(
+            self.get_parameter("image_log_individual").get_parameter_value().bool_value
+        )
+        self._image_log_stitched = bool(
+            self.get_parameter("image_log_stitched").get_parameter_value().bool_value
+        )
         self._image_log_dir = log_path.parent / "images"
         self._image_log_prefix = log_path.stem
-        if self._image_log_chunks > 0:
+        if self._image_log_chunks > 0 and (self._image_log_individual or self._image_log_stitched):
             self._image_log_dir.mkdir(parents=True, exist_ok=True)
+            modes = []
+            if self._image_log_individual:
+                modes.append("per-cam")
+            if self._image_log_stitched:
+                modes.append("stitched")
             self.get_logger().info(
-                f"[neura-infer] saving images for first "
+                f"[neura-infer] saving images ({'+'.join(modes)}) for first "
                 f"{self._image_log_chunks} chunks to {self._image_log_dir}/"
-                f"{self._image_log_prefix}_chunk_*_<cam>.jpg"
+                f"{self._image_log_prefix}_chunk_*.jpg"
             )
 
         self._policy = None
@@ -266,7 +280,11 @@ class NeuracoreInferenceNode(Node):
             self._obs_grip = gripper_normalize(grip_raw) if not np.isnan(grip_raw) else float("nan")
 
             # Save the camera frames that fed this predict (bounded; sync).
-            if self._image_log_chunks > 0 and self._chunk_id < self._image_log_chunks:
+            if (
+                self._image_log_chunks > 0
+                and self._chunk_id < self._image_log_chunks
+                and (self._image_log_individual or self._image_log_stitched)
+            ):
                 self._write_chunk_images(self._chunk_id, decoded_frames)
 
             try:
@@ -434,12 +452,28 @@ class NeuracoreInferenceNode(Node):
     ) -> None:
         """Save the camera frames that fed predict() for this chunk."""
         try:
-            for cam_name, (_, rgb) in frames.items():
-                bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-                fname = f"{self._image_log_prefix}_chunk_{chunk_id:04d}_{cam_name}.jpg"
+            written = 0
+            if self._image_log_individual:
+                for cam_name, (_, rgb) in frames.items():
+                    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                    fname = f"{self._image_log_prefix}_chunk_{chunk_id:04d}_{cam_name}.jpg"
+                    cv2.imwrite(str(self._image_log_dir / fname), bgr)
+                    written += 1
+            if self._image_log_stitched:
+                ordered: list[np.ndarray] = []
+                for cam_name in self._camera_names:
+                    entry = frames.get(cam_name)
+                    if entry is None:
+                        ordered.append(np.zeros((480, 640, 3), dtype=np.uint8))
+                    else:
+                        ordered.append(entry[1])
+                stitched = stitch_frames(ordered)
+                bgr = cv2.cvtColor(stitched, cv2.COLOR_RGB2BGR)
+                fname = f"{self._image_log_prefix}_chunk_{chunk_id:04d}_stitched.jpg"
                 cv2.imwrite(str(self._image_log_dir / fname), bgr)
+                written += 1
             self.get_logger().info(
-                f"[neura-infer] wrote {len(frames)} images for chunk {chunk_id} "
+                f"[neura-infer] wrote {written} image(s) for chunk {chunk_id} "
                 f"-> {self._image_log_dir}/{self._image_log_prefix}_chunk_"
                 f"{chunk_id:04d}_*.jpg"
             )

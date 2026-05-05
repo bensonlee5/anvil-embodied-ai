@@ -67,6 +67,21 @@ def camera_name_from_topic(topic: str) -> str:
     return topic.lstrip("/").split("/")[0]
 
 
+def stitch_frames(frames: list[np.ndarray]) -> np.ndarray:
+    """Horizontally concatenate RGB frames; resize each to the first frame's height."""
+    if not frames:
+        raise ValueError("stitch_frames: empty frame list")
+    h = frames[0].shape[0]
+    aligned = []
+    for f in frames:
+        if f.shape[0] != h:
+            scale = h / f.shape[0]
+            new_w = max(1, int(round(f.shape[1] * scale)))
+            f = cv2.resize(f, (new_w, h), interpolation=cv2.INTER_AREA)
+        aligned.append(f)
+    return np.hstack(aligned)
+
+
 # Per-model embodiment descriptions
 MODEL_EMBODIMENTS: dict[str, dict] = {
     "kit-block-dp": {
@@ -141,7 +156,7 @@ MODEL_EMBODIMENTS: dict[str, dict] = {
     },
 }
 
-DEFAULT_TRAIN_RUN_NAME = "kit-block-dp"
+DEFAULT_TRAIN_RUN_NAME = "kit-block-dp-attempt2"
 
 
 def get_model_embodiments(train_run_name: str) -> dict:
