@@ -15,7 +15,7 @@
 <p align="center">
   <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.12+-yellow?style=flat-square&logo=python&logoColor=white" alt="Python" /></a>
   <a href="https://docs.ros.org/en/jazzy/"><img src="https://img.shields.io/badge/ROS2-Jazzy-22314E?style=flat-square&logo=ros&logoColor=white" alt="ROS2" /></a>
-  <a href="https://github.com/huggingface/lerobot"><img src="https://img.shields.io/badge/LeRobot-v0.5.0-ff69b4?style=flat-square&logo=huggingface&logoColor=white" alt="LeRobot" /></a>
+  <a href="https://github.com/huggingface/lerobot"><img src="https://img.shields.io/badge/LeRobot-v0.5.1-ff69b4?style=flat-square&logo=huggingface&logoColor=white" alt="LeRobot" /></a>
 </p>
 
 ---
@@ -32,27 +32,38 @@ This repository is the embodied AI stack for the Anvil platform — data convers
 └──────────────────────────────┘    └──────────────────────────────────────────────────────────┘
 ```
 
-### The Full Pipeline
+| Stage | Description |
+|-------|-------------|
+| **0. Data Collection** | Record teleoperation demos as MCAP files via [Anvil Devbox](https://shop.anvil.bot/products/anvil-devbox) |
+| **1. Data Conversion** | Convert MCAP recordings to LeRobot v3.0 datasets |
+| **2. Model Training** | Train ACT, Diffusion, SmolVLA, Pi0, or Pi0.5 policies |
+| **3. Offline Evaluation** | Validate model performance against ground-truth before deploying |
+| **4. Run Inference** | Deploy trained models on a GPU PC via ROS2 CycloneDDS |
 
-| Stage                        | Description                                                                                                      |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| **0. Data Collection** | Record teleoperation demos as ROS2 MCAP files through[ Anvil Devbox](https://shop.anvil.bot/products/anvil-devbox). |
-| **1. Data Conversion** | Convert MCAP recordings to LeRobot v3.0 datasets                                                                 |
-| **2. Model Training**  | Train ACT, Diffusion, SmolVLA, Pi0, or Pi0.5 policies via LeRobot v0.5.0                                        |
-| **3. Run Inference**   | Deploy trained models on a GPU PC via ROS2 CycloneDDS                                                            |
+> **Don't have data yet?** The [Anvil OpenARM Quest Teleop Kit](https://shop.anvil.bot/products/openarm-quest-teleop-kit) gives you everything you need to start collecting demonstrations out of the box. See the [data collection guide](https://docs.anvil.bot/software/collecting-data).
 
-> **Don't have data yet?** The [Anvil OpenARM Quest Teleop Kit](https://shop.anvil.bot/products/openarm-quest-teleop-kit) gives you everything you need to start collecting teleoperation demonstrations out of the box — robot hardware, cameras, control software, and recording tools included. See our [data collection guide](https://docs.anvil.bot/software/collecting-data) for details.
+---
 
-## Quick Start
+## Table of Contents
+
+- [Installation](#installation)
+- [Step 0 — Data Collection](#0-data-collection)
+- [Step 1 — Data Conversion](#1-data-conversion)
+- [Step 2 — Model Training](#2-model-training)
+- [Step 3 — Offline Evaluation](#3-offline-evaluation)
+- [Step 4 — Run Inference](#4-run-inference)
+- [Project Structure](#project-structure)
+- [CLI Tools](#cli-tools)
+
+---
+
+## Installation
 
 ### Prerequisites
 
 - Python 3.12+
 - [uv](https://github.com/astral-sh/uv)
-- Docker
-- Collected MCAP dataset recordings from an [Anvil Devbox](https://shop.anvil.bot/products/anvil-devbox)
-
-### Installation
+- Docker (for inference and ROS2 eval)
 
 ```bash
 git clone https://github.com/anvil-robotics/anvil-embodied-ai.git
@@ -63,7 +74,7 @@ uv sync --all-packages
 ACT and Diffusion are included in the base install. For other policies:
 
 | Extra | Policy |
-|---|---|
+|-------|--------|
 | `smolvla` | SmolVLA |
 | `pi` | Pi0 / Pi0.5 |
 
@@ -73,97 +84,249 @@ uv sync --all-packages --extra smolvla --extra pi   # multiple
 uv sync --all-packages --extra all                  # all policies
 ```
 
-> **GPU / CUDA note:** The root `pyproject.toml` pins torch to the PyTorch `cu128` index so `uv sync` always installs the CUDA-enabled build. If your machine runs a different CUDA driver version, change `pytorch-cu128` → `pytorch-cu126` (or `cu124`) in `pyproject.toml` before syncing.
+> **GPU / CUDA note:** The root `pyproject.toml` pins torch to the `cu128` index. If your machine uses a different CUDA driver, change `pytorch-cu128` → `pytorch-cu126` (or `cu124`) in `pyproject.toml` before syncing.
 
-### 0. Data Collection
+---
 
-Record teleoperation demos as ROS2 MCAP files through an [Anvil Devbox](https://shop.anvil.bot/products/anvil-devbox). See the [data collection guide](https://docs.anvil.bot/software/collecting-data) for details.
+## 0. Data Collection
 
-### 1. Data Conversion
+Record teleoperation demonstrations as ROS2 MCAP files through an [Anvil Devbox](https://shop.anvil.bot/products/anvil-devbox). See the [data collection guide](https://docs.anvil.bot/software/collecting-data) for details.
 
-Convert MCAP recordings from teleoperation sessions into LeRobot v3.0 datasets.
+---
 
-Two teleop modes are supported — pick the config that matches your recording:
+## 1. Data Conversion
+
+Convert MCAP recordings into LeRobot v3.0 datasets.
+
+Pick the config that matches your recording setup:
+
+| Config | Teleop mode | Arms | Action source |
+|--------|-------------|------|---------------|
+| `openarm_bimanual.yaml` | Leader-follower | Bimanual | Leader joint positions |
+| `openarm_bimanual_quest.yaml` | Quest VR | Bimanual | Command topics |
+| `openarm_single_quest.yaml` | Quest VR | Single (right) | Command topics |
+| `openarm_single_quest_afo.yaml` | Quest VR | Single (right) | Observation lookahead |
 
 ```bash
-# For data recorded with leader-follower
-uv run mcap-convert --input data/raw/my-sessions --output data/datasets/my-dataset --config configs/mcap_converter/openarm_bimanual.yaml
-
-# For data recorded with Quest
-uv run mcap-convert --input data/raw/my-sessions --output data/datasets/my-dataset --config configs/mcap_converter/openarm_bimanual_quest.yaml
+uv run mcap-convert \
+  --input-dir data/raw/my-sessions \
+  --config configs/mcap_converter/target-config.yaml
 ```
 
-Then validate the converted dataset:
+Output is always saved to `<output-dir>/<input-dir-name>/` (default: `data/datasets/my-sessions/`).
+
+**`action_from_observation`** — use when `/follower_*/commands` was not recorded. Shifts observation forward by N frames:
+
+```
+action[t] = observation.state[t + N]   (default N=10, ≈333ms at 30fps)
+```
+
+**Common flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--resume` | Skip already-converted episodes — safe to re-run after interruption |
+| `--max-episodes N` | Convert only the first N episodes |
+| `--fps N` | Override output FPS (auto-detected by default) |
+| `--vcodec` | `h264` (default) · `hevc` · `libsvtav1` |
+| `--robot-type` | `anvil_openarm` (default) · `anvil_yam` |
+
+Then validate:
 
 ```bash
-uv run dataset-validate --root data/datasets/my-dataset
+uv run dataset-validate --root data/datasets/my-sessions
 ```
 
-Expected output: 5 checks (load, info, features, read, batch) all showing `[OK]`.
+Expected: 5 checks all showing `[OK]`.
 
-### 2. Model Training
+---
 
-Supported policies:
+## 2. Model Training
+
+### Supported Policies
 
 | Policy | `--policy.type` | Notes |
 |--------|----------------|-------|
 | ACT | `act` | Action Chunking Transformer — fast, reliable |
-| Diffusion | `diffusion` | Diffusion Policy — smooth, multimodal |
+| Diffusion | `diffusion` | Diffusion Policy — smooth, handles multimodal distributions |
 | SmolVLA | `smolvla` | Language-conditioned VLA; requires task description |
 | Pi0 | `pi0` | Flow-matching VLA; PaliGemma-3B backbone |
 | Pi0.5 | `pi05` | Larger Pi0 variant (~4B params); higher VRAM |
 
-Checkpoints are saved to `model_zoo/<job_name>/`. Run `anvil-trainer --help` for the full flag reference.
+Checkpoints are saved to `model_zoo/<dataset>/<job_name>/`. Run `anvil-trainer --help` for the full flag reference.
 
-#### Common Parameters
+---
 
-| Flag | Description |
-|------|-------------|
-| `--dataset.root=PATH` | Path to converted LeRobot dataset |
-| `--policy.type=TYPE` | Policy type (see table above) |
-| `--job_name=NAME` | Run name; auto-generated if omitted |
-| `--camera-filter=chest,waist` | Train with a subset of cameras |
-| `--task-description="..."` | Task prompt — required for SmolVLA / Pi0 / Pi0.5 |
-
-#### Common Hyperparameters
+### Common Parameters
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--steps=100000` | 100k | Total training steps |
-| `--batch_size=8` | 8 | Reduce if GPU OOM |
-| `--save_freq=10000` | 10k | Checkpoint interval |
-| `--use-delta-actions` | off | Relative actions (target − state) |
-| `--policy.normalization_mapping='{...}'` | policy default | e.g. `{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}`<br><br>Keys:<br>`ACTION` · `STATE` · `VISUAL`<br>Values:<br>`MEAN_STD`   — normalise by μ/σ<br>`MIN_MAX`    — normalise to [0,1]<br>`QUANTILE10` — normalise by p10/p90 (Pi0.5 default; requires quantile stats\*)<br>`IDENTITY`   — passthrough (always use for images)<br><br>mcap-convert datasets lack quantile stats — use `MEAN_STD` for `ACTION`/`STATE`. |
-| `--wandb.enable=true` | off | Stream metrics to W&B |
-| `--resume=true` | off | Resume from `--output_dir` checkpoint |
+| `--dataset.root=PATH` | — | Path to converted LeRobot dataset |
+| `--policy.type=TYPE` | — | Policy type (see table above) |
+| `--job_name=NAME` | `<policy>_<timestamp>` | Checkpoint directory name |
+| `--steps=N` | `100000` | Total training steps |
+| `--batch_size=N` | `8` | Reduce if GPU OOM |
+| `--save_freq=N` | `10000` | Checkpoint save interval |
+| `--split-ratio=T,V,S` | `8,1,1` | Train/val/test episode split. Two values = no test set. Val loss logged every `log_freq×5` steps; test loss at every checkpoint |
+| `--max-episodes=N` | — | Subsample N episodes before splitting (reproducible with training seed) |
+| `--exclude-observation=K1,K2` | — | Drop observations by suffix after `observation.` — e.g. `images.chest`, `velocity`, `effort` |
+| `--backbone=NAME` | `resnet18` | Vision backbone for ACT/Diffusion: `resnet18` · `resnet34` · `resnet50` |
+| `--resume=PATH` | — | Resume from job root or specific checkpoint (e.g. `model_zoo/my-task/checkpoints/020000`) |
 
-\* quantile stats (`q01`/`q99`) are not produced by `mcap-convert`. See [Pi0.5 — Normalization mapping](docs/training-tips.md#normalization-mapping) for how to add them or switch normalization method.
+---
 
-#### [ACT](docs/training-tips.md#act)
+### Action Types
+
+| `--action-type` | Formula | When to use |
+|-----------------|---------|-------------|
+| `absolute` (default) | Raw joint positions | Simplest; works well for ACT and Diffusion |
+| `delta_obs_t` | `Δ[k] = action[k] − obs_state[t]` | All steps share the same obs reference |
+| `delta_sequential` | `Δ[0] = action[0] − obs_state[t]`; `Δ[k] = action[k] − action[k−1]` | Encodes velocity; smoother trajectories since consecutive deltas are small |
+
+Action type is persisted to `anvil_config.json` — inference applies the inverse automatically.
+
+Additional delta flags:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--delta-exclude-joints=J1,J2` | — | Keep these joints absolute (e.g. `finger_joint1` for grippers) |
+| `--delta-stats-n-steps=N` | `1` | Look-ahead steps for delta normalizer stats. Increase to cover multi-step displacement range |
+
+---
+
+### Normalization Mapping
+
+`--policy.normalization_mapping='{"ACTION":"...","STATE":"...","VISUAL":"..."}'`
+
+| Value | Description |
+|-------|-------------|
+| `MEAN_STD` | Normalize by μ/σ |
+| `MIN_MAX` | Normalize to [−1, 1] by observed min/max |
+| `IDENTITY` | Passthrough — always use for `VISUAL` |
+
+**Guidance by policy:**
+- **Diffusion** → `ACTION: MIN_MAX`. Diffusion clips denoised actions to ±1 at every step (`clip_sample=True`); `MEAN_STD` silently truncates extreme actions.
+- **ACT / SmolVLA / Pi0 / Pi0.5** → `ACTION: MEAN_STD`
+
+---
+
+### Weights & Biases
+
+```bash
+uv run wandb login   # one-time setup
+```
+
+| Flag | Description |
+|------|-------------|
+| `--wandb.enable=true` | Enable W&B logging |
+| `--wandb.project=NAME` | Project name (auto-set to dataset folder name) |
+
+Key metrics to watch: `train/loss` (should decrease steadily), `train/grad_norm` (spikes → lower LR), `eval/val_loss`, `eval/test_loss`.
+
+---
+
+### ACT
 
 ```bash
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=act \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
-  --job_name=pick-and-place
+  --wandb.enable=false
 ```
 
-#### [Diffusion](docs/training-tips.md#diffusion-policy)
+**Tips:**
+- Match `chunk_size` and `n_action_steps` to task speed: 50 for precise tasks, 100 for sweeping motions
+- Enable temporal ensemble at inference for smoother execution — no retraining needed
+- 100k steps / batch 16 is a solid default; 50k for small datasets
 
-Good at tasks with multimodal action distributions (e.g. the robot can complete a task via multiple valid paths). Produces smooth motions and requires no chunk tuning — at the cost of slower inference than ACT due to the denoising loop.
+---
+
+### Data Augmentation
+
+Two built-in augmentation layers, both disabled by default. Can be combined with any policy.
+
+#### Layer 1 — Color Augmentation (all policies)
+
+Randomly applies up to `max_num_transforms` color transforms per image at training time. Pre-configured with conservative strengths:
+
+| Transform | Range |
+|-----------|-------|
+| Brightness | [0.8, 1.2] |
+| Contrast | [0.8, 1.2] |
+| Saturation | [0.5, 1.5] |
+| Hue | [−0.05, 0.05] |
+| Sharpness | [0.5, 1.5] |
+| Affine | ±5° rotation, 5% translation |
+
+```bash
+uv run anvil-trainer \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=act \
+  --dataset.image_transforms.enable=true \
+  --dataset.image_transforms.max_num_transforms=3
+```
+
+#### Layer 2 — Random Crop (Diffusion only)
+
+Diffusion's `DiffusionRgbEncoder` applies `RandomCrop` during training and `CenterCrop` during inference — the switch is automatic, no inference-time config needed.
 
 ```bash
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=diffusion \
-  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
-  --job_name=pick-and-place
+  --policy.crop_is_random=true \
+  --policy.crop_ratio=0.9
 ```
 
-#### [SmolVLA](docs/training-tips.md#smolvla)
+`crop_ratio=0.9` crops to 90% of the original image size. Combine both layers for best generalization:
 
-Language-conditioned — always pass `--task-description` and `--policy.pretrained_path`. Mirror the same description in the inference YAML.
+```bash
+uv run anvil-trainer \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=diffusion \
+  --dataset.image_transforms.enable=true \
+  --dataset.image_transforms.max_num_transforms=3 \
+  --policy.crop_is_random=true \
+  --policy.crop_ratio=0.9
+```
+
+---
+
+### Diffusion
+
+Good for tasks with multimodal action distributions (multiple valid ways to complete the task). Produces smooth motions; inference is slower than ACT due to the denoising loop.
+
+```bash
+uv run anvil-trainer \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=diffusion \
+  --policy.normalization_mapping='{"ACTION":"MIN_MAX","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
+  --policy.horizon=24 \
+  --policy.down_dims='[256,512,1024]' \
+  --policy.vision_backbone=resnet18 \
+  --policy.pretrained_backbone_weights=ResNet18_Weights.IMAGENET1K_V1 \
+  --policy.use_group_norm=false \
+  --wandb.enable=false
+```
+
+**Hyperparameters — for datasets under ~500 episodes:**
+
+| Flag | Default | Recommended | Why |
+|------|---------|-------------|-----|
+| `--policy.horizon` | `16` | `24` | Longer horizon gives UNet more temporal context; must satisfy `n_obs_steps(2) + n_action_steps + drop_frames` |
+| `--policy.down_dims` | `[512,1024,2048]` | `[256,512,1024]` | Smaller UNet reduces overfitting on small datasets |
+| `--policy.use_group_norm` | `true` | `false` | Required when using pretrained ImageNet backbone (preserves BatchNorm) |
+
+> **Inference-only flags** — set these in `inference_tuning.diffusion` in the YAML config, not at training time:
+> - `n_action_steps: 16` — steps to execute per chunk before re-planning (default from checkpoint: 8)
+> - `num_inference_steps: 10` — denoising iterations; reduces from 100 steps (~300ms) to 10 steps (~30ms) without retraining
+
+---
+
+### SmolVLA
+
+Language-conditioned — always pass `--task-description` and `--policy.pretrained_path`.
 
 ```bash
 uv run anvil-trainer \
@@ -172,194 +335,365 @@ uv run anvil-trainer \
   --policy.pretrained_path=lerobot/smolvla_base \
   --policy.load_vlm_weights=true \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
-  --job_name=grabbing-smolvla \
-  --task-description="Grab the gray doll and put it in the bucket"
+  --task-description="Grab the gray doll and put it in the bucket" \
+  --wandb.enable=false
 ```
 
-#### Pi Series ([Pi0](docs/training-tips.md#pi0) / [Pi0.5](docs/training-tips.md#pi05))
+**Tips:** 30k–50k steps is usually enough from a pretrained base. The task description is saved to `anvil_config.json` in the checkpoint and auto-loaded at inference — no manual copy needed.
 
-Pi0 and Pi0.5 are flow-matching VLA policies from [Physical Intelligence](https://github.com/Physical-Intelligence/openpi), built on a PaliGemma-3B backbone. Both require HuggingFace access to `google/paligemma-3b-pt-224` — run `huggingface-hub login` once first. Use `--policy.train_expert_only=true` to freeze the backbone and train only the action expert — lower memory, faster convergence, and sufficient for most tasks.
+---
 
-**Pi0**
+### Pi0 / Pi0.5
+
+Flow-matching VLA policies from [Physical Intelligence](https://github.com/Physical-Intelligence/openpi). Both require HuggingFace access to [`google/paligemma-3b-pt-224`](https://huggingface.co/google/paligemma-3b-pt-224) — request access on the model page, then run `huggingface-hub login` once.
+
+**Pi0:**
 
 ```bash
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=pi0 \
   --policy.pretrained_path=lerobot/pi0_base \
+  --policy.compile_model=true \
   --policy.gradient_checkpointing=true \
   --policy.dtype=bfloat16 \
   --policy.train_expert_only=true \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
-  --job_name=grabbing-pi0 \
-  --task-description="Grab the gray doll and put it in the bucket"
+  --task-description="Grab the gray doll and put it in the bucket" \
+  --wandb.enable=false
 ```
 
-**Pi0.5**
-
-Same as Pi0 but ~4B params. Requires `bfloat16 + batch_size=1 + num_workers=0` on a 24 GB GPU. Also requires `normalization_mapping` because mcap-convert datasets don't include quantile stats.
+**Pi0.5** — same as Pi0 but ~4B params. Add `--num_workers=0` (prevents CPU RAM OOM from forked workers) and `--batch_size=16`:
 
 ```bash
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=pi05 \
   --policy.pretrained_path=lerobot/pi05_base \
+  --policy.compile_model=true \
   --policy.gradient_checkpointing=true \
   --policy.dtype=bfloat16 \
   --policy.train_expert_only=true \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
-  --batch_size=1 \
+  --batch_size=16 \
   --num_workers=0 \
-  --job_name=grabbing-pi05 \
-  --task-description="Grab the gray doll and put it in the bucket"
+  --task-description="Grab the gray doll and put it in the bucket" \
+  --wandb.enable=false
 ```
 
-After training SmolVLA / Pi0 / Pi0.5, mirror the task description in `configs/lerobot_control/inference_default.yaml`:
+> Pi0.5 requires quantile stats (`q01`/`q99`) which `mcap-convert` does not produce. Use `MEAN_STD` for `ACTION` (recommended), or see [Pi0.5 normalization](docs/training-tips.md#normalization-mapping) for how to compute them.
 
-```yaml
-model:
-  task_description: "Grab the gray doll and put it in the bucket"
-```
+**Key flags for Pi series:**
 
-#### Weights & Biases
+| Flag | Recommendation |
+|------|----------------|
+| `--policy.train_expert_only=true` | Freeze backbone, train only action expert — lower memory, faster convergence |
+| `--policy.compile_model=true` | `torch.compile` — ~10–20% throughput gain |
+| `--policy.gradient_checkpointing=true` | Reduces VRAM — always enable |
+| `--policy.dtype=bfloat16` | Halves VRAM — required for Pi0.5 on 24 GB GPU |
+
+---
+
+### Fine-tune from a Checkpoint
+
+Start a new run from a previously trained checkpoint (step counter resets, new output directory):
 
 ```bash
-uv run wandb login   # one-time setup
-
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
-  --policy.type=act \
-  --job_name=grabbing-w1 \
-  --wandb.enable=true \
-  --wandb.project=my-project
+  --policy.path=model_zoo/my-task/checkpoints/last/pretrained_model
 ```
 
-#### Resume a run
+`--policy.type` is not needed — it is read from the checkpoint automatically.
+
+> **`--policy.path` vs `--resume`:** `--policy.path` starts fresh from a checkpoint's weights (new output dir, step 0). `--resume` continues a stopped run in-place (same output dir, step counter carries over).
+
+---
+
+### Resume a Run
 
 ```bash
-uv run anvil-trainer --resume=true --output_dir=model_zoo/pick-and-place
+# Resume from the latest checkpoint
+uv run anvil-trainer --resume=model_zoo/pick-and-place
+
+# Resume from a specific step
+uv run anvil-trainer --resume=model_zoo/pick-and-place/checkpoints/020000
 ```
 
-Only pass `--resume=true` and `--output_dir` — all other settings are restored from the saved `train_config.json`.
+Only pass `--resume` — all other settings are restored from the checkpoint's `train_config.json`. Action type settings are inherited from `anvil_config.json` automatically.
 
-### 3. Run Inference
+---
+
+### Checkpoint Output Structure
+
+```
+model_zoo/
+└── <dataset>/
+    └── <job_name>/
+        ├── checkpoints/
+        │   ├── last -> 100000/          # symlink to latest checkpoint
+        │   ├── 010000/
+        │   │   └── pretrained_model/
+        │   │       ├── config.json              # LeRobot policy config
+        │   │       ├── anvil_config.json        # action_type, note, task_description
+        │   │       ├── split_info.json          # train/val/test episode lists
+        │   │       ├── policy_preprocessor.json # normalizer + resize config
+        │   │       └── policy_postprocessor.json
+        │   └── 100000/
+        └── wandb/
+```
+
+---
+
+## 3. Offline Evaluation
+
+Validate model performance before deploying to a robot. Two complementary modes:
+
+| Mode | Command | What it tests |
+|------|---------|---------------|
+| **Dataset replay** | `anvil-eval` | Feeds dataset observations into the model — fast, no ROS2 needed |
+| **ROS2 MCAP replay** | `anvil-eval-ros` | Replays raw MCAP through the full Docker inference stack — mirrors real deployment |
+
+Results are written to:
+```
+eval_results/{dataset}/{job}/{checkpoint}/
+├── raw/     ← anvil-eval output
+└── ros/     ← anvil-eval-ros output
+```
+
+### Dataset Replay (`anvil-eval`)
 
 ```bash
-cp .env.example .env              # configure MODEL_PATH, ROS_DOMAIN_ID, CycloneDDS
-docker compose up                  # run inference on GPU PC
+uv run anvil-eval \
+  --checkpoint model_zoo/my-task/checkpoints/last \
+  --dataset data/datasets/my-task \
+  --num-eps 5 \
+  --device cuda
 ```
 
-Before running, review `configs/lerobot_control/inference_default.yaml`:
+Produces per-joint trajectory plots (predicted vs ground-truth) and summary box plots. Evaluates across train/val/test splits.
+
+### ROS2 MCAP Replay (`anvil-eval-ros`)
+
+Replays raw MCAP recordings through the same inference node that runs on the real robot. Catches integration issues (topic remapping, timing, action chunking) that dataset replay cannot.
+
+```bash
+uv run anvil-eval-ros \
+  --checkpoint model_zoo/my-task/checkpoints/last \
+  --mcap-root data/raw/my-task \
+  --num-eps 3
+```
+
+**How it works:**
+```
+Host: anvil-eval-ros
+  │  generates eval_plan.json → launches docker compose
+  │
+  ├─ [inference]      model on GPU, publishes to /eval/* topics
+  ├─ [mcap-player]    replays one MCAP per episode
+  └─ [eval-recorder]  records GT + predicted actions → metrics + plots
+```
+
+**Common flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--checkpoint PATH` | Checkpoint directory |
+| `--mcap-root PATH` | Raw MCAP directory (e.g. `data/raw/my-task`) |
+| `--num-eps N` | Episodes per split (train/val/test) |
+| `--episodes "0,3,5"` | Manually specify episode indices |
+| `--seed N` | Random seed for episode sampling (default: 42) |
+| `--base-inference-config PATH` | Override default `configs/lerobot_control/inference_eval.yaml` |
+| `--monitor` | Record per-step CSV + PNG report via inference monitor |
+
+**Inference Monitor (`--monitor`)** — records `/monitor/*` topics and writes:
+```
+ros/
+├── monitor/
+│   ├── inference_data.csv       ← per-step obs_state / raw_output / control_cmd
+│   └── inference_report.png    ← joint-level overlay plot
+└── plots/
+    └── episode_NNNN_*.png      ← GT (blue) / Pred (red) / Raw output (orange)
+```
+
+The orange "Raw" line shows model output **before** postprocessing — useful for diagnosing whether the policy or postprocessor is responsible for a tracking error.
+
+> Requires Docker with NVIDIA GPU support. Set `LEROBOT_EXTRAS` if your model needs extra dependencies (e.g. `pi`, `smolvla`).
+
+---
+
+## 4. Run Inference
+
+All inference scenarios go through `scripts/run_inference.sh`:
+
+```bash
+./scripts/run_inference.sh [--fake-hardware] [--monitor] [--echo-topic-only] [COMPOSE_ARGS...]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--fake-hardware` | Simulate 2-PC setup locally (bridge network + CycloneDDS, no real robot) |
+| `--monitor` | Enable real-time monitor: records CSV + plots PNG to `./monitor_output/` on exit |
+| `--echo-topic-only` | Subscribe and log FPS only — verify DDS connectivity without a model |
+
+**Environment variables:**
+
+| Variable | Description |
+|----------|-------------|
+| `MODEL_PATH` | Host path to checkpoint (**required** for production inference) |
+| `CONFIG_FILE` | Custom inference config YAML (default: `./configs/lerobot_control/inference_default.yaml`) |
+| `MONITOR_OUTPUT_DIR` | Host dir for monitor output (default: `./monitor_output`) |
+| `LEROBOT_EXTRAS` | Policy extras to install in the image (e.g. `pi,smolvla`). Rebuild after changing. |
+
+### Test with Fake Hardware First (Recommended)
+
+```bash
+# 1. Verify DDS connectivity + camera FPS (no model, no GPU needed)
+./scripts/run_inference.sh --fake-hardware --monitor up --build
+
+# 2. Validate full pipeline with your model (GPU required)
+MODEL_PATH=$(pwd)/model_zoo/my-task/checkpoints/last \
+./scripts/run_inference.sh --fake-hardware up --build --profile inference
+```
+
+If `Control Loop` hits 30 Hz, the setup is ready for real hardware.
+
+### Production (Real Robot)
+
+```bash
+# Standard inference
+MODEL_PATH=$(pwd)/model_zoo/my-task/checkpoints/last \
+./scripts/run_inference.sh up --build
+
+# With inference monitor
+MODEL_PATH=$(pwd)/model_zoo/my-task/checkpoints/last \
+./scripts/run_inference.sh --monitor up --build
+
+# Verify DDS connectivity without a checkpoint
+./scripts/run_inference.sh --echo-topic-only up --build
+```
+
+> **`MODEL_PATH` must be absolute or start with `./`.** Bare relative paths are treated as named Docker volumes.
+> ```bash
+> MODEL_PATH=$(pwd)/model_zoo/my-task/checkpoints/last   # recommended
+> MODEL_PATH=./model_zoo/my-task/checkpoints/last        # also valid
+> ```
+
+### Inference Config (`configs/lerobot_control/inference_default.yaml`)
+
+Before running, review this file:
 
 **Model**
 ```yaml
 model:
-  # Task prompt for SmolVLA — must match what was used during training.
-  task_description: "Grab the gray doll and put it in the bucket"
+  task_description: null
+  # VLA-only (SmolVLA / Pi0 / Pi0.5): task prompt the model was trained on.
+  # null = auto-read from anvil_config.json in the checkpoint (recommended).
 ```
 
-**Inference Tuning**
+**Per-model inference tuning** — override checkpoint defaults without retraining:
 ```yaml
-# null = use the value the model was trained with (recommended starting point)
 inference_tuning:
-  # Number of predicted actions to execute before running inference again.
-  # The model predicts a full chunk (e.g. 100 steps) but only executes n_action_steps of them.
-  n_action_steps: null
 
-  # ACT only — re-infers every step and blends overlapping predictions with exponential weighting.
-  # Smoother motion than raising n_action_steps. Use 0.01 (paper default) will forces n_action_steps=1.
-  temporal_ensemble_coeff: null
+  act:
+    n_action_steps: null
+    # Steps to execute per chunk before re-running inference.
+    # null = use training value. Jittery? → raise. Hesitates? → lower.
+    temporal_ensemble_coeff: null
+    # Re-infers every step with exponentially weighted overlapping predictions.
+    # Use 0.01 (paper default). Forces n_action_steps=1.
+
+  diffusion:
+    n_action_steps: null
+    # Steps to execute per chunk. null = use training value.
+    num_inference_steps: 10
+    # Denoising iterations at inference time.
+    # null = num_train_timesteps (100 steps, ~300ms on GPU).
+    # 10   = ~30ms on GPU — recommended for real-time deployment.
+
+  rtc:
+    # VLA models only (SmolVLA / Pi0 / Pi0.5)
+    inference_delay: 10
+    # Fallback step-count before LatencyTracker auto-calibrates.
+    # Rule of thumb: ceil(first_inference_ms × control_freq / 1000)
+    queue_trigger_threshold: 50
+    # Re-trigger inference when ActionQueue depth ≤ this.
+    execution_horizon: 12
+    # Steps consumed per chunk before the next inference fires.
+    max_guidance_weight: 10.0
+    prefix_attention_schedule: EXP
 ```
 
-**Safety**
+**Safety limits:**
 ```yaml
-safety:
-  # Maximum joint position change allowed per control step (radians). (lower = safer)
-  # But may limit fast motions. Raise cautiously if the robot feels that require quick joint travel.
-  max_position_delta: 0.2
+# safety:
+#   max_position_delta: 0.1
+#   # Hard limit on joint position change per control step (radians).
+#   min_position_delta: 0.05
+#   # Minimum cumulative change before publishing a new command.
+#   # Holds the last command until threshold is crossed — useful for
+#   # overcoming motor dead zones / friction. Default: disabled (null).
 ```
 
-#### Distributed Inference Architecture
+### Distributed Inference Architecture
 
 ```
   Anvil Devbox (anvil-loader)             CycloneDDS              GPU PC (anvil-embodied-ai)
 ┌─────────────────────────────┐    ┌────────────────────┐    ┌─────────────────────────────┐
 │  ros2_control               │    │                    │    │  lerobot_control            │
 │  joint_states (500 Hz)      │◄───┤  Gigabit Switch    ├───►│  inference_node (30 Hz)     │
-│  cameras (4x 30 Hz)         │    │                    │    │  action commands            │
+│  cameras (4× 30 Hz)         │    │                    │    │  action commands            │
 └─────────────────────────────┘    └────────────────────┘    └─────────────────────────────┘
 ```
 
-The Anvil Devbox runs [anvil-loader](https://docs.anvil.bot/software/starting-robot-operation) for real-time robot control, streaming joint states and camera feeds over CycloneDDS. This repo runs on a separate GPU PC, subscribing to those streams, running the trained policy, and publishing action commands back. See the [full documentation](https://docs.anvil.bot/) for setup details.
+The Anvil Devbox streams joint states and camera feeds over CycloneDDS. The GPU PC subscribes to those streams, runs the policy, and publishes action commands back. See the [full documentation](https://docs.anvil.bot/) for network setup.
+
+---
 
 ## Project Structure
 
 ```
 anvil-embodied-ai/
 ├── packages/
-│   ├── mcap_converter/            # MCAP to LeRobot conversion
-│   └── lerobot_training/          # Training utilities & transforms
+│   ├── mcap_converter/            # MCAP → LeRobot dataset conversion
+│   ├── anvil_trainer/             # Training wrapper: transforms, splits, val loss
+│   ├── anvil_eval/                # Offline evaluation: dataset replay
+│   └── anvil_eval_ros/            # Offline evaluation: ROS2 MCAP replay
 ├── ros2/
 │   └── src/lerobot_control/       # ROS2 inference node (Jazzy)
 ├── configs/
-│   ├── cyclonedds/                # CycloneDDS peer configs (GPU PC, Robot PC)
-│   ├── lerobot_control/           # Inference node config (cameras, joints, arms)
-│   └── mcap_converter/            # Data conversion config
+│   ├── cyclonedds/                # CycloneDDS peer configs
+│   ├── lerobot_control/           # Inference YAML configs (cameras, joints, arms)
+│   └── mcap_converter/            # Data conversion configs
 ├── docker/
 │   └── inference/                 # Dockerfile + entrypoint
-├── docker-compose.yml             # Production inference (GPU PC)
-├── docker-compose.fake-hardware.yml # Fake hardware test (no real hardware needed)
-├── material/                      # Logo and visual assets
-├── .env.example                   # Environment template
-└── model_zoo/                     # Trained model weights (gitignored)
+├── scripts/
+│   ├── run_inference.sh           # Entry point for all inference scenarios
+│   └── plot_monitor_csv.py        # Plot obs.state / raw_output / control_cmd from CSV
+├── docker-compose.yml             # Production inference
+├── docker-compose.fake-hardware.yml  # Simulate 2-PC setup locally
+├── docker-compose.eval.yml        # ROS2 MCAP replay eval stack
+├── .env.example                   # Environment variable template
+└── model_zoo/                     # Trained checkpoints (gitignored)
 ```
 
-## Training Tips
-
-> Full guide: [docs/training-tips.md](docs/training-tips.md)
-
-**ACT (TL;DR)**
-- Match `chunk_size` and `n_action_steps` to your task speed (50 for precise, 100 for sweeping)
-- Enable temporal ensemble at inference for smoother execution — no retraining needed
-- Use `--camera-filter` to drop cameras that don't add signal
-- 100k steps / batch 16 is a solid default; drop to 50k for small datasets
-
-**Diffusion (TL;DR)**
-- Best for tasks with multiple valid completion paths — handles multimodal action distributions naturally
-- Slower inference than ACT (denoising loop); consider ACT first if latency is critical
-- 100k steps / batch 64 is a solid default; larger batch reduces score-matching variance
-- Tune `n_action_steps` at inference if motion feels jerky — no retraining needed
-
-**SmolVLA (TL;DR)**
-- Always fine-tune from `lerobot/smolvla_base` with `--policy.load_vlm_weights=true`
-- Set a specific task description via `--task-description` — it matters
-- 30k–50k steps is usually enough from a pretrained base
-
-**Pi Series — Pi0 / Pi0.5 (TL;DR)** ([openpi](https://github.com/Physical-Intelligence/openpi))
-- Both require HuggingFace access to `google/paligemma-3b-pt-224` — run `huggingface-hub login` once
-- Always pass `--task-description` — Pi series is language-conditioned
-- Pi0.5 (4B params) additionally needs `--policy.dtype=bfloat16 --batch_size=1 --num_workers=0` on a 24 GB GPU
-- Pi0.5 requires quantile stats in `stats.json` — mcap-convert datasets don't include them. Use `--policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}'` (recommended), or run `augment_dataset_quantile_stats` to compute them in-place (**backs up your dataset first** — it modifies in-place). See [Pi0.5 normalization](docs/training-tips.md#normalization-mapping) for details.
-
-**MODEL_PATH gotcha**
-
-Point to the `pretrained_model` subdirectory inside a specific checkpoint, not the top-level model folder:
-```
-# Correct
-MODEL_PATH=model_zoo/pick-and-place/checkpoints/100000/pretrained_model
-```
+---
 
 ## CLI Tools
 
-| Command              | Description                                 |
-| -------------------- | ------------------------------------------- |
-| `anvil-trainer`    | Train ML models                             |
-| `mcap-convert`     | Convert MCAP recordings to LeRobot datasets |
-| `mcap-inspect`     | Inspect MCAP file structure and topics      |
-| `mcap-to-video`    | Extract MCAP image topics to MP4 videos     |
-| `dataset-validate` | Validate a converted LeRobot dataset        |
-| `mcap-upload`      | Upload datasets to HuggingFace Hub          |
+| Command | Description |
+|---------|-------------|
+| `anvil-trainer` | Train ML models |
+| `anvil-eval` | Offline evaluation: feed dataset observations into model, compare against GT |
+| `anvil-eval-ros` | Offline evaluation: replay raw MCAP through full Docker inference stack |
+| `mcap-convert` | Convert MCAP recordings to LeRobot datasets |
+| `mcap-inspect` | Inspect MCAP file structure, topics, and message counts |
+| `mcap-to-video` | Extract MCAP image topics to MP4 videos |
+| `dataset-validate` | Validate a converted LeRobot dataset |
+| `mcap-upload` | Upload a converted dataset to HuggingFace Hub |
+
+---
 
 ## License
 
-Apache License 2.0 - see [LICENSE](LICENSE).
+Apache License 2.0 — see [LICENSE](LICENSE).

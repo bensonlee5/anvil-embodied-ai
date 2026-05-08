@@ -18,7 +18,7 @@ from .reader import McapReader
 def parse_joint_name(
     joint_name: str,
     pattern: JointNamePattern,
-) -> Tuple[str, str, str]:
+) -> Optional[Tuple[str, str, str]]:
     """
     Parse joint name to extract role, robot, and joint_id.
 
@@ -62,6 +62,9 @@ def parse_joint_name(
     if parts and parts[0] in pattern.robot_prefix:
         robot = pattern.robot_prefix[parts[0]]
         joint_id = parts[1] if len(parts) > 1 else parts[0]
+    elif parts and pattern.robot_prefix and len(parts) > 1:
+        # arms map is configured but this arm identifier is not in it — skip joint
+        return None
     else:
         joint_id = remaining
 
@@ -109,7 +112,7 @@ class DataExtractor:
         # Cache for action topic reorder permutations: {topic: np.ndarray}
         self._action_reorder_cache: Dict[str, np.ndarray] = {}
 
-    def _parse_joint_name(self, joint_name: str) -> Tuple[str, str, str]:
+    def _parse_joint_name(self, joint_name: str) -> Optional[Tuple[str, str, str]]:
         """Parse joint name using shared utility."""
         return parse_joint_name(joint_name, self.config.joint_name_pattern)
 
@@ -250,10 +253,13 @@ class DataExtractor:
 
         for i, joint_name in enumerate(ros_msg.name):
             try:
-                role, robot, joint_id = self._parse_joint_name(joint_name)
+                result = self._parse_joint_name(joint_name)
             except DataExtractionError as e:
                 print(f"Warning: {e}")
                 continue
+            if result is None:
+                continue
+            role, robot, joint_id = result
 
             key = (role, robot)
             if key not in grouped_data:
@@ -562,6 +568,7 @@ class BufferedStreamExtractor:
         """
         self.config = config
         self.fps = fps
+        self.frame_interval = 1.0 / fps  # seconds between output frames (for subsampling)
         self.buffer_seconds = buffer_seconds
         self.half_buffer = int(buffer_seconds * fps / 2)  # 75 frames for 5s @ 30fps
         self.full_buffer = self.half_buffer * 2  # 150 frames
@@ -574,6 +581,37 @@ class BufferedStreamExtractor:
 
         # Cache for action topic reorder permutations: {topic: np.ndarray}
         self._action_reorder_cache: Dict[str, np.ndarray] = {}
+
+    @staticmethod
+    def _check_action_topics_present(mcap_path: str, action_topic_set: set) -> None:
+        """Raise DataExtractionError when none of the configured action topics are in the MCAP.
+
+        Uses the MCAP footer index (O(1)) — does not scan all messages.
+        """
+        from mcap.reader import make_reader as _make_mcap_reader
+
+        try:
+            with open(mcap_path, "rb") as _f:
+                _summary = _make_mcap_reader(_f).get_summary()
+        except Exception:
+            return  # Cannot read summary — let streaming fail naturally
+
+        if _summary is None:
+            return
+
+        available = {ch.topic for ch in _summary.channels.values()}
+        if action_topic_set and action_topic_set.isdisjoint(available):
+            raise DataExtractionError(
+                f"\n[ACTION SOURCE ERROR] action_from_observation=false, but none of the "
+                f"configured action topics were found in this MCAP.\n"
+                f"  Expected (from config): {sorted(action_topic_set)}\n"
+                f"  Available in MCAP:      {sorted(available)}\n\n"
+                "Fix options:\n"
+                "  1. Set action_from_observation: true in config to derive actions from "
+                "observations.\n"
+                "  2. Record a new session that captures the action-command topics.\n"
+                "  3. Use a different --config that matches this recording's topic layout.\n"
+            )
 
     def extract_frames(
         self,
@@ -628,18 +666,36 @@ class BufferedStreamExtractor:
         all_topics = list(all_camera_topics)
         all_topics.append(self.config.robot_state_topic)
 
-        # Include action command topics if configured (quest teleop mode)
+        # Include action command topics if configured (quest teleop mode).
+        # When action_from_observation=True the config explicitly requests
+        # observation-shifted actions — ignore any recorded command topics so
+        # the pipeline is deterministic regardless of what was captured.
         action_topic_set = set()
         if self.config.action_topics:
-            action_topic_set = set(self.config.action_topics.keys())
-            all_topics.extend(action_topic_set)
+            if self.config.action_from_observation:
+                n = self.config.action_from_observation_n
+                ms = int(n / self.fps * 1000)
+                topic_lines = "\n".join(f"    {t}" for t in self.config.action_topics)
+                print(
+                    f"\n[ACTION SOURCE] action_from_observation=true — "
+                    f"command topic(s) in config will be IGNORED:\n"
+                    f"{topic_lines}\n"
+                    f"  → action[t] = observation[t + {n}]  "
+                    f"(≈{ms} ms lookahead at {self.fps} fps)\n"
+                )
+            else:
+                action_topic_set = set(self.config.action_topics.keys())
+                all_topics.extend(action_topic_set)
+                # Fast-fail: verify at least one action topic is recorded in this MCAP.
+                # Reads only the file footer index (O(1)) — no message scanning.
+                self._check_action_topics_present(mcap_path, action_topic_set)
 
         # Get main camera (first one in config)
         main_cam = list(self.config.camera_topic_mapping.values())[0]
 
         cursor = 0  # Index of frame to process next
         frames_yielded = 0
-        first_ts = None
+        next_yield_ts = None  # Next target timestamp for subsampling
 
         for message in reader.read_messages(topics=all_topics):
             topic = message.channel.topic
@@ -662,10 +718,6 @@ class BufferedStreamExtractor:
             # Use MCAP log_time for consistent time domain across all streams
             time_s = message.log_time.timestamp()
 
-            # Track first timestamp for relative timing
-            if first_ts is None:
-                first_ts = time_s
-
             # Decode image — detect CompressedImage vs Image by attribute
             ros_msg = message.ros_msg
             if hasattr(ros_msg, 'format'):
@@ -681,20 +733,29 @@ class BufferedStreamExtractor:
 
             # Condition: buffer has at least half_buffer frames ahead of cursor
             if main_buffer_len >= self.half_buffer + cursor:
-                frame = self._align_frame_at_cursor(
-                    camera_buffers, joint_buffers, cursor, main_cam, task, resize_image
-                )
-                if frame is not None:
-                    yield frame
-                    frames_yielded += 1
+                frame_ts = camera_buffers[main_cam][cursor][0]
 
-                    # Progress reporting
-                    if self.progress_callback:
-                        self.progress_callback(frames_yielded)
-                    elif not self.quiet and frames_yielded % 100 == 0:
-                        print(f"[BufferedStream] Processed {frames_yielded} frames...")
+                # Initialize subsampling anchor on first frame
+                if next_yield_ts is None:
+                    next_yield_ts = frame_ts
+
+                # Subsampling: only yield if this frame is at or past the next target timestamp
+                if frame_ts >= next_yield_ts:
+                    frame = self._align_frame_at_cursor(
+                        camera_buffers, joint_buffers, cursor, main_cam, task, resize_image
+                    )
+                    if frame is not None:
+                        yield frame
+                        frames_yielded += 1
+                        next_yield_ts += self.frame_interval
 
                 cursor += 1
+
+                # Always report progress after each cursor advance (including skipped frames)
+                if self.progress_callback:
+                    self.progress_callback(frames_yielded)
+                elif not self.quiet and frames_yielded % 100 == 0:
+                    print(f"[BufferedStream] Processed {frames_yielded} frames...")
 
                 # Once buffer reaches full size, remove oldest to maintain size
                 if main_buffer_len > self.full_buffer:
@@ -713,14 +774,18 @@ class BufferedStreamExtractor:
         if not self.quiet:
             print("[BufferedStream] Flushing remaining buffer...")
         while cursor < len(camera_buffers[main_cam]):
-            frame = self._align_frame_at_cursor(
-                camera_buffers, joint_buffers, cursor, main_cam, task, resize_image
-            )
-            if frame is not None:
-                yield frame
-                frames_yielded += 1
-                if self.progress_callback:
-                    self.progress_callback(frames_yielded)
+            frame_ts = camera_buffers[main_cam][cursor][0]
+            if next_yield_ts is None or frame_ts >= next_yield_ts:
+                frame = self._align_frame_at_cursor(
+                    camera_buffers, joint_buffers, cursor, main_cam, task, resize_image
+                )
+                if frame is not None:
+                    yield frame
+                    frames_yielded += 1
+                    if next_yield_ts is not None:
+                        next_yield_ts += self.frame_interval
+                    if self.progress_callback:
+                        self.progress_callback(frames_yielded)
             cursor += 1
 
         if not self.quiet:
@@ -802,7 +867,13 @@ class BufferedStreamExtractor:
 
         # Align joint states
         if joint_buffers:
-            joint_aligned = self._align_joint_states(joint_buffers, main_ts)
+            has_action_buffer = any(role == "action" for (role, _) in joint_buffers)
+            action_ts = (
+                main_ts + self.frame_interval * self.config.action_from_observation_n
+                if self.config.action_from_observation and not has_action_buffer
+                else None
+            )
+            joint_aligned = self._align_joint_states(joint_buffers, main_ts, action_ts=action_ts)
             if joint_aligned is None:
                 return None  # Skip frame if joint states not available
             frame.update(joint_aligned)
@@ -814,6 +885,7 @@ class BufferedStreamExtractor:
         self,
         joint_buffers: Dict[Tuple[str, str], Dict],
         target_ts: float,
+        action_ts: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Align joint states to target timestamp.
@@ -824,7 +896,10 @@ class BufferedStreamExtractor:
 
         Args:
             joint_buffers: Joint state buffers keyed by (role, robot)
-            target_ts: Target timestamp to align to
+            target_ts: Target timestamp for observation alignment
+            action_ts: If provided, look up observation data at this timestamp as
+                       the action (used with action_from_observation=True so that
+                       action[t] = observation[t+1] rather than observation[t]).
 
         Returns:
             Dictionary with aligned joint state features, or None if data missing
@@ -839,7 +914,7 @@ class BufferedStreamExtractor:
             if len(buffer) == 0:
                 return None  # Required joint data missing
 
-            # Find nearest joint state sample
+            # Find nearest joint state sample for observation
             nearest_idx = self._find_nearest_in_buffer(buffer, target_ts)
             if nearest_idx is None:
                 return None
@@ -853,6 +928,23 @@ class BufferedStreamExtractor:
                     "eff": eff.copy() if eff.size > 0 else None,
                 }
             else:  # action
+                action_data[robot] = {"pos": pos.copy()}
+
+        # Fallback: use observation at action_ts (t+1) as action when action_topics
+        # are configured but not recorded in this MCAP.
+        if not action_data and obs_data and self.config.action_from_observation:
+            if action_ts is None:
+                # No next timestamp available (last frame) — skip this frame
+                return None
+            action_data = {}
+            for (role, robot), data in joint_buffers.items():
+                if role != "observation":
+                    continue
+                buffer = data["buffer"]
+                action_idx = self._find_nearest_in_buffer(buffer, action_ts)
+                if action_idx is None:
+                    return None
+                _, pos, _, _ = buffer[action_idx]
                 action_data[robot] = {"pos": pos.copy()}
 
         # Check if multi-robot (has named robots like 'left', 'right')
@@ -875,23 +967,25 @@ class BufferedStreamExtractor:
             if obs_positions:
                 result["observation.state"] = np.concatenate(obs_positions)
 
-            # Concatenate observation velocity (if available)
-            obs_velocities = [
-                obs_data[r]["vel"]
-                for r in robots
-                if obs_data[r]["vel"] is not None
-            ]
-            if obs_velocities:
-                result["observation.velocity"] = np.concatenate(obs_velocities)
+            # Concatenate observation velocity (only if enabled in config)
+            if "velocity" in self.config.observation_feature_mapping.others:
+                obs_velocities = [
+                    obs_data[r]["vel"]
+                    for r in robots
+                    if obs_data[r]["vel"] is not None
+                ]
+                if obs_velocities:
+                    result["observation.velocity"] = np.concatenate(obs_velocities)
 
-            # Concatenate observation effort (if available)
-            obs_efforts = [
-                obs_data[r]["eff"]
-                for r in robots
-                if obs_data[r]["eff"] is not None
-            ]
-            if obs_efforts:
-                result["observation.effort"] = np.concatenate(obs_efforts)
+            # Concatenate observation effort (only if enabled in config)
+            if "effort" in self.config.observation_feature_mapping.others:
+                obs_efforts = [
+                    obs_data[r]["eff"]
+                    for r in robots
+                    if obs_data[r]["eff"] is not None
+                ]
+                if obs_efforts:
+                    result["observation.effort"] = np.concatenate(obs_efforts)
 
             # Concatenate action
             action_positions = [action_data[r]["pos"] for r in robots]
@@ -905,10 +999,12 @@ class BufferedStreamExtractor:
 
             if "" in obs_data:
                 result["observation.state"] = obs_data[""]["pos"]
-                if obs_data[""]["vel"] is not None:
-                    result["observation.velocity"] = obs_data[""]["vel"]
-                if obs_data[""]["eff"] is not None:
-                    result["observation.effort"] = obs_data[""]["eff"]
+                if "velocity" in self.config.observation_feature_mapping.others:
+                    if obs_data[""]["vel"] is not None:
+                        result["observation.velocity"] = obs_data[""]["vel"]
+                if "effort" in self.config.observation_feature_mapping.others:
+                    if obs_data[""]["eff"] is not None:
+                        result["observation.effort"] = obs_data[""]["eff"]
 
             if "" in action_data:
                 result["action"] = action_data[""]["pos"]
@@ -946,7 +1042,7 @@ class BufferedStreamExtractor:
 
         return nearest_idx
 
-    def _parse_joint_name(self, joint_name: str) -> Tuple[str, str, str]:
+    def _parse_joint_name(self, joint_name: str) -> Optional[Tuple[str, str, str]]:
         """Parse joint name using shared utility."""
         return parse_joint_name(joint_name, self._joint_pattern)
 
@@ -973,9 +1069,12 @@ class BufferedStreamExtractor:
 
         for i, joint_name in enumerate(ros_msg.name):
             try:
-                role, robot, joint_id = self._parse_joint_name(joint_name)
+                result = self._parse_joint_name(joint_name)
             except DataExtractionError:
                 continue  # Skip unparseable joints
+            if result is None:
+                continue  # arm not in configured arms map, skip
+            role, robot, joint_id = result
 
             key = (role, robot)
             if key not in grouped:

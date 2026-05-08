@@ -20,9 +20,10 @@ class ActionLimiter:
     def __init__(
         self,
         max_delta: float = 0.1,
+        min_delta_threshold: float | None = None,
         model_joint_order: list[str] | None = None,
         controller_joint_order: list[str] | None = None,
-        use_delta_actions: bool = False,
+        delta_exclude_joints: list[str] | None = None,
         logger=None,
     ):
         """
@@ -30,19 +31,42 @@ class ActionLimiter:
 
         Args:
             max_delta: Maximum position change per step (radians)
+            min_delta_threshold: Minimum per-joint change to publish a new command.
+                When set, commands are held at the last published value until the
+                cumulative change exceeds this threshold. Helps overcome motor
+                friction when model deltas are too small to move the joint.
             model_joint_order: Order the ML model outputs actions
             controller_joint_order: Order the ROS2 controller expects
-            use_delta_actions: If True, model outputs deltas to add to current position
+            delta_exclude_joints: Joint names kept in absolute space (not delta-restored)
             logger: Optional ROS2 logger
         """
         self.max_delta = max_delta
+        self.min_delta_threshold = min_delta_threshold
+        self._last_published: np.ndarray | None = None
+        self._pending_delta: np.ndarray | None = None
+        self._last_raw_action: np.ndarray | None = None
         self.model_joint_order = model_joint_order or []
         self.controller_joint_order = controller_joint_order or []
-        self.use_delta_actions = use_delta_actions
         self.logger = logger
 
         # Build reorder indices
         self.reorder_indices = self._build_reorder_indices()
+
+        # Resolve excluded joint names → indices in controller order (post-reorder space).
+        # Fall back to model order when controller order is not configured.
+        ref_order = self.controller_joint_order or self.model_joint_order
+        self._delta_exclude_indices: set[int] = {
+            ref_order.index(name)
+            for name in (delta_exclude_joints or [])
+            if name in ref_order
+        }
+
+    def reset(self) -> None:
+        """Reset deadband state (call between episodes or on model reload)."""
+        self._last_published = None
+        self._pending_delta = None
+        self._last_raw_action = None
+
 
     def _log(self, level: str, msg: str):
         """Log message using ROS2 logger or print."""
@@ -127,14 +151,19 @@ class ActionLimiter:
         action: np.ndarray,
         current_positions: np.ndarray | None = None,
         joint_order: list[str] | None = None,
+        ref_state: np.ndarray | None = None,
     ) -> np.ndarray:
         """
         Process action: reorder and apply delta limiting.
 
+        Delta restore is handled upstream (in inference_node) before actions reach here.
+        This method receives absolute actions and only applies reordering + safety limiting.
+
         Args:
-            action: Raw action from model (in model joint order)
+            action: Absolute action (in model joint order), already delta-restored upstream
             current_positions: Current joint positions (in controller order)
-            joint_order: Joint order for delta action conversion
+            joint_order: Unused, kept for backward compatibility
+            ref_state: Unused, kept for backward compatibility
 
         Returns:
             Processed action ready for publishing (in controller order, delta-limited)
@@ -145,13 +174,33 @@ class ActionLimiter:
         # Reorder from model order to controller order
         action = self.reorder(action)
 
-        # Convert delta actions to absolute if needed
-        if self.use_delta_actions and current_positions is not None:
-            action = current_positions + action
-
-        # Apply delta limiting
+        # Apply delta limiting (always against current position for safety)
         if current_positions is not None:
             action = self.apply_delta_limit(action, current_positions)
+
+        # Deadband: suppress commands whose accumulated pending delta hasn't reached
+        # min_delta_threshold yet. Each step's per-step increment is added to _pending_delta.
+        # When a joint's pending crosses the threshold, publish last_published + pending
+        # and reset that joint's accumulator. This works for all action types:
+        #   delta_sequential: per-step increments are the individual delta_k values (cumsum)
+        #   delta_obs_t:      per-step increments are intra-chunk trajectory steps
+        #   absolute:         per-step increments are step-to-step target changes
+        if self.min_delta_threshold is not None:
+            if self._last_published is None:
+                self._last_published = action.copy()
+                self._pending_delta = np.zeros_like(action)
+                self._last_raw_action = action.copy()
+            else:
+                # Accumulate per-step increment into pending
+                step = action - self._last_raw_action
+                self._last_raw_action = action.copy()
+                self._pending_delta = self._pending_delta + step
+
+                mask = np.abs(self._pending_delta) >= self.min_delta_threshold
+                candidate = self._last_published + self._pending_delta
+                action = np.where(mask, candidate, self._last_published)
+                self._last_published = action.copy()
+                self._pending_delta = np.where(mask, 0.0, self._pending_delta)
 
         return action
 

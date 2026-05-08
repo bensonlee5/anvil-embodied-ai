@@ -134,10 +134,20 @@ class DataConfig:
     # leader joints parsed from robot_state_topic via joint_name_pattern.
     action_topics: Dict[str, "ActionTopicConfig"] = field(default_factory=dict)
 
+    # When True, use observation joint positions as action when action_topics
+    # are configured but the topics are not present in the MCAP file.
+    # Useful for datasets recorded without a separate command topic.
+    action_from_observation: bool = False
+
+    # Number of frames to look ahead when action_from_observation=True.
+    # action[t] = observation[t + n]. Default: 10.
+    action_from_observation_n: int = 10
+
+
     # Separate feature mappings for observation vs action
     # This allows different features for input (observation) and output (action)
     observation_feature_mapping: FeatureMapping = field(
-        default_factory=lambda: FeatureMapping(state="position", others=["velocity", "effort"])
+        default_factory=lambda: FeatureMapping(state="position", others=[])
     )
 
     action_feature_mapping: FeatureMapping = field(

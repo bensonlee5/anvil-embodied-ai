@@ -77,6 +77,7 @@ class ModelLoader:
         deterministic: bool = False,
         seed: int = 42,
         config_overrides: dict = None,
+        rtc_config_yaml: dict = None,
     ):
         """
         Initialize model loader.
@@ -91,6 +92,9 @@ class ModelLoader:
             seed: Random seed for deterministic mode
             config_overrides: Dict of config values to override at load time
                 e.g. {"temporal_ensemble_coeff": 0.01, "n_action_steps": 1}
+            rtc_config_yaml: Dict from the ``rtc:`` YAML section. When set and
+                the model is a VLA (pi0/pi05/smolvla), RTCConfig is injected
+                after loading and ``model.init_rtc_processor()`` is called.
         """
         self.model_path = Path(model_path)
         self.device = device
@@ -99,6 +103,7 @@ class ModelLoader:
         self.deterministic = deterministic
         self.seed = seed
         self.config_overrides = config_overrides or {}
+        self.rtc_config_yaml = rtc_config_yaml or {}
         self._model = None
         self._pre_processor = None
         self._post_processor = None
@@ -107,11 +112,13 @@ class ModelLoader:
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model path not found: {model_path}")
 
-        # Auto-detect pretrained_model subdirectory
-        pretrained_model_path = self.model_path / "pretrained_model"
-        if pretrained_model_path.exists() and (pretrained_model_path / "config.json").exists():
-            self._log("info", f"Found pretrained_model subdirectory: {pretrained_model_path}")
-            self.model_path = pretrained_model_path
+        # Auto-detect pretrained_model subdirectory.
+        # Accepts paths at checkpoint step level (e.g. checkpoints/last or checkpoints/100000)
+        # by checking for a pretrained_model subfolder when config.json is not in the given path.
+        if not (self.model_path / "config.json").exists():
+            pretrained_model_path = self.model_path / "pretrained_model"
+            if pretrained_model_path.exists() and (pretrained_model_path / "config.json").exists():
+                self.model_path = pretrained_model_path
 
         # Auto-detect model type from checkpoint if not provided
         if self.model_type is None:
@@ -186,16 +193,28 @@ class ModelLoader:
                 model = DiffusionPolicy.from_pretrained(str(self.model_path))
             elif self.model_type == "smolvla":
                 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+                from lerobot.configs.policies import PreTrainedConfig
 
-                model = SmolVLAPolicy.from_pretrained(str(self.model_path))
+                vla_cfg = PreTrainedConfig.from_pretrained(str(self.model_path))
+                if hasattr(vla_cfg, "compile_model"):
+                    vla_cfg.compile_model = False
+                model = SmolVLAPolicy.from_pretrained(str(self.model_path), config=vla_cfg)
             elif self.model_type == "pi0":
                 from lerobot.policies.pi0.modeling_pi0 import PI0Policy
+                from lerobot.configs.policies import PreTrainedConfig
 
-                model = PI0Policy.from_pretrained(str(self.model_path))
+                vla_cfg = PreTrainedConfig.from_pretrained(str(self.model_path))
+                if hasattr(vla_cfg, "compile_model"):
+                    vla_cfg.compile_model = False
+                model = PI0Policy.from_pretrained(str(self.model_path), config=vla_cfg)
             elif self.model_type == "pi05":
                 from lerobot.policies.pi05 import PI05Policy
+                from lerobot.configs.policies import PreTrainedConfig
 
-                model = PI05Policy.from_pretrained(str(self.model_path))
+                vla_cfg = PreTrainedConfig.from_pretrained(str(self.model_path))
+                if hasattr(vla_cfg, "compile_model"):
+                    vla_cfg.compile_model = False
+                model = PI05Policy.from_pretrained(str(self.model_path), config=vla_cfg)
             else:
                 raise ValueError(f"Unsupported model type: {self.model_type}")
 
@@ -210,6 +229,9 @@ class ModelLoader:
 
             # Apply config overrides after loading
             self._apply_config_overrides(model)
+
+            # Inject RTCConfig for VLA models (pi0 / pi05 / smolvla)
+            self._apply_rtc_config(model)
 
             return model
 
@@ -249,6 +271,48 @@ class ModelLoader:
             if coeff is not None and not hasattr(model, "temporal_ensembler"):
                 self._create_temporal_ensembler(model, coeff)
 
+        # Special handling: propagate num_inference_steps to DiffusionModel internal cache
+        # (DiffusionModel caches this at __init__ before overrides are applied)
+        if "num_inference_steps" in self.config_overrides and hasattr(model, "diffusion"):
+            model.diffusion.num_inference_steps = self.config_overrides["num_inference_steps"]
+
+    def _apply_rtc_config(self, model) -> None:
+        """Inject RTCConfig into VLA models and call init_rtc_processor().
+
+        Only applies to pi0 / pi05 / smolvla. ACT and Diffusion are skipped
+        silently. Must be called *after* _apply_config_overrides so that any
+        n_action_steps override is already in place before RTC initialisation.
+        """
+        if self.model_type not in {"pi0", "pi05", "smolvla"}:
+            return
+        if not self.rtc_config_yaml:
+            return
+
+        try:
+            from lerobot.policies.rtc.configuration_rtc import RTCConfig
+            from lerobot.configs.types import RTCAttentionSchedule
+
+            schedule_str = self.rtc_config_yaml.get("prefix_attention_schedule", "EXP")
+            schedule = RTCAttentionSchedule[schedule_str]
+
+            model.config.rtc_config = RTCConfig(
+                enabled=True,
+                execution_horizon=self.rtc_config_yaml.get("execution_horizon", 10),
+                max_guidance_weight=self.rtc_config_yaml.get("max_guidance_weight", 10.0),
+                prefix_attention_schedule=schedule,
+            )
+            model.init_rtc_processor()
+            self._log(
+                "info",
+                f"RTC enabled for {self.model_type} "
+                f"(execution_horizon={model.config.rtc_config.execution_horizon}, "
+                f"max_guidance_weight={model.config.rtc_config.max_guidance_weight}, "
+                f"schedule={schedule_str})",
+            )
+        except Exception as e:
+            self._log("error", f"Failed to initialise RTC: {e}")
+            raise
+
     def _create_temporal_ensembler(self, model, coeff: float) -> None:
         """Create temporal ensembler for ACT model."""
         try:
@@ -278,6 +342,18 @@ class ModelLoader:
 
         try:
             from lerobot.processor import PolicyProcessorPipeline
+
+            # VLA models register custom ProcessorStep implementations in their own
+            # processor_<model>.py modules. These must be imported before calling
+            # from_pretrained so that ProcessorStepRegistry recognises the step names
+            # (e.g. "pi05_prepare_state_tokenizer_processor_step"). Without this import
+            # the registry lookup fails and processor loading silently falls back to None.
+            if self.model_type == "pi0":
+                import lerobot.policies.pi0.processor_pi0  # noqa: F401
+            elif self.model_type == "pi05":
+                import lerobot.policies.pi05.processor_pi05  # noqa: F401
+            elif self.model_type == "smolvla":
+                import lerobot.policies.smolvla.processor_smolvla  # noqa: F401
 
             # Check if processor files exist
             pre_config = self.model_path / "policy_preprocessor.json"
@@ -312,7 +388,34 @@ class ModelLoader:
         except FileNotFoundError as e:
             self._log("warn", f"Processor pipelines not found: {e}")
         except Exception as e:
-            self._log("warn", f"Failed to load processor pipelines: {e}")
+            self._log("error", f"Failed to load processor pipelines: {e}")
+
+        # For pi05: if no preprocessor found in the checkpoint (fine-tuned models often
+        # skip saving policy_preprocessor.json), rebuild it from the policy's own factory.
+        # dataset_stats=None → normalization uses empty stats (passthrough), but tokenization
+        # is correctly configured with the PaliGemma tokenizer.
+        if self.model_type == "pi05" and pre_processor is None:
+            try:
+                from lerobot.policies.pi05.processor_pi05 import make_pi05_pre_post_processors
+
+                pre_processor, fallback_post = make_pi05_pre_post_processors(
+                    model.config, dataset_stats=None
+                )
+                if post_processor is None:
+                    post_processor = fallback_post
+                self._log("info", "Built pi05 processor from policy factory (no policy_preprocessor.json found)")
+            except Exception as e:
+                self._log("warn", f"Could not build pi05 processor from factory: {e}")
+
+        if pre_processor is None and post_processor is None:
+            self._log(
+                "warn",
+                "No processor pipelines found in checkpoint — observations and actions will NOT be "
+                "normalized. If the model was trained with a non-IDENTITY normalization_mapping "
+                "(e.g. MEAN_STD), inference results will be incorrect. "
+                "Re-train or ensure policy_preprocessor.json / policy_postprocessor.json exist in "
+                f"{self.model_path}",
+            )
 
         return model, pre_processor, post_processor
 

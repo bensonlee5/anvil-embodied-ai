@@ -152,11 +152,6 @@ class LeRobotWriter:
             print("  - Saving episode and encoding images...")
         dataset.save_episode()
 
-        # Stop image writer
-        if not self.quiet:
-            print("  - Stopping image writer...")
-        dataset.stop_image_writer()
-
     def finalize(self, dataset: LeRobotDataset):
         """
         Finalize dataset (write metadata and close files)
@@ -292,6 +287,23 @@ class LeRobotWriter:
                 }
 
         return features
+
+    def load_dataset_for_writing(self) -> LeRobotDataset:
+        """
+        Load an existing dataset in write mode for appending new episodes.
+
+        Uses LeRobotDataset.resume() to load existing metadata and prepare
+        the dataset for writing. Use this when --resume is set and
+        the output directory already contains a partial conversion.
+
+        Returns:
+            LeRobotDataset instance ready to accept add_frame / save_episode calls
+        """
+        return LeRobotDataset.resume(
+            repo_id=self.repo_id,
+            root=str(self.output_dir),
+            vcodec=self.vcodec,
+        )
 
     def __repr__(self) -> str:
         return f"LeRobotWriter(output_dir='{self.output_dir}', repo_id='{self.repo_id}')"

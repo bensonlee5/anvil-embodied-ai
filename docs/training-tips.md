@@ -9,7 +9,11 @@
 | `--dataset.repo_id` | `local` | Anvil datasets are always local; HuggingFace Hub upload is not needed for training |
 | `--policy.push_to_hub` | `false` | Prevents accidental upload of checkpoints to HuggingFace Hub |
 | `--eval_freq` | `0` | LeRobot's default (20 000 steps) would attempt to launch a gym simulation environment, which doesn't exist for Anvil MCAP datasets |
-| `--output_dir` | `model_zoo/<job_name>` | Resolved from `--job_name`; auto-generated from policy type + timestamp if omitted |
+| `--job_name` | `<policy>_<timestamp>` | Auto-generated from policy type + timestamp (e.g. `act_20260413_143052`) — used as the W&B run name |
+| `--output_dir` | `model_zoo/<dataset>/<job_name>` | Nested under dataset name for organised model zoo; auto-generated if omitted |
+| `--split-ratio` | `8,1,1` | Default 80/10/10 split for train/val/test sets |
+| `--wandb.project` | `<dataset name>` | Auto-set to the dataset folder name so all runs for the same task group together |
+| `--policy.vision_backbone` | `resnet18` | ImageNet-pretrained ResNet18 for ACT/Diffusion — override with `--backbone=resnet34` or `--backbone=resnet50` |
 
 Any of these can be overridden by passing the flag explicitly.
 
@@ -17,15 +21,15 @@ Any of these can be overridden by passing the flag explicitly.
 
 ## MODEL_PATH — Point to a Specific Checkpoint
 
-After training, checkpoints are saved under `model_zoo/<job_name>/checkpoints/<step>/pretrained_model/`.
+After training, checkpoints are saved under `model_zoo/<dataset>/<job_name>/checkpoints/<step>/pretrained_model/`.
 The `MODEL_PATH` in your `.env` must point all the way to the `pretrained_model` subdirectory:
 
 ```
 # Correct
-MODEL_PATH=/workspace/model_zoo/grabbing-w1/checkpoints/100000/pretrained_model
+MODEL_PATH=/workspace/model_zoo/my-dataset/act_20260413_143052/checkpoints/100000/pretrained_model
 
 # Wrong — config.json not found
-MODEL_PATH=/workspace/model_zoo/grabbing-w1
+MODEL_PATH=/workspace/model_zoo/my-dataset/act_20260413_143052
 ```
 
 ---
@@ -40,10 +44,10 @@ uv run wandb login   # one-time setup
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=act \
-  --job_name=grabbing-w1 \
-  --wandb.enable=true \
-  --wandb.project=my-project
+  --wandb.enable=true
 ```
+
+**W&B project and run name are auto-set.** The W&B project is automatically set to the dataset folder name (`my-dataset`), and the run name is set to `<policy>_<timestamp>` (e.g. `act_20260413_143052`). Override either with `--wandb.project=NAME` or `--job_name=NAME` if you prefer custom names.
 
 Key metrics to watch on the W&B dashboard:
 
@@ -59,7 +63,7 @@ If you don't want W&B, training still runs fine without it — logs are printed 
 
 ## save_freq
 
-Controls how often a checkpoint is saved (in steps). Each checkpoint writes the full model to `model_zoo/<job_name>/checkpoints/<step>/pretrained_model/`.
+Controls how often a checkpoint is saved (in steps). Each checkpoint writes the full model to `model_zoo/<dataset>/<job_name>/checkpoints/<step>/pretrained_model/`.
 
 ```bash
 --save_freq=10000   # save every 10k steps
@@ -140,19 +144,30 @@ to ablate which cameras matter most for your task:
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=act \
-  --job_name=grabbing-w1 \
   --camera-filter=chest,waist
 ```
 
 ### Delta actions
 
-For tasks where the robot needs to return to similar poses repeatedly,
-`--use-delta-actions` (action = target − current state) can make learning
-easier. The flag is persisted to `anvil_config.json` in the checkpoint and
-auto-read at inference — no manual inference YAML change needed.
+For tasks where the robot needs to return to similar poses repeatedly, training in delta action space (action = residual rather than absolute target) can make learning easier. Use `--action-type` to select the mode:
+
+| `--action-type` | Formula | When to use |
+|---|---|---|
+| `absolute` | raw target position | default; most tasks |
+| `delta_obs_t` | target − observation at chunk time | tasks with repeated returns to similar poses; equivalent to `--use-delta-actions` |
+| `delta_sequential` | target − previous action | smoother trajectories where inter-step residuals are small |
+
+The chosen mode is persisted to `anvil_config.json` in the checkpoint and auto-read at inference — no manual inference YAML change needed.
 
 ```bash
+# delta_obs_t (shorthand)
 uv run anvil-trainer ... --use-delta-actions
+
+# delta_obs_t (explicit)
+uv run anvil-trainer ... --action-type=delta_obs_t
+
+# delta_sequential
+uv run anvil-trainer ... --action-type=delta_sequential
 ```
 
 ### Steps and batch size
@@ -160,6 +175,34 @@ uv run anvil-trainer ... --use-delta-actions
 100k steps with batch size 16 is a solid default. If your dataset is small
 (< 50 episodes), 50k steps is often enough and avoids overfitting. Increase
 batch size if GPU memory allows — it stabilizes training.
+
+### Validation and Test Loss
+
+Pass `--split-ratio=train,val,test` (default `8,1,1`) to hold out episodes for validation and testing.
+
+- **Validation Loss (`val/loss`)**: Computed every `log_freq * 5` steps. Used to monitor overfitting during training.
+- **Test Loss (`eval/test_loss`)**: Computed at every checkpoint (`save_freq`). This is a more thorough evaluation on a completely held-out set.
+
+```bash
+uv run anvil-trainer \
+  --dataset.root=data/datasets/my-dataset \
+  --policy.type=act \
+  --split-ratio=8,1,1 \
+  --wandb.enable=true
+```
+
+Use the checkpoint with the lowest test loss for deployment. A rising validation loss while train loss keeps falling is an early overfitting signal.
+
+### Vision backbone
+
+ACT uses ImageNet-pretrained ResNet18 by default. To switch backbone:
+
+```bash
+--backbone=resnet34   # or resnet50
+```
+
+VLA policies (Pi0 / Pi0.5 / SmolVLA) ignore this flag — they use their own
+pre-trained vision encoder.
 
 ---
 
@@ -177,15 +220,18 @@ Trade-off: inference is slower than ACT because each step requires running a den
 uv run anvil-trainer \
   --dataset.root=data/datasets/my-dataset \
   --policy.type=diffusion \
-  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
-  --job_name=pick-and-place
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}'
 ```
 
 ### Steps and batch size
 
-100k steps with batch size 64 is a solid default. Diffusion models benefit more from larger batch sizes than ACT — this reduces the variance of the score-matching objective and stabilizes training. If GPU memory is limited, batch size 32 is acceptable.
+100k steps with batch size 64 is a solid default. Diffusion models benefit more from larger batch sizes than ACT — this reduces the variance of the score-matching objective and stabilizes training. On a 24 GB GPU with 3–4 cameras at full resolution, batch size 16–32 is the practical ceiling; use `--policy.resize_shape="[256,320]"` to shrink images before the backbone if you need to recover headroom for a larger batch.
 
 If your dataset is small (< 50 episodes), 50k steps is often enough.
+
+### Vision backbone
+
+Same as ACT — ImageNet-pretrained ResNet18 is the default. Use `--backbone=resnet34` or `--backbone=resnet50` to switch. The `use_group_norm` flag is automatically disabled when a pretrained backbone is used (GroupNorm conversion is incompatible with pretrained BatchNorm weights).
 
 ### n_action_steps
 
@@ -234,8 +280,7 @@ uv run anvil-trainer \
   --policy.type=smolvla \
   --policy.pretrained_path=lerobot/smolvla_base \
   --policy.load_vlm_weights=true \
-  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
-  --job_name=grabbing-w1
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}'
 ```
 
 `--policy.load_vlm_weights=true` is required when loading from a SmolVLA
@@ -255,7 +300,6 @@ uv run anvil-trainer \
   --policy.pretrained_path=lerobot/smolvla_base \
   --policy.load_vlm_weights=true \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
-  --job_name=grabbing-w1 \
   --task-description="pick up the red block and stack it on the blue block"
 ```
 
@@ -307,9 +351,7 @@ uv run anvil-trainer \
   --policy.gradient_checkpointing=true \
   --policy.dtype=bfloat16 \
   --policy.train_expert_only=true \
-  --policy.freeze_vision_encoder=false \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
-  --job_name=grabbing-pi0 \
   --task-description="pick up the red block"
 ```
 
@@ -361,11 +403,9 @@ uv run anvil-trainer \
   --policy.gradient_checkpointing=true \
   --policy.dtype=bfloat16 \
   --policy.train_expert_only=true \
-  --policy.freeze_vision_encoder=false \
   --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}' \
-  --batch_size=1 \
+  --batch_size=16 \
   --num_workers=0 \
-  --job_name=grabbing-pi05 \
   --task-description="pick up the red block"
 ```
 
@@ -375,7 +415,7 @@ uv run anvil-trainer \
 |---|---|
 | `--policy.dtype=bfloat16` | Halves VRAM — required to fit 4B model on 24 GB |
 | `--policy.gradient_checkpointing=true` | Further reduces VRAM during backprop |
-| `--batch_size=1` | Avoids VRAM OOM during forward pass |
+| `--batch_size=16` | Starting point — reduce if GPU OOM |
 | `--num_workers=0` | Prevents CPU RAM OOM — forked workers each copy the full model into RAM |
 
 ### Normalization mapping
@@ -413,3 +453,26 @@ main()
 After augmentation, you can use the default `QUANTILE10` normalization and omit `--policy.normalization_mapping`.
 
 Option A is simpler and sufficient for most tasks. Choose Option B only if you need to reproduce results that rely specifically on quantile normalization.
+
+---
+
+## Offline Evaluation (anvil-eval)
+
+After training a model, use `anvil-eval` to quantify its performance before robot deployment.
+
+### Key Metrics
+- **MAE/MSE**: Mean Absolute/Squared Error across all joints and frames.
+- **Cosine Similarity**: Measures how well the predicted action vector aligns with the ground-truth direction.
+- **Smoothness**: L2 norm of consecutive action deltas. High variance here indicates "jittery" model output.
+
+### Analyzing Plots
+- **Episode Plots**: Found in `plots/episode_NNNN_<split>.png`. Each joint has its own subplot.
+  - **Reordering**: Joint names ending in `finger_joint1` (grippers) are moved to the end of the grid for easier comparison.
+- **Summary Box Plot**: Found in `plots/summary_per_joint_mae.png`.
+  - Shows the distribution of MAE across all evaluated episodes for each joint.
+  - Useful for identifying which joints the model is most/least accurate on across different dataset splits.
+
+### Evaluation Strategies
+- Use `--split all --num-eps 5` to get a representative sample from across the entire dataset.
+- High error on the `train` split indicates the model is underfitting (needs more training or more capacity).
+- Low error on `train` but high error on `val`/`test` indicates the model is overfitting.

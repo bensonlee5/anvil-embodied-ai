@@ -25,7 +25,7 @@ WORKDIR /workspace
 
 # Base lerobot install — cached as long as version doesn't change
 RUN pip3 install --break-system-packages --no-cache-dir --ignore-installed \
-    numpy packaging "lerobot==${LEROBOT_VERSION}" && \
+    numpy packaging "lerobot==${LEROBOT_VERSION}" matplotlib && \
     pip3 install --break-system-packages --no-cache-dir "setuptools<80"
 
 # Extras — separate layer, only rebuilt when LEROBOT_EXTRAS changes
@@ -33,6 +33,10 @@ RUN if [ -n "${LEROBOT_EXTRAS}" ]; then \
         pip3 install --break-system-packages --no-cache-dir \
             "lerobot[${LEROBOT_EXTRAS}]==${LEROBOT_VERSION}"; \
     fi
+
+# Patch lerobot v0.5.0 bug: groot_n1.py has a malformed @dataclass that crashes
+# on import. Remove groot lines from policies/__init__.py since we don't use GR00T.
+RUN find /usr/local/lib -path "*/lerobot/policies/__init__.py" -exec sed -i '/groot/d' {} \;
 
 # Copy ROS2 package (changes often → late layer)
 COPY ros2/src/lerobot_control /workspace/src/lerobot_control

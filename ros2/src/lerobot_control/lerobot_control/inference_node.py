@@ -14,12 +14,15 @@ Subscribes to:
 
 Publishes:
     - Forward position controller command topics (std_msgs/Float64MultiArray)
+    - /monitor/obs_state, /monitor/raw_output, /monitor/control_cmd  (when monitor_enable:=true)
 """
 
 import json
-from pathlib import Path
-
+import math
+import threading
 import time
+from collections import deque
+from pathlib import Path
 
 import numpy as np
 import rclpy
@@ -31,6 +34,7 @@ from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray
 
 from .action_limiter import ActionLimiter
+from .delta_restore import resolve_action_type, restore_delta_chunk
 from .metrics_tracker import MetricsTracker
 from .model_loader import ModelLoader, set_deterministic_mode
 
@@ -46,7 +50,6 @@ class LeRobotInferenceNode(Node):
     def __init__(self, parameter_overrides: list = None):
         super().__init__("lerobot_inference_node", parameter_overrides=parameter_overrides or [])
 
-        self._control_callback_group = MutuallyExclusiveCallbackGroup()
         self._subscription_callback_group = ReentrantCallbackGroup()
 
         self._setup_config()
@@ -62,42 +65,90 @@ class LeRobotInferenceNode(Node):
             image_shape=self.image_shape,
             metrics=self.metrics,
             callback_group=self._subscription_callback_group,
+            debug_image_dir=self._debug_image_dir,
         )
 
-        if not self.monitor_only:
+        # Non-VLA action buffer (ACT/Diffusion put actions here from obs timer)
+        self._classic_action_deque: deque = deque(maxlen=10)
+        # Reference joint state captured at the moment each action chunk was
+        # generated (in model/observation order).  All queued steps in the chunk
+        # share this reference so delta restoration is consistent with training.
+        # _delta_ref_state and _abs_shadow_queue must always be reset together;
+        # use _reset_delta_state() in any future reload or episode-boundary path.
+        self._delta_ref_state: np.ndarray | None = None
+        self._abs_shadow_queue: deque[np.ndarray] = deque()
+
+        self._shutting_down: bool = False
+        self._has_published: bool = False
+
+        if not self.echo_topic_only:
             self._setup_model()
 
             self.action_limiter = ActionLimiter(
                 max_delta=self.max_position_delta,
+                min_delta_threshold=self.min_position_delta,
                 model_joint_order=self.joint_names_config.get("model_joint_order", []),
                 controller_joint_order=self.joint_names_config.get("controller_joint_order", []),
-                use_delta_actions=self.use_delta_actions,
                 logger=self.get_logger(),
             )
 
+            # Resolve delta exclude indices in model joint order (used by chunk restore)
+            _model_order = self.joint_names_config.get("model_joint_order", [])
+            self._delta_exclude_indices = [
+                _model_order.index(name)
+                for name in self.delta_exclude_joints
+                if name in _model_order
+            ]
+
             self._setup_publishers()
 
-            self.control_timer = self.create_timer(
+            # Unified split-timer architecture for all models:
+            #   _obs_update:    preprocess (+ inference for non-VLA)
+            #   _publish_loop:  pop action from queue/deque → publish
+            self._obs_callback_group = MutuallyExclusiveCallbackGroup()
+            self._publish_callback_group = MutuallyExclusiveCallbackGroup()
+
+            self._obs_timer = self.create_timer(
                 1.0 / self.control_freq,
-                self.control_loop,
-                callback_group=self._control_callback_group,
+                self._obs_update,
+                callback_group=self._obs_callback_group,
+            )
+            self._publish_timer = self.create_timer(
+                1.0 / self.control_freq,
+                self._publish_loop,
+                callback_group=self._publish_callback_group,
             )
 
         self._log_startup()
 
-        # Stats logging timer (always active — used for monitor_only mode too)
+        # Debug mode: enables ActionSmoothTracker, queue depth stats, Action FPS
+        self._smooth_tracker = None
+        self._queue_depths: deque[int] = deque(maxlen=300)
+        self._vla_skip_count: int = 0
+        if self._debug and not self.echo_topic_only and hasattr(self, "model"):
+            from .action_smooth_tracker import ActionSmoothTracker
+
+            total_action_dim = sum(
+                ac.get("action_end", 0) - ac.get("action_start", 0)
+                for ac in self.arms_config.values()
+            )
+            if total_action_dim > 0:
+                self._smooth_tracker = ActionSmoothTracker(action_dim=total_action_dim)
+
+        # Stats logging timer (in publish callback group to avoid race on _queue_depths)
         self._stats_log_interval = 5.0
         self._stats_timer = self.create_timer(
             self._stats_log_interval,
             self._log_input_stats,
-            callback_group=self._control_callback_group,
+            callback_group=self._publish_callback_group if not self.echo_topic_only else MutuallyExclusiveCallbackGroup(),
         )
 
-        # Windowed rate tracking — store previous snapshot for delta computation
+        # Windowed rate tracking
         self._prev_log_time: float | None = None
         self._prev_joint_count: int = 0
         self._prev_control_count: int = 0
         self._prev_inference_count: int = 0
+        self._prev_action_output_count: int = 0
         self._prev_frame_counters: dict[str, int] = {}
 
     def _setup_config(self) -> None:
@@ -108,12 +159,19 @@ class LeRobotInferenceNode(Node):
         self.declare_parameter("device", "cuda")
         self.declare_parameter("deterministic", False)
         self.declare_parameter("deterministic_seed", 42)
-        self.declare_parameter("monitor_only", False)
+        self.declare_parameter("echo_topic_only", False)
+        self.declare_parameter("debug", False)
+        self.declare_parameter("debug_image_dir", "")
+        self.declare_parameter("monitor_enable", False)
 
         # Static fields from ROS2 params
-        self.monitor_only = self.get_parameter("monitor_only").value
+        self.echo_topic_only = self.get_parameter("echo_topic_only").value
+        self._debug = self.get_parameter("debug").value
+        self._monitor_enable: bool = self.get_parameter("monitor_enable").value
+        _debug_image_dir = self.get_parameter("debug_image_dir").value
+        self._debug_image_dir: str | None = _debug_image_dir if _debug_image_dir else None
         self.model_path = self.get_parameter("model_path").value
-        if not self.model_path and not self.monitor_only:
+        if not self.model_path and not self.echo_topic_only:
             raise ValueError("model_path parameter is required")
 
         self.control_freq = self.get_parameter("control_frequency").value
@@ -126,6 +184,7 @@ class LeRobotInferenceNode(Node):
         # Fields from YAML config
         safety_config = self.config.get("safety", {})
         self.max_position_delta = safety_config.get("max_position_delta", 0.1)
+        self.min_position_delta = safety_config.get("min_position_delta", None)
 
         self.joint_state_topic = self.config.get("joint_state_topic", "/joint_states")
         self.camera_mapping = self.config.get("camera_mapping", {})
@@ -133,29 +192,40 @@ class LeRobotInferenceNode(Node):
         self.arms_config = self.config.get("arms", {})
         self.joint_names_config = self.config.get("joint_names", {})
 
-        # Inference tuning knobs (null = use checkpoint defaults)
-        tuning_config = self.config.get("inference_tuning", {})
-        self.n_action_steps_override = tuning_config.get("n_action_steps", None)
-        self.temporal_ensemble_coeff = tuning_config.get("temporal_ensemble_coeff", None)
+        # Inference tuning — per model type (resolved after model_type is known)
+        self._tuning_config = self.config.get("inference_tuning", {})
 
         # --- Checkpoint metadata (lightweight JSON reads, no tensor loading) ---
-        meta = self._read_checkpoint_metadata()
+        # Skip in echo_topic_only mode — no checkpoint needed
+        meta = {} if self.echo_topic_only else self._read_checkpoint_metadata()
 
         # image_shape: from config.json input_features — must match training
-        # Default (480, 640, 3) is used only in monitor_only mode with no checkpoint
+        # Default (480, 640, 3) is used only in echo_topic_only mode with no checkpoint
         self.image_shape = meta.get("image_shape", (480, 640, 3))
 
         # model_type: from config.json, YAML overrides if explicitly set
         model_cfg = self.config.get("model", {})
         self.model_type = model_cfg.get("type") or meta.get("model_type")
 
-        # use_delta_actions: from anvil_config.json — must match training, no YAML override
-        self.use_delta_actions = meta.get("use_delta_actions", False)
+        # action_type from anvil_config.json — must match training
+        self.action_type: str = resolve_action_type(meta)
+        self.use_delta_actions: bool = self.action_type in ("delta_obs_t", "delta_sequential")
+        self.delta_exclude_joints: list[str] = meta.get("delta_exclude_joints", [])
+
+        # Resolve delta exclude joint indices (in model output order)
+        # Will be finalized after joint_names_config is loaded.
+        self._delta_exclude_indices: list[int] = []
 
         # task_description: anvil_config.json first, YAML overrides if explicitly set
         self.task_description = meta.get("task_description", "")
         if model_cfg.get("task_description"):
             self.task_description = model_cfg["task_description"]
+
+
+    @property
+    def _is_vla(self) -> bool:
+        """True if the loaded model is a VLA (pi0 / pi05 / smolvla)."""
+        return getattr(self, "model_type", None) in {"smolvla", "pi0", "pi05"}
 
     def _load_yaml_config(self, config_file: str) -> dict:
         """Load configuration from YAML file."""
@@ -186,6 +256,15 @@ class LeRobotInferenceNode(Node):
         if pretrained.exists() and (pretrained / "config.json").exists():
             checkpoint = pretrained
 
+        # Auto-detect HF cache snapshot structure (blobs/ + snapshots/)
+        if not (checkpoint / "config.json").exists():
+            snapshots = checkpoint / "snapshots"
+            if snapshots.is_dir():
+                for snap in sorted(snapshots.iterdir(), reverse=True):
+                    if (snap / "config.json").exists():
+                        checkpoint = snap
+                        break
+
         # config.json — required
         config_path = checkpoint / "config.json"
         if not config_path.exists():
@@ -202,6 +281,9 @@ class LeRobotInferenceNode(Node):
         if image_shape is None:
             raise RuntimeError(f"No VISUAL input feature found in {config_path}")
 
+        # Update model_path to resolved checkpoint (for ModelLoader)
+        self.model_path = str(checkpoint)
+
         meta = {
             "image_shape": image_shape,
             "model_type":  cfg.get("type"),
@@ -211,10 +293,11 @@ class LeRobotInferenceNode(Node):
         anvil_path = checkpoint / "anvil_config.json"
         if anvil_path.exists():
             anvil = json.loads(anvil_path.read_text())
+            meta["action_type"] = anvil.get("action_type", "absolute")
             meta["use_delta_actions"] = anvil.get("use_delta_actions", False)
+            meta["delta_exclude_joints"] = anvil.get("delta_exclude_joints", [])
             if "task_description" in anvil:
                 meta["task_description"] = anvil["task_description"]
-
         return meta
 
     def _create_strategy(self):
@@ -230,17 +313,33 @@ class LeRobotInferenceNode(Node):
             set_deterministic_mode(seed)
             self.get_logger().info(f"Deterministic mode enabled with seed={seed}")
 
-        # Build inference tuning overrides
+        # Resolve inference tuning per model type
+        tuning = self._tuning_config
         config_overrides = {}
-        if self.n_action_steps_override is not None:
-            config_overrides["n_action_steps"] = self.n_action_steps_override
-        if self.temporal_ensemble_coeff is not None:
-            config_overrides["temporal_ensemble_coeff"] = self.temporal_ensemble_coeff
-            if self.n_action_steps_override is None or self.n_action_steps_override > 1:
-                self.get_logger().warn(
-                    "temporal_ensemble requires n_action_steps=1, forcing override"
-                )
-                config_overrides["n_action_steps"] = 1
+
+        if self._is_vla:
+            self.rtc_config_yaml = tuning.get("rtc", {})
+        elif self.model_type == "diffusion":
+            diff = tuning.get("diffusion", {})
+            if diff.get("n_action_steps") is not None:
+                config_overrides["n_action_steps"] = diff["n_action_steps"]
+            if diff.get("num_inference_steps") is not None:
+                config_overrides["num_inference_steps"] = diff["num_inference_steps"]
+        else:  # ACT and others
+            act = tuning.get("act", {})
+            if act.get("n_action_steps") is not None:
+                config_overrides["n_action_steps"] = act["n_action_steps"]
+            if act.get("temporal_ensemble_coeff") is not None:
+                config_overrides["temporal_ensemble_coeff"] = act["temporal_ensemble_coeff"]
+                if act.get("n_action_steps") is None or act["n_action_steps"] > 1:
+                    self.get_logger().warn(
+                        "temporal_ensemble requires n_action_steps=1, forcing override"
+                    )
+                    config_overrides["n_action_steps"] = 1
+
+        # Fallback: also check old top-level rtc key for backward compatibility
+        if self._is_vla and not self.rtc_config_yaml:
+            self.rtc_config_yaml = self.config.get("rtc", {})
 
         loader = ModelLoader(
             self.model_path,
@@ -248,12 +347,18 @@ class LeRobotInferenceNode(Node):
             self.model_type,
             config_overrides=config_overrides,
             logger=self.get_logger(),
+            rtc_config_yaml=getattr(self, "rtc_config_yaml", {}),
         )
         self.model, self.preprocessor, self.postprocessor = loader.load_with_processors()
         self._loader = loader
 
         # Confirm final model_type (ModelLoader auto-detects if None was passed)
         self.model_type = loader.model_type
+
+        # VLA models: set up ActionQueue and start background inference thread
+        if self._is_vla:
+            self._setup_vla_inference()
+            self._start_inference_thread()
 
         if self.model_type in {"smolvla", "pi0", "pi05"} and not self.task_description:
             self.get_logger().warn(
@@ -267,17 +372,19 @@ class LeRobotInferenceNode(Node):
         logger.info("=" * 50)
         logger.info("LeRobot Inference Node")
         logger.info("=" * 50)
-        if self.monitor_only:
+        if self.echo_topic_only:
             logger.info("Mode:       Monitor Only (no model, no publishing)")
         else:
             logger.info(f"Model:      {self.model_path}")
             logger.info(f"Type:       {self.model_type or 'unknown'}")
-            logger.info(f"Delta acts: {self.use_delta_actions}")
+            logger.info(f"Action type: {self.action_type}")
+            if self.use_delta_actions and self.delta_exclude_joints:
+                logger.info(f"Delta excl: {self.delta_exclude_joints}")
             if self.model_type in {"smolvla", "pi0", "pi05"}:
                 logger.info(f"Task:       '{self.task_description}'")
         logger.info(f"Device:     {self.device}")
         logger.info(f"Frequency:  {self.control_freq} Hz")
-        if not self.monitor_only:
+        if not self.echo_topic_only:
             logger.info(f"Max delta:  {self.max_position_delta} rad")
 
         h, w, _ = self.image_shape
@@ -287,7 +394,7 @@ class LeRobotInferenceNode(Node):
         logger.info(f"Cameras:    {self.camera_names}")
         logger.info(f"Arms:       {list(self.arms_config.keys())}")
 
-        if not self.monitor_only and hasattr(self, "model") and hasattr(self.model, "config"):
+        if not self.echo_topic_only and hasattr(self, "model") and hasattr(self.model, "config"):
             config = self.model.config
             chunk_size = getattr(config, "chunk_size", None)
             n_action_steps = getattr(config, "n_action_steps", None)
@@ -316,6 +423,29 @@ class LeRobotInferenceNode(Node):
                 else:
                     logger.error("temporal_ensemble_coeff is set but ensembler not created!")
 
+        # GPU/CPU memory after model load
+        if not self.echo_topic_only and hasattr(self, "model"):
+            if torch.cuda.is_available():
+                gpu_mb = torch.cuda.memory_allocated(self.device) / 1e6
+                logger.info(f"GPU memory (weights): {gpu_mb:.0f} MB")
+            try:
+                import psutil
+
+                cpu_mb = psutil.Process().memory_info().rss / 1e6
+                logger.info(f"CPU RSS after load:   {cpu_mb:.0f} MB")
+            except ImportError:
+                pass
+
+        if not self.echo_topic_only and self._is_vla:
+            rtc = self.rtc_config_yaml
+            logger.info("┌─ RTC ───────────────────────────────────────────────────┐")
+            logger.info("│  Status:              ENABLED                           │")
+            logger.info(f"│  execution_horizon  = {rtc.get('execution_horizon', 10):<4}                             │")
+            logger.info(f"│  max_guidance_weight= {rtc.get('max_guidance_weight', 10.0):<6}                           │")
+            logger.info(f"│  attention_schedule = {rtc.get('prefix_attention_schedule', 'EXP'):<6}                           │")
+            logger.info(f"│  queue_threshold    = {rtc.get('queue_trigger_threshold', 30):<4}                             │")
+            logger.info("└─────────────────────────────────────────────────────────┘")
+
     def _setup_publishers(self) -> None:
         """Setup action publishers."""
         self.arm_publishers: dict[str, rclpy.publisher.Publisher] = {}
@@ -327,58 +457,272 @@ class LeRobotInferenceNode(Node):
             self.arm_publishers[arm_name] = self.create_publisher(Float64MultiArray, cmd_topic, 10)
             self.get_logger().info(f"Publishing to: {cmd_topic}")
 
-    def control_loop(self) -> None:
-        """Main control loop - strategy-agnostic."""
-        self.metrics.record_control_loop()
+        if self._monitor_enable:
+            self._monitor_obs_pub = self.create_publisher(Float64MultiArray, "/monitor/obs_state", 10)
+            self._monitor_raw_pub = self.create_publisher(Float64MultiArray, "/monitor/raw_output", 10)
+            self._monitor_cmd_pub = self.create_publisher(Float64MultiArray, "/monitor/control_cmd", 10)
+            self.get_logger().info("Monitor topics enabled: /monitor/{obs_state,raw_output,control_cmd}")
 
-        # Get observation via strategy
+    def _setup_vla_inference(self) -> None:
+        """Initialise ActionQueue and LatencyTracker for VLA / RTC mode."""
+        from lerobot.policies.rtc.action_queue import ActionQueue
+
+        from lerobot_control.latency_stats import LatencyStats
+
+        self._action_queue = ActionQueue(self.model.config.rtc_config)
+        self._latency_tracker = LatencyStats(maxlen=100)
+        self._latest_obs = None
+        self._obs_lock = threading.Lock()
+        self._inference_stop = threading.Event()
+        self._rtc_threshold = self.rtc_config_yaml.get("queue_trigger_threshold", 30)
+        self._rtc_delay_fallback = self.rtc_config_yaml.get("inference_delay", 4)
+
+    def _start_inference_thread(self) -> None:
+        """Start the background RTC inference daemon thread."""
+        self._inference_thread = threading.Thread(
+            target=self._inference_loop,
+            name="rtc-inference",
+            daemon=True,
+        )
+        self._inference_thread.start()
+
+    def _inference_loop(self) -> None:
+        """Background inference thread for VLA / RTC mode.
+
+        Continuously predicts the next action chunk whenever ActionQueue depth
+        falls to or below the trigger threshold. Postprocessing happens here
+        (before merge) so that control_loop can publish directly from the queue
+        without any further processing.
+        """
+        while not self._inference_stop.is_set():
+            # Wait until queue is low enough to warrant a new inference
+            if self._action_queue.qsize() > self._rtc_threshold:
+                time.sleep(0.005)
+                continue
+
+            # Read latest preprocessed observation (non-blocking)
+            with self._obs_lock:
+                obs = self._latest_obs
+
+            if obs is None:
+                time.sleep(0.005)
+                continue
+
+            # Snapshot queue state before inference for delay validation
+            idx_before = self._action_queue.get_action_index()
+            prev_actions = self._action_queue.get_left_over()
+
+            # Compute inference delay from latency history
+            max_lat = self._latency_tracker.max()
+            inference_delay = (
+                math.ceil(max_lat * self.control_freq) if max_lat else self._rtc_delay_fallback
+            )
+
+            # Run inference — do NOT use torch.inference_mode():
+            # RTCProcessor calls torch.enable_grad() internally for guidance gradients.
+            # inference_mode() cannot be overridden and would silently zero all gradients.
+            t0 = time.monotonic()
+            try:
+                raw = self.model.predict_action_chunk(
+                    obs,
+                    inference_delay=inference_delay,
+                    prev_chunk_left_over=prev_actions,
+                    execution_horizon=self.model.config.rtc_config.execution_horizon,
+                )
+            except Exception as e:
+                import traceback
+                self.get_logger().error(f"[RTC] predict_action_chunk failed: {e}")
+                self.get_logger().error(traceback.format_exc())
+                time.sleep(0.005)
+                continue
+
+            elapsed = time.monotonic() - t0
+            self._latency_tracker.add(elapsed)
+            new_delay = math.ceil(elapsed * self.control_freq)
+
+            # Postprocess in inference thread (official pattern from eval_with_real_robot.py):
+            #   original = raw (for RTC guidance of the next chunk)
+            #   processed = denormalized (ready for the robot)
+            original = raw.squeeze(0).clone()
+            if self.postprocessor:
+                processed = self.postprocessor.process_action(raw.squeeze(0))
+            else:
+                processed = original
+
+            self._action_queue.merge(original, processed, new_delay, idx_before)
+            self.metrics.record_inference()
+
+    def _preprocess_vla_observation(self, observation: dict) -> dict:
+        """Preprocess a raw observation for VLA models.
+
+        Follows the official lerobot test convention: build a flat batch dict with
+        all observation.* keys plus "task" (as a list of strings), then call the
+        preprocessor directly as a callable. The pipeline's to_transition / to_output
+        converters handle observation splitting, task → complementary_data routing,
+        tokenization, normalization, and device placement in one pass.
+
+        Reference: tests/policies/pi0_pi05/test_pi05_rtc.py
+        """
+        if self.preprocessor:
+            # Build flat batch dict: observation keys + task key (list of strings)
+            batch = dict(observation)
+            if self.task_description:
+                batch["task"] = [self.task_description]
+            # preprocessor(batch) → batch_to_transition → _forward → transition_to_batch
+            # Output is a flat dict with observation.language.tokens etc. at top level
+            observation = self.preprocessor(batch)
+        return self._move_to_device(observation)
+
+    def _obs_update(self) -> None:
+        """Observation update timer (unified for all models).
+
+        VLA: preprocess and update shared snapshot for background inference thread.
+        ACT/Diffusion: preprocess, run select_action, push result to deque.
+        """
+        if self._shutting_down:
+            return
         observation = self.strategy.get_observation(self.camera_names)
         if observation is None:
             return
 
         try:
-            # Preprocess observation
-            if self.preprocessor:
-                if self.model_type in {"smolvla", "pi0", "pi05"} and self.task_description:
-                    # VLA-family policies need 'task' in complementary_data for tokenization
-                    # Use full transition processing instead of just process_observation
-                    from lerobot.processor.converters import create_transition
-                    from lerobot.processor.core import TransitionKey
+            if self._is_vla:
+                obs = self._preprocess_vla_observation(observation)
+                with self._obs_lock:
+                    self._latest_obs = obs
+            else:
+                # Keep a reference to the raw (unnormalised) observation so we can
+                # capture the joint-state baseline when a new chunk is generated.
+                _raw_obs = observation
 
-                    transition = create_transition(
-                        observation=observation, complementary_data={"task": self.task_description}
+                # Detect whether a new action chunk is about to be generated.
+                # When the queue is empty, select_action will run the model and fill
+                # it with n_action_steps new predictions, all computed relative to
+                # the current state.  We capture that state as the delta reference.
+                _is_new_chunk = (
+                    self.use_delta_actions
+                    and hasattr(self.model, "_queues")
+                    and len(self.model._queues.get("action", [])) == 0
+                )
+
+                if self.preprocessor:
+                    observation = self.preprocessor(dict(observation))
+                observation = self._move_to_device(observation)
+
+                # [DEBUG] Point 1: obs.state after preprocessor (check normalization)
+                if self._debug and _is_new_chunk and "observation.state" in observation:
+                    _dbg_s = observation["observation.state"]
+                    if isinstance(_dbg_s, torch.Tensor):
+                        _dbg_s = _dbg_s.cpu().numpy()
+                    _dbg_s = np.asarray(_dbg_s).flatten()
+                    self.get_logger().info(
+                        f"[DEBUG] obs.state (post-preproc): [{', '.join(f'{v:.4f}' for v in _dbg_s)}]"
                     )
-                    processed = self.preprocessor._forward(transition)
-                    observation = processed[TransitionKey.OBSERVATION]
-                else:
-                    observation = self.preprocessor.process_observation(observation)
 
-            # Ensure observation tensors are on the same device as the model
-            observation = self._move_to_device(observation)
+                with torch.inference_mode():
+                    action = self.model.select_action(observation)
+                    # Collect remaining normalized queue items BEFORE postprocessing so
+                    # the whole chunk can be denormalized together for delta restore.
+                    if _is_new_chunk and self.use_delta_actions and hasattr(self.model, "_queues"):
+                        _rest_norm = [a.detach().clone() for a in self.model._queues.get("action", [])]
+                    else:
+                        _rest_norm = None
 
-            # Run inference
-            with torch.inference_mode():
-                action = self.model.select_action(observation)
+                # Capture reference state right after chunk generation
+                if _is_new_chunk and "observation.state" in _raw_obs:
+                    _s = _raw_obs["observation.state"]
+                    if hasattr(_s, "numpy"):
+                        _s = (_s.squeeze(0).numpy() if _s.dim() > 1 else _s.numpy())
+                    elif hasattr(_s, "cpu"):
+                        _s = _s.cpu().numpy()
+                    self._delta_ref_state = np.asarray(_s, dtype=np.float64).flatten()
 
-            # Postprocess if pipeline available
-            if self.postprocessor:
-                action = self.postprocessor.process_action(action)
+                if self.postprocessor:
+                    action = self.postprocessor.process_action(action)
 
-            # Convert to numpy
+                if isinstance(action, torch.Tensor):
+                    if action.dim() > 1:
+                        action = action.squeeze(0)
+                    action = action.cpu().numpy()
+
+                # [DEBUG] Point 3: action after postprocessor, before delta restore
+                if self._debug and _is_new_chunk:
+                    self.get_logger().info(
+                        f"[DEBUG] action (post-postproc): [{', '.join(f'{v:.4f}' for v in action)}]"
+                    )
+
+                # Chunk-level delta restore via shadow queue.
+                # The model's internal queue stores normalized tensors; we denormalize
+                # the full chunk together, restore delta → absolute, then serve absolute
+                # values from a shadow queue so we never re-enter normalized space.
+                if self.use_delta_actions:
+                    if _is_new_chunk and self._delta_ref_state is not None:
+                        if _rest_norm is not None:
+                            _rest_denorm = [self._denorm_queue_action(a) for a in _rest_norm]
+                            _chunk = np.stack([action] + _rest_denorm) if _rest_denorm else action[np.newaxis]
+                        else:
+                            _chunk = action[np.newaxis]
+                        _abs = restore_delta_chunk(_chunk, self._delta_ref_state, self.action_type, self._delta_exclude_indices)
+                        self._abs_shadow_queue = deque(_abs[1:])
+                        action = _abs[0]
+                    elif self._abs_shadow_queue:
+                        action = self._abs_shadow_queue.popleft()
+                    elif not hasattr(self.model, "_queues") and self._delta_ref_state is not None:
+                        action = restore_delta_chunk(action[np.newaxis], self._delta_ref_state, self.action_type, self._delta_exclude_indices)[0]
+
+                self._classic_action_deque.append(action)
+                self.metrics.record_inference()
+
+        except Exception as e:
+            import traceback
+            self.get_logger().error(f"Observation/inference error: {e}")
+            self.get_logger().error(traceback.format_exc())
+
+    def _publish_loop(self) -> None:
+        """Action publish timer (unified for all models).
+
+        VLA: pop from ActionQueue (filled by background inference thread).
+        ACT/Diffusion: pop from deque (filled by _obs_update).
+        """
+        if self._shutting_down:
+            return
+        self.metrics.record_control_loop()
+
+        if self._is_vla:
+            action = self._action_queue.get()
+            if self._debug:
+                self._queue_depths.append(self._action_queue.qsize())
+            if action is None:
+                self._vla_skip_count += 1
+                return
             if isinstance(action, torch.Tensor):
                 if action.dim() > 1:
                     action = action.squeeze(0)
                 action = action.cpu().numpy()
+        else:
+            if not self._classic_action_deque:
+                return
+            action = self._classic_action_deque.popleft()
 
-            self.metrics.record_inference()
-
+        try:
             self._publish_action(action)
-
         except Exception as e:
             import traceback
-
-            self.get_logger().error(f"Inference error: {e}")
+            self.get_logger().error(f"Publish error: {e}")
             self.get_logger().error(traceback.format_exc())
+
+    def _reset_delta_state(self) -> None:
+        """Reset delta-restore state; call this whenever the model is reloaded."""
+        self._delta_ref_state = None
+        self._abs_shadow_queue.clear()
+
+    def _denorm_queue_action(self, a: object) -> np.ndarray:
+        """Apply postprocessor and convert a queued normalized tensor to a flat numpy array."""
+        if self.postprocessor:
+            a = self.postprocessor.process_action(a)  # type: ignore[arg-type]
+        if isinstance(a, torch.Tensor):
+            return a.detach().cpu().numpy().flatten()
+        return np.asarray(a).flatten()
 
     def _move_to_device(self, data):
         """Recursively move tensors to the configured device."""
@@ -400,15 +744,16 @@ class LeRobotInferenceNode(Node):
             self.joint_names_config.get("joint_order", []),
         )
 
+        monitor_obs_parts: list[np.ndarray] = []
+        monitor_cmd_parts: list[np.ndarray] = []
+
         for arm_name, arm_config in self.arms_config.items():
             start_idx = arm_config.get("action_start", 0)
             end_idx = arm_config.get("action_end", len(action))
             ros_prefix = arm_config.get("ros_prefix", arm_name)
 
-            # Extract arm's portion of action
             arm_action = action[start_idx:end_idx].copy()
 
-            # Get current positions for this arm
             arm_current = None
             if current_positions:
                 arm_current = np.array(
@@ -418,14 +763,55 @@ class LeRobotInferenceNode(Node):
                     ]
                 )
 
-            # Process action (reorder + delta limit)
+            # Delta restore is done upstream in _obs_update (chunk-level).
+            # Actions arriving here are already absolute — just apply safety limits.
             arm_action = self.action_limiter.process(arm_action, arm_current)
 
-            # Publish
+            if self._debug:
+                formatted = ", ".join(f"{v:.4f}" for v in arm_action)
+                self.get_logger().info(f"[DEBUG] cmd [{arm_name}]: [{formatted}]")
+
             msg = Float64MultiArray()
             msg.data = arm_action.tolist()
             if arm_name in self.arm_publishers:
                 self.arm_publishers[arm_name].publish(msg)
+
+            if self._monitor_enable:
+                if arm_current is not None:
+                    monitor_obs_parts.append(arm_current)
+                monitor_cmd_parts.append(arm_action)
+
+        if self._monitor_enable and monitor_cmd_parts:
+            self._publish_monitor(
+                obs_state=np.concatenate(monitor_obs_parts) if monitor_obs_parts else np.zeros_like(action),
+                raw_output=action,
+                control_cmd=np.concatenate(monitor_cmd_parts),
+            )
+
+        # Debug: track smoothness
+        if self._smooth_tracker is not None:
+            self._smooth_tracker.record(action)
+        self.metrics.record_action_output()
+        self._has_published = True
+
+    def _publish_monitor(
+        self,
+        obs_state: np.ndarray,
+        raw_output: np.ndarray,
+        control_cmd: np.ndarray,
+    ) -> None:
+        """Publish monitor topics for real-time inference visualization."""
+        obs_msg = Float64MultiArray()
+        obs_msg.data = obs_state.tolist()
+        self._monitor_obs_pub.publish(obs_msg)
+
+        raw_msg = Float64MultiArray()
+        raw_msg.data = raw_output.tolist()
+        self._monitor_raw_pub.publish(raw_msg)
+
+        cmd_msg = Float64MultiArray()
+        cmd_msg.data = control_cmd.tolist()
+        self._monitor_cmd_pub.publish(cmd_msg)
 
     def _log_input_stats(self) -> None:
         """Periodically log input reception statistics with windowed rates."""
@@ -447,6 +833,7 @@ class LeRobotInferenceNode(Node):
         control_hz = (stats["control_loop_count"] - self._prev_control_count) / dt
         inference_delta = stats["inference_count"] - self._prev_inference_count
         inference_hz = inference_delta / dt
+        action_output_hz = (stats["action_output_count"] - self._prev_action_output_count) / dt
 
         camera_hz: dict[str, float] = {}
         camera_delta: dict[str, int] = {}
@@ -460,46 +847,91 @@ class LeRobotInferenceNode(Node):
         self._prev_joint_count = stats["joint_count"]
         self._prev_control_count = stats["control_loop_count"]
         self._prev_inference_count = stats["inference_count"]
+        self._prev_action_output_count = stats["action_output_count"]
         self._prev_frame_counters = dict(frame_counters)
 
-        # Find bottleneck camera (only relevant when not monitor_only)
+        # Find bottleneck camera (only relevant when not echo_topic_only)
         bottleneck_name = None
-        if not self.monitor_only and camera_hz:
+        if not self.echo_topic_only and camera_hz:
             slowest = min(camera_hz.items(), key=lambda x: x[1])
             if slowest[1] < self.control_freq:
                 bottleneck_name = slowest[0]
 
-        # Log unified stats block
-        self.get_logger().info(f"-- Stats ({dt:.0f}s) " + "-" * 30)
-        self.get_logger().info(f"  Joint State  {joint_hz:7.1f} Hz")
+        # Common header: joint state + cameras
+        logger = self.get_logger()
+        logger.info(f"-- Stats ({dt:.0f}s) " + "-" * 30)
+        logger.info(f"  Joint State  {joint_hz:7.1f} Hz")
         for name in sorted(camera_hz.keys()):
             hz = camera_hz[name]
             delta = camera_delta.get(name, 0)
             marker = "  << bottleneck" if name == bottleneck_name else ""
-            self.get_logger().info(f"  {name:12s}  {hz:7.1f} Hz  (+{delta} frames){marker}")
+            logger.info(f"  {name:12s}  {hz:7.1f} Hz  (+{delta} frames){marker}")
 
-        if not self.monitor_only:
-            self.get_logger().info(f"  Control Loop {control_hz:7.1f} Hz")
-            self.get_logger().info(
-                f"  Inference    {inference_hz:7.1f} Hz  ({stats['inference_count']} total)"
+        if not self.echo_topic_only:
+            if self._is_vla:
+                self._log_stats_vla(logger, dt, stats, inference_hz, action_output_hz, bottleneck_name, camera_hz)
+            else:
+                self._log_stats_classic(logger, dt, stats, control_hz, inference_hz, action_output_hz, bottleneck_name, camera_hz)
+
+    def _log_stats_vla(self, logger, dt, stats, inference_hz, action_output_hz, bottleneck_name, camera_hz) -> None:
+        """Log VLA (RTC) specific stats."""
+        logger.info(f"  Action output{action_output_hz:7.1f} Hz")
+        logger.info(f"  Inference    {inference_hz:7.1f} Hz  ({stats['inference_count']} total)")
+
+        # VLA latency + queue size (always)
+        if hasattr(self, "_latency_tracker"):
+            lat_mean = self._latency_tracker.mean()
+            lat_std = self._latency_tracker.std()
+            lat_p95 = self._latency_tracker.p95() or 0.0
+            queue_size = self._action_queue.qsize() if hasattr(self, "_action_queue") else 0
+            logger.info(
+                f"  VLA latency  mean={lat_mean * 1000:.1f}ms  "
+                f"std={lat_std * 1000:.1f}ms  p95={lat_p95 * 1000:.1f}ms  queue={queue_size}"
             )
 
-            # Inline bottleneck warnings
-            if bottleneck_name is not None:
-                self.get_logger().warn(
-                    f"  '{bottleneck_name}' limits inference to "
-                    f"{camera_hz[bottleneck_name]:.1f} Hz (target: {self.control_freq:.0f} Hz)"
+            # Debug: Action FPS, Eff ctrl Hz, queue depth stats, smoothness
+            if self._debug and lat_mean > 0:
+                cs = getattr(self.model.config, "chunk_size", 0)
+                eh = getattr(self.model.config.rtc_config, "execution_horizon", 0)
+                action_fps = cs / lat_mean
+                eff_ctrl_hz = action_fps * eh / cs if cs > 0 else 0
+                logger.info(f"  [DEBUG] Action FPS {action_fps:.1f}  Eff ctrl Hz {eff_ctrl_hz:.1f}")
+
+        if self._debug and self._queue_depths:
+            depths = np.array(self._queue_depths)
+            skip_pct = self._vla_skip_count / max(len(self._queue_depths) + self._vla_skip_count, 1) * 100
+            logger.info(f"  [DEBUG] Queue depth min={depths.min()} mean={depths.mean():.0f} max={depths.max()} skip={skip_pct:.1f}%")
+            self._queue_depths.clear()
+            self._vla_skip_count = 0
+
+        if self._debug and self._smooth_tracker is not None:
+            smooth = self._smooth_tracker.get_stats()
+            if smooth:
+                logger.info(
+                    f"  [DEBUG] Action D mean={smooth['delta_mean']:.4f} "
+                    f"std={smooth['delta_std']:.4f} max={smooth['delta_max']:.4f} "
+                    f"jerk={smooth['jerk_mean']:.4f}"
                 )
-            if control_hz > inference_hz * 1.5 and stats["inference_count"] > 0:
-                skip_rate = (
-                    (stats["control_loop_count"] - stats["inference_count"])
-                    / max(stats["control_loop_count"], 1)
-                    * 100
+
+        if bottleneck_name is not None:
+            logger.warn(f"  '{bottleneck_name}' limits to {camera_hz[bottleneck_name]:.1f} Hz (target: {self.control_freq:.0f} Hz)")
+
+    def _log_stats_classic(self, logger, dt, stats, control_hz, inference_hz, action_output_hz, bottleneck_name, camera_hz) -> None:
+        """Log non-VLA (ACT/Diffusion) stats."""
+        logger.info(f"  Action output{action_output_hz:7.1f} Hz")
+        logger.info(f"  Inference    {inference_hz:7.1f} Hz  ({stats['inference_count']} total)")
+
+        if self._debug and self._smooth_tracker is not None:
+            smooth = self._smooth_tracker.get_stats()
+            if smooth:
+                logger.info(
+                    f"  [DEBUG] Action D mean={smooth['delta_mean']:.4f} "
+                    f"std={smooth['delta_std']:.4f} max={smooth['delta_max']:.4f} "
+                    f"jerk={smooth['jerk_mean']:.4f}"
                 )
-                self.get_logger().warn(f"  {skip_rate:.0f}% control loops skipped (no complete obs)")
-                incomplete_reason = self.strategy.get_incomplete_reason()
-                if incomplete_reason:
-                    self.get_logger().warn(f"  Last reason: {incomplete_reason}")
+
+        if bottleneck_name is not None:
+            logger.warn(f"  '{bottleneck_name}' limits to {camera_hz[bottleneck_name]:.1f} Hz (target: {self.control_freq:.0f} Hz)")
 
     def reset_policy(self) -> None:
         """Reset policy state."""
@@ -508,18 +940,64 @@ class LeRobotInferenceNode(Node):
         self.get_logger().info("Resetting policy state...")
         if hasattr(self.model, "reset"):
             self.model.reset()
+        if self._is_vla and hasattr(self, "_action_queue"):
+            from lerobot.policies.rtc.action_queue import ActionQueue
+            self._action_queue = ActionQueue(self.model.config.rtc_config)
+            self._latency_tracker.reset()
+            with self._obs_lock:
+                self._latest_obs = None
         self.get_logger().info("Policy state reset complete")
 
     def get_input_stats(self) -> dict:
         """Get input reception statistics."""
         return self.metrics.get_stats()
 
+    def _publish_hold_position(self) -> None:
+        """Publish current joint positions to hold the robot in place on shutdown."""
+        if not hasattr(self, "arm_publishers"):
+            return
+        current = self.strategy.get_current_joint_positions()
+        if not current:
+            return
+        joint_order = self.joint_names_config.get(
+            "controller_joint_order",
+            self.joint_names_config.get("joint_order", []),
+        )
+        for arm_name, arm_config in self.arms_config.items():
+            ros_prefix = arm_config.get("ros_prefix", arm_name)
+            start_idx = arm_config.get("action_start", 0)
+            end_idx = arm_config.get("action_end", len(joint_order))
+            arm_joints = joint_order[start_idx:end_idx]
+            positions = [current.get(f"{ros_prefix}_{j}", 0.0) for j in arm_joints]
+            msg = Float64MultiArray()
+            msg.data = positions
+            if arm_name in self.arm_publishers:
+                self.arm_publishers[arm_name].publish(msg)
+        self.get_logger().info("Shutdown: hold-position command sent to controllers")
+
     def destroy_node(self) -> None:
-        """Cleanup timers, strategy, and destroy node."""
-        if hasattr(self, "control_timer"):
-            self.control_timer.cancel()
-        if hasattr(self, "_stats_timer"):
-            self._stats_timer.cancel()
+        """Cleanup timers, inference thread, strategy, and destroy node."""
+        # Block any new publishes first — timers may still fire during executor shutdown
+        self._shutting_down = True
+
+        # Cancel timers before stopping the inference thread so no new callbacks
+        # are scheduled while we wait for the thread to join.
+        for timer_name in ("_obs_timer", "_publish_timer", "_stats_timer"):
+            timer = getattr(self, timer_name, None)
+            if timer:
+                timer.cancel()
+
+        # Stop background RTC inference thread
+        if hasattr(self, "_inference_stop"):
+            self._inference_stop.set()
+        if hasattr(self, "_inference_thread"):
+            self._inference_thread.join(timeout=2.0)
+
+        # Hold position before publisher is torn down — only if we actually
+        # commanded the robot at least once during this session.
+        if not self.echo_topic_only and self._has_published:
+            self._publish_hold_position()
+
         self.strategy.cleanup()
         super().destroy_node()
 
@@ -532,9 +1010,9 @@ def main(args=None):
     try:
         node = LeRobotInferenceNode()
 
-        # Use MultiThreadedExecutor so subscription callbacks (joint state)
-        # can run concurrently with the control loop timer
-        executor = MultiThreadedExecutor(num_threads=2)
+        # Use MultiThreadedExecutor: VLA mode needs 3+ threads
+        # (obs timer, publish timer, stats timer, joint subscription)
+        executor = MultiThreadedExecutor(num_threads=4)
         executor.add_node(node)
 
         node.get_logger().info("Starting inference loop...")

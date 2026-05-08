@@ -1,0 +1,764 @@
+"""CLI entry point for anvil-eval-ros — MCAP replay evaluation via Docker Compose.
+
+Reads split_info.json from checkpoint, maps episode indices to MCAP files,
+generates an eval_plan.json, then launches docker-compose.eval.yml.
+
+Usage:
+    uv run anvil-eval-ros \\
+        --checkpoint outputs/run/checkpoints/000050 \\
+        --mcap-root data/raw/placing-block-r1/ \\
+        [--output-dir eval_results/ros/] \\
+        [--num-eps 5] \\
+        [--no-docker]
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import random
+import subprocess
+import sys
+from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+
+def setup_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        stream=sys.stdout,
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="anvil-eval-ros: run offline eval by replaying MCAP files through the ROS2 inference node"
+    )
+    parser.add_argument(
+        "--checkpoint",
+        required=True,
+        help="Path to model checkpoint directory (contains pretrained_model/)",
+    )
+    parser.add_argument(
+        "--mcap-root",
+        required=True,
+        help="Raw MCAP data directory (e.g. data/raw/placing-block-r1/). "
+             "MCAP files are sorted to match training episode indices.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        help="Output directory (default: eval_results/{dataset}/{job}/{checkpoint}/ros)",
+    )
+    parser.add_argument(
+        "--episodes",
+        help="Manual comma-separated episode indices (overrides split_info.json)",
+    )
+    parser.add_argument(
+        "--num-eps",
+        type=int,
+        default=3,
+        help="Max episodes to sample per split (random, reproducible via --seed, default: 3)",
+    )
+    parser.add_argument(
+        "--split",
+        default="all",
+        choices=["train", "val", "test", "all"],
+        help="Which split(s) to evaluate when split_info.json is present (default: all). "
+             "Use 'test' to run only the test split.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for episode sampling (default: 42)",
+    )
+    parser.add_argument(
+        "--no-docker",
+        action="store_true",
+        help="Print eval_plan.json path and docker compose command instead of running it",
+    )
+    parser.add_argument(
+        "--warmup-sec",
+        type=float,
+        default=5.0,
+        help="Seconds to wait for inference node warmup before first episode (default: 5.0)",
+    )
+    parser.add_argument(
+        "--inference-drain-sec",
+        type=float,
+        default=1.5,
+        help="Seconds to wait after bag ends for inference pipeline to drain (default: 1.5)",
+    )
+    parser.add_argument(
+        "--inter-episode-sec",
+        type=float,
+        default=1.0,
+        help="Seconds to sleep between episodes (default: 1.0)",
+    )
+    parser.add_argument(
+        "--silence-timeout-sec",
+        type=float,
+        default=1.0,
+        help="Seconds of GT topic silence before declaring episode done (default: 1.0)",
+    )
+    parser.add_argument(
+        "--ack-timeout-sec",
+        type=float,
+        default=20.0,
+        help="Max seconds the mcap-player waits for episode_ack before giving up (default: 20.0)",
+    )
+    parser.add_argument(
+        "--image-tag",
+        default="latest",
+        help="Docker image tag (default: latest)",
+    )
+    parser.add_argument(
+        "--monitor",
+        action="store_true",
+        help="Enable inference monitor CSV recording. Adds inference-monitor container.",
+    )
+    parser.add_argument(
+        "--dataset-dir",
+        help="Path to the converted LeRobot dataset directory. Used as an extra candidate "
+             "when searching for conversion_config.yaml (useful when raw MCAP and dataset "
+             "dirs are not co-located in the standard data/raw / data/datasets layout).",
+    )
+    parser.add_argument(
+        "--base-inference-config",
+        help="Path to the base inference YAML to use instead of the default "
+             "configs/lerobot_control/inference_eval.yaml. Useful when the default config "
+             "has more cameras or arms than the model being evaluated (e.g. smoke tests).",
+    )
+    return parser.parse_args()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MCAP collection (mirrors mcap_converter.collect_mcap_files)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _find_conversion_config(
+    mcap_root: Path,
+    mcap_root_arg: Path | None = None,
+    dataset_dir: Path | None = None,
+) -> Path | None:
+    """Locate conversion_config.yaml in priority order."""
+    if dataset_dir is not None:
+        direct = dataset_dir / "conversion_config.yaml"
+        if direct.exists():
+            return direct
+    candidates = ([mcap_root_arg] if mcap_root_arg else []) + [mcap_root]
+    for root in candidates:
+        candidate = root.parent.parent / "datasets" / root.name / "conversion_config.yaml"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _sample_episodes_from_split(
+    split_info: dict,
+    split: str,
+    num_eps: int | None,
+    rng: random.Random,
+) -> list[tuple[int, str]]:
+    """Sample episodes from split_info, return [(ep_idx, split_name)]."""
+    splits_to_run = ("train", "val", "test") if split == "all" else (split,)
+    result = []
+    for split_name in splits_to_run:
+        ep_list = list(split_info.get(split_name, []))
+        if num_eps is not None:
+            ep_list = rng.sample(ep_list, min(len(ep_list), num_eps))
+        result.extend((ep_idx, split_name) for ep_idx in ep_list)
+    return result
+
+
+def _mcap_has_commands_topic(mcap_path: Path) -> bool:
+    """Return True if the MCAP file contains any .../commands topic."""
+    try:
+        from mcap.reader import make_reader
+        with mcap_path.open("rb") as f:
+            reader = make_reader(f)
+            for _, channel in reader.get_summary().channels.items():
+                if channel.topic.endswith("/commands"):
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _read_synthesis_info(
+    mcap_root: Path,
+    mcap_root_arg: Path | None = None,
+    dataset_dir: Path | None = None,
+) -> dict | None:
+    """Return synthesize info when conversion_config has action_from_observation=true.
+
+    Returns {"command_topic": str, "joint_names": list[str]} or None.
+    """
+    try:
+        import yaml
+    except ImportError:
+        return None
+
+    config_path = _find_conversion_config(mcap_root, mcap_root_arg, dataset_dir)
+    if config_path is None:
+        return None
+
+    cfg = yaml.safe_load(config_path.read_text())
+    if not cfg.get("action_from_observation"):
+        return None
+
+    action_topics: dict = cfg.get("action_topics", {})
+    if not action_topics:
+        return None
+
+    topic, info = next(iter(action_topics.items()))
+    arm: str = info.get("arm", "right")
+    joint_order: list[str] = info.get("joint_order", [])
+    _ARM_PREFIX = {"right": "follower_r", "left": "follower_l"}
+    prefix = _ARM_PREFIX.get(arm, f"follower_{arm[0]}")
+    joint_names = [f"{prefix}_{j}" for j in joint_order]
+
+    log.info(
+        "[anvil-eval-ros] action_from_observation: topic=%s joints=%s", topic, joint_names
+    )
+    return {"command_topic": topic, "joint_names": joint_names}
+
+
+def collect_mcap_files(mcap_root: Path) -> list[Path]:
+    """Recursively collect and sort MCAP files — same order as mcap_converter."""
+    mcap_paths = []
+    for root, _, files in os.walk(mcap_root):
+        for file in files:
+            if file.endswith(".mcap"):
+                mcap_paths.append(Path(root) / file)
+    return sorted(mcap_paths)
+
+
+def build_episode_map(mcap_root: Path) -> dict[int, Path]:
+    """Return {episode_idx: mcap_path} using sorted MCAP discovery order."""
+    files = collect_mcap_files(mcap_root)
+    return {idx: path for idx, path in enumerate(files)}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Split info loading
+# ──────────────────────────────────────────────────────────────────────────────
+
+def load_split_info(checkpoint_path: Path) -> dict:
+    """Load split_info.json from checkpoint pretrained_model/."""
+    split_path = checkpoint_path / "pretrained_model" / "split_info.json"
+    if not split_path.exists():
+        # Fallback: job root
+        split_path = checkpoint_path.parent.parent / "split_info.json"
+
+    if split_path.exists():
+        data = json.loads(split_path.read_text())
+        return {
+            "train": data.get("train_episodes", []),
+            "val": data.get("val_episodes", []),
+            "test": data.get("test_episodes", []),
+        }
+
+    return {}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Inference config generation — auto-detect arm count from model config.json
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Maps arm name → (ros_prefix, arm_key).
+# arm_key is the short key used in joint names (e.g. "follower_r_joint1" → key "r").
+_ARM_META: dict[str, tuple[str, str]] = {
+    "left":  ("follower_l", "l"),
+    "right": ("follower_r", "r"),
+}
+
+
+def _read_action_dim(checkpoint_path: Path) -> int | None:
+    """Return the model's action output dimension from config.json, or None."""
+    config_path = checkpoint_path / "pretrained_model" / "config.json"
+    if not config_path.exists():
+        return None
+    cfg = json.loads(config_path.read_text())
+    shape = cfg.get("output_features", {}).get("action", {}).get("shape")
+    return shape[0] if shape else None
+
+
+def _detect_arms_from_conversion_config(
+    mcap_root: Path,
+    mcap_root_arg: Path | None = None,
+    dataset_dir: Path | None = None,
+) -> list[str] | None:
+    """Read conversion_config.yaml to find which arms are used for actions.
+
+    Returns ordered list of arm names (e.g. ["right"]) or None if not found.
+    The dataset conversion config lives at data/datasets/{dataset_name}/conversion_config.yaml.
+
+    Search order:
+      1. dataset_dir/conversion_config.yaml  (explicit --dataset-dir arg, highest priority)
+      2. mcap_root_arg/../datasets/<name>/conversion_config.yaml  (CLI path, pre-symlink)
+      3. mcap_root/../datasets/<name>/conversion_config.yaml      (resolved symlink path)
+    """
+    try:
+        import yaml
+    except ImportError:
+        return None
+
+    config_path = _find_conversion_config(mcap_root, mcap_root_arg, dataset_dir)
+    if config_path is None:
+        return None
+
+    log.info("[anvil-eval-ros] conversion_config: %s", config_path)
+    cfg = yaml.safe_load(config_path.read_text())
+    action_topics: dict = cfg.get("action_topics", {})
+    if not action_topics:
+        return None
+
+    # Return arm names in topic-definition order
+    arm_names = [info.get("arm") for info in action_topics.values() if info.get("arm")]
+    return arm_names if arm_names else None
+
+
+def generate_inference_config(
+    checkpoint_path: Path,
+    base_yaml_path: Path,
+    output_dir: Path,
+    mcap_root: Path | None = None,
+    mcap_root_arg: Path | None = None,
+    dataset_dir: Path | None = None,
+) -> tuple[Path, dict]:
+    """Generate a model-aware inference YAML and return (path, arm_info).
+
+    arm_info keys: gt_topics, pred_topics, arm_names (all lists).
+    Falls back to base_yaml_path when YAML or model config is unavailable.
+
+    Arm detection priority:
+      1. conversion_config.yaml (most accurate — matches training data exactly)
+      2. action_dim / joints_per_arm count (fallback, assumes left-first order)
+    """
+    try:
+        import yaml  # PyYAML — available wherever ROS2 tools are installed
+    except ImportError:
+        log.warning("[anvil-eval-ros] PyYAML not available — using base inference_eval.yaml")
+        return base_yaml_path, _default_arm_info()
+
+    action_dim = _read_action_dim(checkpoint_path)
+    if action_dim is None:
+        log.warning("[anvil-eval-ros] config.json not found — using base inference_eval.yaml")
+        return base_yaml_path, _default_arm_info()
+
+    base_cfg = yaml.safe_load(base_yaml_path.read_text())
+    joints_per_arm = len(base_cfg.get("joint_names", {}).get("model_joint_order", []))
+    if joints_per_arm == 0:
+        log.warning("[anvil-eval-ros] model_joint_order empty — using base inference_eval.yaml")
+        return base_yaml_path, _default_arm_info()
+
+    n_arms = action_dim // joints_per_arm
+    if n_arms < 1:
+        log.warning(
+            "[anvil-eval-ros] action_dim=%d < joints_per_arm=%d — using base config",
+            action_dim, joints_per_arm,
+        )
+        return base_yaml_path, _default_arm_info()
+
+    # Determine arm names: prefer conversion_config.yaml (exact training mapping)
+    arm_names_ordered: list[str] | None = None
+    if mcap_root is not None:
+        arm_names_ordered = _detect_arms_from_conversion_config(
+            mcap_root, mcap_root_arg, dataset_dir
+        )
+        if arm_names_ordered:
+            log.info(
+                "[anvil-eval-ros] Arm config from conversion_config.yaml: %s", arm_names_ordered
+            )
+
+    if not arm_names_ordered:
+        # Fallback: assume left-first for n_arms arms
+        fallback_order = ["left", "right"]
+        arm_names_ordered = fallback_order[:n_arms]
+        log.warning(
+            "[anvil-eval-ros] conversion_config.yaml not found — assuming arm order: %s",
+            arm_names_ordered,
+        )
+
+    # Trim to n_arms in case conversion_config has more arms than the model
+    arm_names_ordered = arm_names_ordered[:n_arms]
+
+    # Build arms section
+    new_arms: dict = {}
+    gt_topics: list[str] = []
+    pred_topics: list[str] = []
+    arm_names: list[str] = []
+
+    for i, arm_name in enumerate(arm_names_ordered):
+        meta = _ARM_META.get(arm_name)
+        if meta is None:
+            log.warning("[anvil-eval-ros] Unknown arm name '%s', skipping", arm_name)
+            continue
+        ros_prefix, _ = meta
+        new_arms[arm_name] = {
+            "ros_prefix": ros_prefix,
+            "command_topic": f"/eval/{ros_prefix}_forward_position_controller/commands",
+            "action_start": i * joints_per_arm,
+            "action_end": (i + 1) * joints_per_arm,
+        }
+        gt_topics.append(f"/{ros_prefix}_forward_position_controller/commands")
+        pred_topics.append(f"/eval/{ros_prefix}_forward_position_controller/commands")
+        arm_names.append(arm_name)
+
+    base_cfg["arms"] = new_arms
+
+    # Trim arm_mapping so state vector dimension matches action_dim.
+    # multi_process.py builds observation.state by iterating arm_mapping keys,
+    # so arm_mapping must only contain the arms actually used by this model.
+    # arm_mapping keys are short keys (e.g. "l", "r"); values are arm names.
+    orig_arm_mapping: dict = base_cfg.get("joint_names", {}).get("arm_mapping", {})
+    filtered_arm_mapping = {k: v for k, v in orig_arm_mapping.items() if v in set(arm_names)}
+    # If conversion_config gave us a specific arm order, rebuild arm_mapping in that order
+    # so sorted(arm_mapping.keys()) in multi_process.py matches action slice order.
+    ordered_arm_mapping: dict = {}
+    for arm_name in arm_names:
+        meta = _ARM_META.get(arm_name)
+        if meta:
+            _, arm_key = meta
+            if arm_key in filtered_arm_mapping:
+                ordered_arm_mapping[arm_key] = filtered_arm_mapping[arm_key]
+    base_cfg.setdefault("joint_names", {})["arm_mapping"] = ordered_arm_mapping or filtered_arm_mapping
+
+    config_path = output_dir / "inference_eval_generated.yaml"
+    config_path.write_text(yaml.dump(base_cfg, default_flow_style=False, allow_unicode=True))
+
+    log.info(
+        "[anvil-eval-ros] Generated inference config: %d arm(s), action_dim=%d → %s",
+        n_arms, action_dim, config_path,
+    )
+
+    return config_path, {"gt_topics": gt_topics, "pred_topics": pred_topics, "arm_names": arm_names}
+
+
+def _default_arm_info() -> dict:
+    """Dual-arm fallback matching the static inference_eval.yaml."""
+    return {
+        "gt_topics": [
+            "/follower_l_forward_position_controller/commands",
+            "/follower_r_forward_position_controller/commands",
+        ],
+        "pred_topics": [
+            "/eval/follower_l_forward_position_controller/commands",
+            "/eval/follower_r_forward_position_controller/commands",
+        ],
+        "arm_names": ["left", "right"],
+    }
+
+
+def _ros2_list(items: list[str]) -> str:
+    """Format a Python list as a ROS2 parameter array string: ["a","b"]."""
+    inner = ",".join(f'"{x}"' for x in items)
+    return f"[{inner}]"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Output dir resolution
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _read_dataset_fps(
+    mcap_root: Path,
+    mcap_root_arg: Path | None = None,
+) -> int:
+    """Read the dataset fps from meta/info.json next to the MCAP root.
+
+    The dataset directory mirrors the MCAP root name under data/datasets/:
+      data/raw/{name}/  →  data/datasets/{name}/meta/info.json
+
+    Returns 30 if the file is not found.
+    """
+    candidates: list[Path] = []
+    if mcap_root_arg is not None:
+        candidates.append(mcap_root_arg)
+    candidates.append(mcap_root)
+
+    for root in candidates:
+        info_path = root.parent.parent / "datasets" / root.name / "meta" / "info.json"
+        if info_path.exists():
+            try:
+                data = json.loads(info_path.read_text())
+                fps = data.get("fps")
+                if fps:
+                    return int(fps)
+            except Exception:
+                pass
+
+    return 30
+
+
+def resolve_output_dir(checkpoint_path: Path, mcap_root: Path) -> Path:
+    dataset_name = mcap_root.name
+    checkpoint_name = checkpoint_path.name
+    parent = checkpoint_path.parent
+    job_name = parent.parent.name if parent.name == "checkpoints" else parent.name
+    return Path("eval_results") / dataset_name / job_name / checkpoint_name / "ros"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Main
+# ──────────────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    setup_logging()
+    args = parse_args()
+
+    checkpoint_path = Path(args.checkpoint).resolve()
+    mcap_root_arg = Path(args.mcap_root)
+    mcap_root = mcap_root_arg.resolve()
+    dataset_dir: Path | None = Path(args.dataset_dir).resolve() if args.dataset_dir else None
+
+    if not checkpoint_path.exists():
+        log.error("[anvil-eval-ros] Checkpoint not found: %s", checkpoint_path)
+        sys.exit(1)
+    if not mcap_root.exists():
+        log.error("[anvil-eval-ros] MCAP root not found: %s", mcap_root)
+        sys.exit(1)
+
+    # 0. Load anvil_config.json for delta action settings
+    anvil_cfg_path = checkpoint_path / "pretrained_model" / "anvil_config.json"
+    anvil_cfg: dict = {}
+    if anvil_cfg_path.exists():
+        try:
+            anvil_cfg = json.loads(anvil_cfg_path.read_text())
+            log.info("[anvil-eval-ros] Loaded anvil_config.json")
+        except Exception as e:
+            log.warning("[anvil-eval-ros] Failed to read anvil_config.json: %s", e)
+
+    use_delta_actions: bool = anvil_cfg.get("use_delta_actions", False)
+    _action_type_raw: str = anvil_cfg.get("action_type", "absolute")
+    if _action_type_raw == "absolute" and use_delta_actions:
+        _action_type_raw = "delta_obs_t"
+    action_type: str = _action_type_raw
+    delta_exclude_joints: list[str] = anvil_cfg.get("delta_exclude_joints") or []
+
+    # Read dataset fps (so eval-recorder can downsample 60fps MCAP GT to match)
+    dataset_fps = _read_dataset_fps(mcap_root, mcap_root_arg)
+    log.info("[anvil-eval-ros] dataset_fps=%d (from meta/info.json)", dataset_fps)
+
+    # 1. Build episode → MCAP path mapping
+    ep_map = build_episode_map(mcap_root)
+    if not ep_map:
+        log.error("[anvil-eval-ros] No MCAP files found under %s", mcap_root)
+        sys.exit(1)
+    log.info("[anvil-eval-ros] Found %d MCAP files in %s", len(ep_map), mcap_root)
+
+    # 1b. Determine GT source: synthesize from joint_states (action_from_observation=true)
+    # or use the recorded commands topic from the MCAP (action_from_observation=false).
+    # We always check the conversion_config first so that datasets recorded WITH a commands
+    # topic but converted with action_from_observation=true still produce correct GT.
+    first_mcap = next(iter(ep_map.values()), None)
+    synthesize_info: dict | None = _read_synthesis_info(mcap_root, mcap_root_arg, dataset_dir)
+
+    if synthesize_info:
+        log.info(
+            "[anvil-eval-ros] action_from_observation=true → synthesizing GT from "
+            "joint_states → %s",
+            synthesize_info["command_topic"],
+        )
+    elif first_mcap is not None and not _mcap_has_commands_topic(first_mcap):
+        log.warning(
+            "[anvil-eval-ros] No commands topic in MCAP and action_from_observation not "
+            "configured — GT metrics may be unavailable."
+        )
+
+    # 2. Determine episodes to evaluate
+    rng = random.Random(args.seed)
+
+    if args.episodes:
+        # Manual override
+        manual = [int(x.strip()) for x in args.episodes.split(",")]
+        episodes_to_eval = [(idx, "replay") for idx in manual]
+    else:
+        split_info = load_split_info(checkpoint_path)
+
+        if split_info:
+            episodes_to_eval = _sample_episodes_from_split(split_info, args.split, args.num_eps, rng)
+        else:
+            # No split info: compute a default 8:1:1 split from available MCAP files.
+            # WARNING: this may not match the actual training split.
+            all_eps = sorted(ep_map.keys())
+            total = len(all_eps)
+            shuffled = rng.sample(all_eps, total)
+            n_test = max(1, round(total * 0.1))
+            n_val = max(1, round(total * 0.1))
+            n_train = total - n_val - n_test
+            split_info = {
+                "train": shuffled[:n_train],
+                "val": shuffled[n_train : n_train + n_val],
+                "test": shuffled[n_train + n_val :],
+            }
+            log.warning(
+                "[anvil-eval-ros] split_info.json not found — using default 8:1:1 split "
+                "(%d train / %d val / %d test). This may NOT match the actual training split.",
+                n_train, n_val, n_test,
+            )
+            episodes_to_eval = _sample_episodes_from_split(split_info, args.split, args.num_eps, rng)
+
+    # Filter to episodes that have corresponding MCAP files
+    valid_episodes = []
+    skipped = 0
+    for ep_idx, split_label in sorted(episodes_to_eval, key=lambda x: x[0]):
+        if ep_idx not in ep_map:
+            log.warning(
+                "[anvil-eval-ros] Episode %d has no MCAP file (only %d files available), skipping",
+                ep_idx,
+                len(ep_map),
+            )
+            skipped += 1
+            continue
+        valid_episodes.append({
+            "episode_idx": ep_idx,
+            "split_label": split_label,
+            "mcap_path": str(ep_map[ep_idx]),
+        })
+
+    if not valid_episodes:
+        log.error("[anvil-eval-ros] No valid episodes to evaluate")
+        sys.exit(1)
+
+    if skipped:
+        log.warning("[anvil-eval-ros] Skipped %d episodes with no MCAP file", skipped)
+
+    log.info("[anvil-eval-ros] Evaluating %d episodes", len(valid_episodes))
+
+    # 3. Resolve output dir
+    output_dir = Path(args.output_dir).resolve() if args.output_dir else (
+        resolve_output_dir(checkpoint_path, mcap_root).resolve()
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log.info("[anvil-eval-ros] Output dir: %s", output_dir)
+
+    # 4. Generate eval_plan.json
+    eval_plan = {
+        "checkpoint_path": str(checkpoint_path),
+        "mcap_root": str(mcap_root),
+        "output_dir": str(output_dir),
+        "episodes": valid_episodes,
+    }
+    plan_path = output_dir / "eval_plan.json"
+    plan_path.write_text(json.dumps(eval_plan, indent=2))
+    log.info("[anvil-eval-ros] Eval plan written: %s (%d episodes)", plan_path, len(valid_episodes))
+
+    # 5. Find repo root (for docker-compose.eval.yml path)
+    repo_root = Path(__file__).resolve().parents[4]
+    compose_file = repo_root / "docker-compose.eval.yml"
+    if not compose_file.exists():
+        log.error("[anvil-eval-ros] docker-compose.eval.yml not found at %s", compose_file)
+        sys.exit(1)
+
+    # 5b. Auto-generate inference config from model's action shape
+    if args.base_inference_config:
+        base_inference_yaml = Path(args.base_inference_config).resolve()
+        if not base_inference_yaml.exists():
+            log.error("[anvil-eval-ros] --base-inference-config not found: %s", base_inference_yaml)
+            sys.exit(1)
+    else:
+        base_inference_yaml = repo_root / "configs" / "lerobot_control" / "inference_eval.yaml"
+    inference_config_path, arm_info = generate_inference_config(
+        checkpoint_path,
+        base_inference_yaml,
+        output_dir,
+        mcap_root=mcap_root,
+        mcap_root_arg=mcap_root_arg,
+        dataset_dir=dataset_dir,
+    )
+
+    # 6. Build docker compose command
+    env = {
+        **os.environ,
+        "MODEL_PATH": str(checkpoint_path),
+        "MCAP_ROOT": str(mcap_root),
+        "OUTPUT_DIR": str(output_dir),
+        "EVAL_PLAN_FILE": str(plan_path),
+        "IMAGE_TAG": args.image_tag,
+        # Pass tuning params to nodes via env (picked up by compose)
+        "EVAL_WARMUP_SEC": str(args.warmup_sec),
+        "EVAL_DRAIN_SEC": str(args.inference_drain_sec),
+        "EVAL_INTER_EPISODE_SEC": str(args.inter_episode_sec),
+        "EVAL_SILENCE_TIMEOUT_SEC": str(args.silence_timeout_sec),
+        "EVAL_ACK_TIMEOUT_SEC": str(args.ack_timeout_sec),
+        # Auto-generated inference config (arm count derived from model)
+        "INFERENCE_CONFIG_FILE": str(inference_config_path),
+        # eval-recorder topics derived from arm config
+        "EVAL_GT_TOPICS": _ros2_list(arm_info["gt_topics"]),
+        "EVAL_PRED_TOPICS": _ros2_list(arm_info["pred_topics"]),
+        "EVAL_ARM_NAMES": _ros2_list(arm_info["arm_names"]),
+        # action_from_observation: synthesize GT commands from joint_states
+        "EVAL_SYNTHESIZE_COMMANDS": "true" if synthesize_info else "false",
+        **(
+            {
+                "EVAL_SYNTHESIZE_COMMAND_TOPIC": synthesize_info["command_topic"],
+                "EVAL_SYNTHESIZE_ARM_JOINT_NAMES": _ros2_list(synthesize_info["joint_names"]),
+            }
+            if synthesize_info
+            else {}
+        ),
+        # Delta action settings (from anvil_config.json in checkpoint)
+        "EVAL_USE_DELTA_ACTIONS": "true" if use_delta_actions else "false",
+        "EVAL_ACTION_TYPE": action_type,
+        "EVAL_DELTA_EXCLUDE_JOINTS": _ros2_list(delta_exclude_joints) if delta_exclude_joints else "[]",
+        # dataset fps for GT downsampling (from meta/info.json)
+        "EVAL_DATASET_FPS": str(dataset_fps),
+        # Inference monitor
+        "MONITOR_ENABLE": "true" if args.monitor else "false",
+        "MONITOR_OUTPUT_DIR": str(output_dir / "monitor"),
+    }
+
+    compose_cmd = [
+        "docker", "compose",
+        "-f", str(compose_file),
+    ]
+    if args.monitor:
+        compose_cmd += ["--profile", "monitor"]
+    compose_cmd += [
+        "up",
+        "--build",
+        "--remove-orphans",
+        "--abort-on-container-exit",
+        "--exit-code-from", "eval-recorder",
+    ]
+
+    if args.no_docker:
+        log.info("[anvil-eval-ros] --no-docker set. Eval plan: %s", plan_path)
+        log.info("[anvil-eval-ros] Run manually:\n  %s", " ".join(compose_cmd))
+        return
+
+    # 7. Run Docker Compose
+    log.info("[anvil-eval-ros] Starting Docker Compose eval stack...")
+    result = subprocess.run(compose_cmd, env=env, cwd=str(repo_root))
+
+    if result.returncode != 0:
+        log.error("[anvil-eval-ros] Docker Compose exited with code %d", result.returncode)
+        sys.exit(result.returncode)
+
+    # 8. Print summary
+    summary_path = output_dir / "metrics_summary.json"
+    if summary_path.exists():
+        summary = json.loads(summary_path.read_text())
+        overall = summary.get("overall", {})
+        log.info(
+            "[anvil-eval-ros] === Eval complete ===\n"
+            "  Episodes: %s\n"
+            "  Mean MAE: %.4f\n"
+            "  Mean RMSE: %.4f\n"
+            "  Results: %s",
+            overall.get("count", "?"),
+            overall.get("mean_mae", float("nan")),
+            overall.get("mean_rmse", float("nan")),
+            output_dir,
+        )
+    else:
+        log.info("[anvil-eval-ros] Eval complete. Results: %s", output_dir)
+
+
+if __name__ == "__main__":
+    main()

@@ -20,6 +20,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering",
 ]
+dependencies = [
+    "rerun-sdk>=0.26.2",
+]
 
 [project.urls]
 Homepage = "https://anvil.bot/"
@@ -39,7 +42,10 @@ dev = [
 [tool.uv.workspace]
 members = [
     "packages/mcap_converter",
-    "packages/lerobot_training",
+    "packages/anvil_trainer",
+    "packages/anvil_eval",
+    "packages/anvil_eval_ros",
+    "packages/anvil_shared",
 ]
 
 # PyTorch index — required for torch+cu* packages with bundled CUDA libs.
@@ -78,7 +84,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["mcap_converter", "lerobot_training"]
+known-first-party = ["mcap_converter", "anvil_trainer", "anvil_eval"]
 
 [tool.pyright]
 pythonVersion = "3.12"
@@ -87,8 +93,8 @@ reportMissingImports = true
 reportMissingTypeStubs = false
 
 [tool.pytest.ini_options]
-testpaths = ["packages"]
+testpaths = ["tests/unit"]
 python_files = ["test_*.py", "*_test.py"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short -p no:launch_testing -p no:launch_testing_ros2 -p no:launch_testing_ros -p no:ament_lint -p no:ament_pep257 -p no:ament_flake8 -p no:ament_copyright -p no:ament_xmllint"
+addopts = "-v --tb=short --import-mode=importlib -p no:launch_testing -p no:launch_testing_ros2 -p no:launch_testing_ros -p no:ament_lint -p no:ament_pep257 -p no:ament_flake8 -p no:ament_copyright -p no:ament_xmllint"
 asyncio_mode = "auto"

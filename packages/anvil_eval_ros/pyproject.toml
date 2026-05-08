@@ -1,0 +1,60 @@
+[project]
+name = "anvil-eval-ros"
+version = "0.1.0"
+description = "ROS2 MCAP replay evaluation — orchestrates docker-compose + ROS2 nodes to replay real MCAP recordings through the full inference stack"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.12"
+authors = [
+    { name = "Anvil Robotics", email = "dev@anvil.bot" }
+]
+keywords = ["robotics", "lerobot", "evaluation", "ros2", "mcap"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+]
+
+# The host-side CLI (`anvil-eval-ros`) does not link rclpy — it orchestrates
+# docker-compose and reads MCAP files.  The ROS2 nodes it launches live in
+# `ros2/src/lerobot_control/` and are built by colcon, not pip.
+dependencies = [
+    "anvil-eval",            # shared metrics/plotting/reporting helpers
+    "mcap>=1.2.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.4.0",
+]
+
+[project.scripts]
+anvil-eval-ros = "anvil_eval_ros.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/anvil_eval_ros"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP"]
+ignore = ["E501", "B008"]
+
+[tool.pytest.ini_options]
+python_files = ["test_*.py"]
+
+[tool.uv.sources]
+anvil-eval = { workspace = true }
