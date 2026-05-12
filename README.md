@@ -115,10 +115,10 @@ uv run mcap-convert \
 
 Output is always saved to `<output-dir>/<input-dir-name>/` (default: `data/datasets/my-sessions/`).
 
-**`action_from_observation`** — use when `/follower_*/commands` was not recorded. Shifts observation forward by N frames:
+**`action_source: future_observations`** — use when `/follower_*/commands` was not recorded. Synthesizes the action by shifting observation forward by `action_n_step` frames:
 
 ```
-action[t] = observation.state[t + N]   (default N=10, ≈333ms at 30fps)
+action[t] = observation.state[t + action_n_step]   (e.g. n=10 ≈ 333ms at 30fps)
 ```
 
 **Common flags:**
