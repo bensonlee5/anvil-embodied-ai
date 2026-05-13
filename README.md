@@ -127,7 +127,7 @@ action[t] = observation.state[t + action_n_step]   (e.g. n=10 ≈ 333ms at 30fps
 |------|-------------|
 | `--resume` | Skip already-converted episodes — safe to re-run after interruption |
 | `--max-episodes N` | Convert only the first N episodes |
-| `--fps N` | Override output FPS (auto-detected by default) |
+| `--frequency N` | Override output dataset frequency in Hz (taken from config by default; clamps to source rate if higher) |
 | `--vcodec` | `h264` (default) · `hevc` · `libsvtav1` |
 | `--robot-type` | `anvil_openarm` (default) · `anvil_yam` |
 

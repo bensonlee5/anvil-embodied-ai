@@ -37,6 +37,9 @@ class DataConfig(BaseModel):
     robot_state_topic: str = "/joint_states"
 
     frequency: int = 60
+    """Output dataset sample rate (Hz). The CLI uses this as the target rate;
+    if the source MCAP rate is lower, the CLI clamps down to the source rate
+    (we can't upsample). The `--frequency` CLI flag overrides this value."""
 
     camera_topic_mapping: dict[str, str]
     """ROS topic -> output camera name (becomes `observation.images.{name}`).

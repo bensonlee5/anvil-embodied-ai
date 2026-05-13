@@ -114,7 +114,7 @@ def convert_session(
     output_dir: str,
     repo_id: str,
     robot_type: str = "anvil_openarm",
-    fps: int = 30,
+    frequency: int = 30,
     tolerance_s: float = 1e-3,
     task: str = "manipulation",
     config: DataConfig = None,
@@ -134,7 +134,7 @@ def convert_session(
         output_dir: Output directory for dataset
         repo_id: HuggingFace repository ID
         robot_type: Robot type identifier
-        fps: Video frames per second
+        frequency: Output dataset sample rate in Hz
         tolerance_s: Time synchronization tolerance
         task: Task name for the dataset
         config: Data configuration
@@ -146,6 +146,9 @@ def convert_session(
 
     if config is None:
         raise ValueError("config is required")
+
+    # Stamp the resolved frequency onto config so the extractor reads the same value.
+    config.frequency = frequency
 
     # Find all MCAP files (use pre-collected list if provided)
     if mcap_files is None:
@@ -165,7 +168,7 @@ def convert_session(
         output_dir=output_dir,
         repo_id=repo_id,
         robot_type=robot_type,
-        fps=fps,
+        frequency=frequency,
         config=config,
         vcodec=vcodec,
         quiet=True,
@@ -271,7 +274,6 @@ def convert_session(
             stream_extractor = BufferedStreamExtractor(
                 config=config,
                 buffer_seconds=buffer_seconds,
-                fps=fps,
                 quiet=True,
                 progress_callback=on_frame_progress,
             )
@@ -414,7 +416,7 @@ examples:
   # output goes to data/datasets/my-session/
 
   mcap-convert -i data/raw/my-session -o data/datasets --vcodec libsvtav1
-  mcap-convert -i data/raw/my-session -o data/datasets --fps 15 --push-to-hub
+  mcap-convert -i data/raw/my-session -o data/datasets --frequency 15 --push-to-hub
   mcap-convert -i data/raw/my-session -o data/datasets --max-episodes 5
   mcap-convert -i data/raw/my-session -o data/datasets --resume
 """,
@@ -445,8 +447,12 @@ examples:
         help="robot type (default: anvil_openarm)",
     )
     parser.add_argument(
-        "--fps", type=int, default=None,
-        help="output fps — overrides auto-detected source fps; must not exceed source fps",
+        "--frequency", type=int, default=None,
+        help=(
+            "output dataset frequency in Hz — overrides `frequency` from the YAML config. "
+            "If the source MCAP rate is lower than this target, the converter clamps to "
+            "the source rate (no upsampling)."
+        ),
     )
     parser.add_argument(
         "--tolerance-s", type=float, default=1e-3,
@@ -523,46 +529,51 @@ examples:
         config.action_n_step = args.action_n_step
         log(f"action_n_step overridden to [bold]{args.action_n_step}[/bold] via --action-n-step")
 
-    # Collect MCAP files once (reused for fps detection and conversion)
+    # Collect MCAP files once (reused for source rate detection and conversion)
     all_mcap_files = collect_mcap_files(args.input_dir)
 
-    # Always auto-detect input fps from all episodes (fast — reads MCAP summary only)
+    # Auto-detect source rate from MCAP (fast — reads summary only).
     ref_topic = list(config.camera_topic_mapping.keys())[0] if config.camera_topic_mapping else None
-    ep_fps_raw = []
+    ep_rates_raw = []
     if ref_topic:
         for f in all_mcap_files:
             v = McapReader(str(f)).estimate_fps(ref_topic)
             if v:
-                ep_fps_raw.append(v)
+                ep_rates_raw.append(v)
 
-    if ep_fps_raw:
-        snapped = [snap_fps(v) for v in ep_fps_raw]
-        input_fps = snap_fps(min(ep_fps_raw))
-        input_fps_label = str(input_fps)
+    if ep_rates_raw:
+        snapped = [snap_fps(v) for v in ep_rates_raw]
+        source_frequency = snap_fps(min(ep_rates_raw))
+        source_label = str(source_frequency)
         if len(set(snapped)) > 1:
-            input_fps_label = f"{input_fps} [yellow](mixed: {snapped})[/yellow]"
+            source_label = f"{source_frequency} [yellow](mixed: {snapped})[/yellow]"
     else:
-        input_fps = None
-        input_fps_label = "unknown"
+        source_frequency = None
+        source_label = "unknown"
 
-    # Resolve output fps: CLI --fps > auto-detect min > 30
-    if args.fps is not None:
-        fps = args.fps
-        output_fps_label = f"{fps} (manual override)"
-        if input_fps is not None and fps > input_fps:
-            console.print(
-                f"\n[bold red]ERROR: Output fps ({fps}) is higher than source session fps ({input_fps}).[/bold red]\n"
-                "Upsampling is not supported — it creates duplicate frames and degrades dataset quality.\n"
-                f"Use [bold]--fps {input_fps}[/bold] or lower, or omit --fps to use the source fps automatically.\n"
-            )
-            exit(1)
-    elif input_fps is not None:
-        fps = input_fps
-        output_fps_label = f"{fps} (default as source)"
+    # Resolve output frequency. Priority: CLI --frequency > config.frequency.
+    # Clamp at source rate (can't upsample).
+    if args.frequency is not None:
+        target_frequency = args.frequency
+        target_origin = "CLI override"
     else:
-        fps = 30
-        output_fps_label = "30 (default)"
-        log("[yellow]Cannot detect fps — defaulting to 30[/yellow]")
+        target_frequency = config.frequency
+        target_origin = "from config"
+
+    if source_frequency is None:
+        log("[yellow]Cannot detect source rate — using target frequency as-is.[/yellow]")
+        frequency = target_frequency
+        output_frequency_label = f"{frequency} ({target_origin}; source unknown)"
+    elif target_frequency > source_frequency:
+        log(
+            f"[yellow]Target frequency ({target_frequency} Hz, {target_origin}) exceeds "
+            f"source rate ({source_frequency} Hz); clamping to source (no upsampling).[/yellow]"
+        )
+        frequency = source_frequency
+        output_frequency_label = f"{frequency} (clamped to source; {target_origin} was {target_frequency})"
+    else:
+        frequency = target_frequency
+        output_frequency_label = f"{frequency} ({target_origin})"
 
     # Startup banner
     banner = Table(show_header=False, box=None, padding=(0, 2))
@@ -572,8 +583,8 @@ examples:
     banner.add_row("Output directory", args.output_dir)
     banner.add_row("HuggingFace Repo", repo_id)
     banner.add_row("Robot Type", args.robot_type)
-    banner.add_row("Source Session FPS", input_fps_label)
-    banner.add_row("Output FPS", output_fps_label)
+    banner.add_row("Source Session Rate", f"{source_label} Hz")
+    banner.add_row("Output Frequency", f"{output_frequency_label} Hz")
     banner.add_row("Buffer", f"{args.buffer_seconds}s")
     banner.add_row("Video codec", args.vcodec)
     banner.add_row("Resume", "yes" if args.resume else "no")
@@ -617,7 +628,7 @@ examples:
             output_dir=args.output_dir,
             repo_id=repo_id,
             robot_type=args.robot_type,
-            fps=fps,
+            frequency=frequency,
             tolerance_s=args.tolerance_s,
             task=args.task,
             config=config,

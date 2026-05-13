@@ -1,4 +1,4 @@
-"""Hardcoded conventions for the OpenArm MCAP -> LeRobot pipeline.
+"""Hardcoded conventions for the Anvil MCAP -> LeRobot pipeline.
 
 Anything in this file is fixed by how we record data, not user-configurable.
 Change here if the recording convention itself changes.

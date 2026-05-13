@@ -24,7 +24,7 @@ class LeRobotWriter:
         output_dir: str,
         repo_id: str,
         robot_type: str = "anvil_openarm",
-        fps: int = 30,
+        frequency: int = 30,
         config: DataConfig | None = None,
         vcodec: str = "h264",
         quiet: bool = False,
@@ -34,7 +34,7 @@ class LeRobotWriter:
         self.output_dir = Path(output_dir)
         self.repo_id = repo_id
         self.robot_type = robot_type
-        self.fps = fps
+        self.frequency = frequency
         self.config = config
         self.vcodec = vcodec
         self.quiet = quiet
@@ -60,7 +60,7 @@ class LeRobotWriter:
 
         return LeRobotDataset.create(
             repo_id=self.repo_id,
-            fps=self.fps,
+            fps=self.frequency,  # lerobot API uses `fps` for the dataset sample rate
             root=str(self.output_dir),
             robot_type=self.robot_type,
             features=features,
