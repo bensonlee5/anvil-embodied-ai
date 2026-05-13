@@ -40,15 +40,16 @@ ObsEntry = tuple[float, np.ndarray, np.ndarray, np.ndarray]
 CmdEntry = tuple[float, np.ndarray]
 
 
-def parse_joint_name(joint_name: str) -> tuple[str, str, str] | None:
+def parse_joint_name(joint_name: str) -> tuple[str, str, str]:
     """
     Parse `{source}_{arm}_{joint_id}` into (role, arm, joint_id).
 
     `source` must be one of `follower` (-> role "observation") or `leader`
     (-> role "action"). `arm` must be `l` (-> "left") or `r` (-> "right").
 
-    Returns None if the name doesn't follow the convention — callers should
-    skip such joints rather than fail.
+    Raises DataExtractionError if the name doesn't follow the convention —
+    we'd rather fail loudly than silently drop joints due to a misconfigured
+    naming scheme.
 
     Examples:
         "follower_r_joint1"        -> ("observation", "right", "joint1")
@@ -56,23 +57,26 @@ def parse_joint_name(joint_name: str) -> tuple[str, str, str] | None:
     """
     parts = joint_name.split(JOINT_NAME_SEPARATOR, 2)
     if len(parts) < 3:
-        return None
+        raise DataExtractionError(
+            f"Joint name {joint_name!r} does not match expected "
+            f"'{{source}}_{{arm}}_{{joint_id}}' convention."
+        )
     source, arm_prefix, joint_id = parts
     role = _ROLE_BY_PREFIX.get(source)
     arm = ARM_PREFIX_TO_NAME.get(arm_prefix)
     if role is None or arm is None:
-        return None
+        raise DataExtractionError(
+            f"Joint name {joint_name!r} has unrecognized source/arm prefix: "
+            f"source={source!r} (expected one of {sorted(_ROLE_BY_PREFIX)}), "
+            f"arm={arm_prefix!r} (expected one of {sorted(ARM_PREFIX_TO_NAME)})."
+        )
     return role, arm, joint_id
 
 
 def message_timestamp(message) -> float:
     """
-    POSIX seconds for a message, preferring the ROS `header.stamp` over MCAP log_time.
-
-    `header.stamp` is closer to when the data was actually captured (camera shutter
-    fired, joint state was sampled); MCAP `log_time` is when the recorder received
-    the message, which can lag by 10-20 ms for JPEG-compressed images. We fall back
-    to log_time for messages without a header (e.g. std_msgs/Float64MultiArray).
+    Get timestamp for a message, preferring the ROS header.stamp,
+    falling back to MCAP log_time when not available
     """
     stamp = getattr(getattr(message.ros_msg, "header", None), "stamp", None)
     if stamp is not None:
@@ -126,7 +130,9 @@ class BufferedStreamExtractor:
         """
         self.config = config
         self.frequency = config.frequency
-        self.frame_interval = 1.0 / self.frequency  # seconds between output frames (for subsampling)
+        self.frame_interval = (
+            1.0 / self.frequency
+        )  # seconds between output frames (for subsampling)
         self.buffer_seconds = buffer_seconds
         self.half_buffer = int(buffer_seconds * self.frequency / 2)  # 75 frames for 5s @ 30Hz
         self.full_buffer = self.half_buffer * 2  # 150 frames
@@ -211,7 +217,7 @@ class BufferedStreamExtractor:
         joint_command_buffers: dict[str, deque] = {}
 
         # Build subscription topic list
-        all_topics = [self.config.camera_topic_mapping.keys()] + [self.config.robot_state_topic]
+        all_topics = list(self.config.camera_topic_mapping.keys()) + [self.config.robot_state_topic]
         if self.config.action_source is ActionSource.quest_teleop:
             expected_cmd_topics = set(self._quest_topic_to_arm.keys())
             all_topics.extend(expected_cmd_topics)
@@ -251,6 +257,7 @@ class BufferedStreamExtractor:
 
             if topic not in topic_to_cam:
                 continue
+
             cam_name = topic_to_cam[topic]
             ros_msg = message.ros_msg
             img = decode_compressed_image(ros_msg.data, ros_msg.format)
@@ -459,6 +466,13 @@ class BufferedStreamExtractor:
             action_ts = target_ts + self.frame_interval * self.config.action_n_step
             for arm in arms:
                 buf = joint_observation_buffers[arm]  # non-empty per loop above
+                # Require a real future sample. If action_ts is past the last
+                # buffered observation, we're at the tail of the episode and
+                # would otherwise reuse the current obs as its own action —
+                # a noisy target that biases the policy toward end-of-demo
+                # poses. Drop the frame instead.
+                if buf[-1][0] < action_ts:
+                    return None
                 idx = self._find_nearest_in_buffer(buf, action_ts)
                 if idx is None:
                     return None
@@ -533,10 +547,7 @@ class BufferedStreamExtractor:
         # Group by (role, arm) so we can sort each group's parallel arrays together.
         grouped: dict[tuple[str, str], dict] = {}
         for i, joint_name in enumerate(ros_msg.name):
-            parsed = parse_joint_name(joint_name)
-            if parsed is None:
-                continue
-            role, arm, joint_id = parsed
+            role, arm, joint_id = parse_joint_name(joint_name)
 
             key = (role, arm)
             g = grouped.setdefault(
