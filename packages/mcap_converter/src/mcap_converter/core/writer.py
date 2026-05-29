@@ -183,25 +183,28 @@ class LeRobotWriter:
         camera_names: List[str],
     ) -> Dict[str, Any]:
         """
-        Define dataset features based on data
+        Define dataset features based on data.
 
-        For multi-robot setups (left/right), creates combined features:
-        - observation.state: [left_joints..., right_joints...] (concatenated)
-        - action: [left_joints..., right_joints...] (concatenated)
+        Joint mode (UNCHANGED): single concatenated ``observation.state`` and
+        ``action`` features ``(sum_arm n_joints,)``. Multi-robot setups
+        (left/right) concatenate per-arm joint names in sorted-arm order.
+
+        EE mode: single concatenated ``observation.state`` (8 * n_arms,) with
+        per-arm slice ``[x, y, z, qx, qy, qz, qw, gripper]`` and ``action``
+        (10 * n_arms,) with per-arm slice ``[x, y, z, r0..r5, gripper]``.
+        Concatenation order = ``config.observation_topics`` insertion order.
 
         Args:
-            joint_names: Dictionary mapping robot prefix to joint names
-                         - Single robot: {"": ["joint1", "joint2"]}
-                         - Multi-robot: {"right": ["joint1"], "left": ["joint1"]}
+            joint_names: (joint mode) ``{robot_prefix: [joint_id, ...]}``;
+                         ignored in EE mode.
             camera_names: List of camera names
 
         Returns:
-            Features dictionary for LeRobotDataset
+            Features dictionary for ``LeRobotDataset``.
         """
         features = {}
 
-        # Image features (shared across all robots)
-        # Get resolution from config: [width, height] -> (height, width) for shape
+        # Image features (shared across modes/robots)
         img_width, img_height = self.config.image_resolution
         for cam_name in camera_names:
             features[f"observation.images.{cam_name}"] = {
@@ -209,6 +212,31 @@ class LeRobotWriter:
                 "shape": (3, img_height, img_width),  # (channels, height, width)
                 "names": ["channel", "height", "width"],
             }
+
+        # EE mode — single canonical features keyed off observation_topics arms.
+        if self.config.is_ee:
+            state_names: List[str] = []
+            action_names: List[str] = []
+            for arm_id in self.config.arms:  # observation_topics insertion order
+                state_names.extend(
+                    f"{arm_id}_{suf}" for suf in ("x", "y", "z", "qx", "qy", "qz", "qw", "gripper")
+                )
+                action_names.extend(
+                    f"{arm_id}_{suf}" for suf in (
+                        "x", "y", "z", "r0", "r1", "r2", "r3", "r4", "r5", "gripper"
+                    )
+                )
+            features["observation.state"] = {
+                "dtype": "float32",
+                "shape": (len(state_names),),
+                "names": state_names,
+            }
+            features["action"] = {
+                "dtype": "float32",
+                "shape": (len(action_names),),
+                "names": action_names,
+            }
+            return features
 
         # Check if multi-robot (has named robots like 'left', 'right')
         robots = sorted([r for r in joint_names.keys() if r])

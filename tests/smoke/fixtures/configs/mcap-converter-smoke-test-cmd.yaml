@@ -1,14 +1,15 @@
-# =============================================================================
-# OpenArm MCAP to LeRobot Conversion Configuration
-# =============================================================================
-# Teleop Mode: Quest (VR Controller) — SINGLE ARM (right only)
-# Action source: recorded /commands topic (action_from_observation: false)
-#
-# Use this config when the recording includes the action-command topic.
-# For observation-derived actions, see: openarm_single_quest.yaml
-# =============================================================================
+# Smoke test config — Quest teleop, SINGLE ARM (right only), action from command topic.
+# Ported to the new unified converter schema.
 
-robot_state_topic: "/joint_states"
+data_space: "joint"
+
+observation_topics:
+  right: "/joint_states"
+
+action_topics:
+  right:
+    topic: "/follower_r_forward_position_controller/commands"
+    joint_order: ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "finger_joint1"]
 
 joint_names:
   separator: "_"
@@ -17,26 +18,6 @@ joint_names:
   arms:
     r: right
 
-action_topics:
-  "/follower_r_forward_position_controller/commands":
-    arm: "right"
-    joint_order: ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "finger_joint1"]
-
-# Use recorded command topic as action source.
-action_from_observation: false
-
-camera_topics:
-  - "/cam_waist/image_raw/compressed"
-  - "/cam_wrist_r/image_raw/compressed"
-  - "/cam_chest/image_raw/compressed"
-
-camera_topic_mapping:
-  "/cam_waist/image_raw/compressed": "waist"
-  "/cam_wrist_r/image_raw/compressed": "wrist_r"
-  "/cam_chest/image_raw/compressed": "chest"
-
-image_resolution: [640, 480]
-
 observation_feature_mapping:
   state: "position"
   others: []
@@ -44,3 +25,15 @@ observation_feature_mapping:
 action_feature_mapping:
   state: "position"
   others: []
+
+camera_topics:
+  - "/cam_waist/image_raw/compressed"
+  - "/cam_wrist_r/image_raw/compressed"
+  - "/cam_chest/image_raw/compressed"
+
+camera_topic_mapping:
+  "/cam_waist/image_raw/compressed":  "waist"
+  "/cam_wrist_r/image_raw/compressed": "wrist_r"
+  "/cam_chest/image_raw/compressed":  "chest"
+
+image_resolution: [640, 480]

@@ -1,6 +1,7 @@
 # MCAP Converter
 
 Convert ROS2 MCAP recordings into LeRobot v3.0 datasets.
+Supports both **joint-space** and **EE Cartesian-space** action representations.
 
 ## Installation
 
@@ -16,7 +17,13 @@ uv sync --all-packages
 Convert MCAP files to LeRobot dataset format.
 
 ```bash
-mcap-convert -i /path/to/mcap/dir -o /tmp/dataset --config configs/mcap_converter/openarm_bimanual.yaml
+# EE Cartesian bimanual (new)
+mcap-convert -i data/raw/my-session -o data/datasets \
+  --config configs/mcap_converter/openarm_ee_bimanual.yaml
+
+# Joint space bimanual (existing)
+mcap-convert -i data/raw/my-session -o data/datasets \
+  --config configs/mcap_converter/openarm_joint_bimanual.yaml
 ```
 
 Key options:
@@ -24,100 +31,139 @@ Key options:
 | Option | Description | Default |
 |--------|-------------|---------|
 | `-i, --input-dir` | Directory containing MCAP files | required |
-| `-o, --output-dir` | Output directory | `data/processed/dataset` |
-| `--config` | Robot config YAML file | |
-| `--fps` | Video framerate | `30` |
+| `-o, --output-dir` | Output base directory | `data/datasets` |
+| `--config` | Conversion config YAML | |
+| `--fps` | Output framerate (auto-detected if omitted) | auto |
 | `--vcodec` | Video codec (`h264`, `hevc`, `libsvtav1`) | `h264` |
-| `--task` | Task name for the dataset | `manipulation` |
+| `--resume` | Skip already-converted episodes | |
+| `--max-episodes N` | Convert only the first N episodes | |
+| `--act-from-obs` | Force `action[t] = obs[t]` even when action topics are configured | |
 | `--push-to-hub` | Upload to HuggingFace Hub after conversion | |
 
-### mcap-inspect
+Output is always saved to `<output-dir>/<input-dir-name>/`.
 
-Analyze MCAP file structure and message types.
-
-```bash
-mcap-inspect /path/to/file.mcap
-mcap-inspect /path/to/file.mcap --topic /joint_states --format json
-```
-
-### mcap-to-video
-
-Extract image topics from MCAP files directly to MP4 videos.
+### Other tools
 
 ```bash
+mcap-inspect /path/to/file.mcap          # Analyze MCAP topics and message types
 mcap-to-video -i recording.mcap -o ./videos
-mcap-to-video -i recording.mcap --scan-only
-```
-
-### dataset-validate
-
-Validate a converted LeRobot dataset by loading and reading frames.
-
-```bash
-dataset-validate --root /path/to/dataset
-```
-
-### mcap-upload
-
-Upload a LeRobot dataset to Hugging Face Hub.
-
-```bash
+dataset-validate --root data/datasets/my-session
 mcap-upload /path/to/dataset --repo-id anvil-robot/my_dataset
 ```
+
+## Configuration
+
+All configs share the same **unified format**. The only required change between modes is `data_space`.
+
+### EE Cartesian mode
+
+Reads `/ee_pose_left` / `/ee_pose_right` (`anvil_msgs/msg/CommandedEEPose`):
+
+```yaml
+data_space: "ee"
+
+observation_topics:
+  left:  "/ee_pose_left"
+  right: "/ee_pose_right"
+
+# action_topics must be empty in EE mode —
+# action[t] = obs[t] (future window applied by delta_timestamps at train time)
+action_topics: {}
+
+camera_topics:
+  - "/cam_waist/image_raw/compressed"
+  - "/cam_wrist_r/image_raw/compressed"
+  - "/cam_chest/image_raw/compressed"
+  - "/cam_wrist_l/image_raw/compressed"
+
+camera_topic_mapping:
+  "/cam_waist/image_raw/compressed":  "waist"
+  "/cam_wrist_r/image_raw/compressed": "wrist_r"
+  "/cam_chest/image_raw/compressed":  "chest"
+  "/cam_wrist_l/image_raw/compressed": "wrist_l"
+
+image_resolution: [640, 480]
+```
+
+**Output schema:**
+```
+observation.state  float32 (8 * n_arms,)   per arm: [x, y, z, qx, qy, qz, qw, gripper]
+action             float32 (10 * n_arms,)  per arm: [x, y, z, r0, r1, r2, r3, r4, r5, gripper]
+```
+The action uses **6D rotation (Zhou et al. 2019)**: first two columns of the 3×3 rotation matrix,
+flattened. This avoids discontinuities in Euler/quaternion representations and improves regression.
+
+Single-arm: list only one entry under `observation_topics` (arm scope is implicit from the dict keys).
+
+### Joint mode (Quest teleop)
+
+Reads `/joint_states` and per-arm command topics:
+
+```yaml
+data_space: "joint"
+
+observation_topics:
+  left:  "/joint_states"
+  right: "/joint_states"
+
+action_topics:
+  left:
+    topic: "/follower_l_forward_position_controller/commands"
+    joint_order: ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "finger_joint1"]
+  right:
+    topic: "/follower_r_forward_position_controller/commands"
+    joint_order: ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "finger_joint1"]
+
+# joint_names: how to split /joint_states by arm
+joint_names:
+  separator: "_"
+  source: { follower: observation }
+  arms:   { l: left, r: right }
+
+observation_feature_mapping:
+  state: "position"
+  others: []   # velocity/effort omitted in new configs
+
+action_feature_mapping:
+  state: "position"
+  others: []
+
+camera_topics: [ ... ]
+camera_topic_mapping: { ... }
+image_resolution: [640, 480]
+```
+
+**Joint mode act-from-obs:** set `action_topics: {}` (or use `--act-from-obs` on the CLI) to write
+`action[t] = observation.state[t]`. The future prediction window is then deferred to LeRobot's
+`delta_timestamps` at train time.
+
+### Available configs
+
+| Config | `data_space` | Arms | Output dims |
+|--------|-------------|------|-------------|
+| `openarm_ee_bimanual.yaml` | `ee` | left + right | state `(16,)`, action `(20,)` |
+| `openarm_ee_left.yaml` | `ee` | left only | state `(8,)`, action `(10,)` |
+| `openarm_joint_bimanual.yaml` | `joint` | left + right | state `(16,)`, action `(16,)` |
+| `openarm_bimanual.yaml` | `joint` (legacy fmt) | left + right | state `(16,)`, action `(16,)` |
+| `openarm_bimanual_quest.yaml` | `joint` (legacy fmt) | left + right | state `(16,)`, action `(16,)` |
 
 ## Python API
 
 ```python
 from mcap_converter import McapReader, LeRobotWriter, ConfigLoader
 
-# Load configuration
-config = ConfigLoader.from_yaml("configs/mcap_converter/openarm_bimanual.yaml")
+config = ConfigLoader.from_yaml("configs/mcap_converter/openarm_ee_bimanual.yaml")
 
-# Read MCAP file
-reader = McapReader("recording.mcap")
-
-# Write dataset
 writer = LeRobotWriter(
-    output_dir="output_dataset",
+    output_dir="data/datasets/my-session",
     repo_id="anvil_robot/my_dataset",
+    config=config,
     fps=30,
 )
-dataset = writer.create_dataset(joint_names, camera_names)
-writer.add_episode(dataset, frames, episode_index=0)
+# EE mode: joint_names not needed — dims from config.observation_topics
+dataset = writer.create_dataset(joint_names={}, camera_names=["chest", "waist", "wrist_l", "wrist_r"])
+writer.add_episode(dataset, frames)
 writer.finalize(dataset)
-```
-
-## Configuration
-
-Example for bimanual OpenArm robot (`configs/mcap_converter/openarm_bimanual.yaml`):
-
-```yaml
-robot_state_topic: "/joint_states"
-
-joint_names:
-  separator: "_"
-  source:
-    leader: action
-    follower: observation
-  arms:
-    r: right
-    l: left
-
-camera_topic_mapping:
-  "/usb_cam_waist/image_raw/compressed": "waist"
-  "/usb_cam_wrist_r/image_raw/compressed": "wrist_r"
-
-image_resolution: [640, 480]
-
-observation_feature_mapping:
-  state: "position"
-  others:
-    - "velocity"
-    - "effort"
-
-action_feature_mapping:
-  state: "position"
-  others: []
 ```
 
 ## Module Structure
@@ -126,21 +172,43 @@ action_feature_mapping:
 mcap_converter/
 ├── core/
 │   ├── reader.py      # MCAP file reading
-│   ├── extractor.py   # Data extraction & streaming
+│   ├── extractor.py   # Streaming extraction (joint + EE Cartesian paths)
 │   ├── aligner.py     # Time synchronization
-│   └── writer.py      # LeRobot dataset writing
+│   └── writer.py      # LeRobot dataset writing (joint + EE feature schemas)
 ├── cli/
-│   ├── convert.py     # mcap-convert
+│   ├── convert.py     # mcap-convert (--act-from-obs, EE/joint gate)
 │   ├── inspect.py     # mcap-inspect
 │   ├── validate.py    # dataset-validate
 │   ├── upload.py      # mcap-upload
 │   └── video.py       # mcap-to-video
 ├── config/
-│   ├── schema.py      # Configuration dataclasses
-│   ├── loader.py      # YAML config loading
-│   └── validators.py  # Config validation
+│   ├── schema.py      # Unified DataConfig (data_space, observation_topics, action_topics)
+│   ├── loader.py      # YAML config loading (new unified format)
+│   └── validators.py  # Config validation (called at runtime before conversion)
 ├── utils/
-│   ├── image_utils.py # Image processing
+│   ├── image_utils.py # Image processing (JPEG decode with PIL fallback)
 │   └── logging.py     # Logging utilities
 └── exceptions.py      # Custom exceptions
+
+packages/anvil_shared/src/anvil_shared/
+└── rotation.py        # Rotation helpers: quat_to_matrix, matrix_to_rot6d,
+                       #   rot6d_to_matrix, matrix_to_quat (xyzw convention)
 ```
+
+## Rotation representation
+
+EE action uses **6D rotation (rot6d)**:
+
+```python
+from anvil_shared.rotation import quat_to_matrix, matrix_to_rot6d, rot6d_to_matrix, matrix_to_quat
+
+# Encode (converter writes this into 'action')
+R = quat_to_matrix([qx, qy, qz, qw])   # (3,3)
+r6d = matrix_to_rot6d(R)               # (6,) = first two columns of R, flattened
+
+# Decode (trainer / inference reads this back)
+R = rot6d_to_matrix(r6d)               # (3,3) via Gram-Schmidt
+quat = matrix_to_quat(R)               # (4,) [x,y,z,w]
+```
+
+Quaternion convention is `[x, y, z, w]` throughout, consistent with ROS/TF2.

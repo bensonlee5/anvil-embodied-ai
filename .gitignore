@@ -25,7 +25,7 @@ wheels/
 venv/
 ENV/
 env/
-.python-version
+# .python-version is intentionally committed to pin Python 3.12 for uv
 
 # UV
 .uv/

@@ -1,4 +1,10 @@
 """Shared pure-Python utilities used across anvil packages."""
+from anvil_shared.rotation import (
+    matrix_to_quat,
+    matrix_to_rot6d,
+    quat_to_matrix,
+    rot6d_to_matrix,
+)
 from anvil_shared.splits import (
     compute_split_episodes,
     load_split_info,
@@ -10,5 +16,9 @@ __version__ = "0.1.0"
 __all__ = [
     "compute_split_episodes",
     "load_split_info",
+    "matrix_to_quat",
+    "matrix_to_rot6d",
+    "quat_to_matrix",
+    "rot6d_to_matrix",
     "save_split_info",
 ]

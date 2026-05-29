@@ -11,8 +11,13 @@ import numpy as np
 import pytest
 
 from mcap_converter.config.loader import ConfigLoader
-from mcap_converter.config.schema import ActionTopicConfig, DataConfig, JointNamePattern
-from mcap_converter.config.validators import validate_action_topics, validate_config
+from mcap_converter.config.schema import (
+    ActionTopicConfig,
+    ActionTopicSpec,
+    DataConfig,
+    JointNamePattern,
+)
+from mcap_converter.config.validators import ConfigurationError, validate_config
 from mcap_converter.core.extractor import parse_joint_name
 
 
@@ -215,53 +220,75 @@ class TestActionReorder:
 # =============================================================================
 
 
-class TestActionTopicConfig:
-    """Test ActionTopicConfig parsing through the config loader."""
+class TestActionTopicParsing:
+    """Test the new arm-keyed action_topics format and the derived
+    action_command_topics property used by the joint extractor."""
 
-    def test_new_format_parsing(self):
-        """New nested format with arm and joint_order."""
-        config_dict = {
-            "robot_state_topic": "/joint_states",
-            "action_topics": {
-                "/left_cmd": {
-                    "arm": "left",
-                    "joint_order": ["joint1", "joint2", "finger_joint1"],
-                },
-                "/right_cmd": {
-                    "arm": "right",
-                    "joint_order": ["joint1", "joint2", "finger_joint1"],
-                },
+    def _base_joint_yaml(self) -> dict:
+        return {
+            "data_space": "joint",
+            "observation_topics": {"left": "/joint_states", "right": "/joint_states"},
+            "joint_names": {
+                "separator": "_",
+                "source": {"follower": "observation"},
+                "arms": {"l": "left", "r": "right"},
             },
             "camera_topics": ["/cam"],
             "camera_topic_mapping": {"/cam": "head"},
         }
-        config = ConfigLoader.from_dict(config_dict)
 
-        assert isinstance(config.action_topics["/left_cmd"], ActionTopicConfig)
-        assert config.action_topics["/left_cmd"].arm == "left"
-        assert config.action_topics["/left_cmd"].joint_order == [
+    def test_new_format_parsing(self):
+        cfg_dict = self._base_joint_yaml()
+        cfg_dict["action_topics"] = {
+            "left": {
+                "topic": "/left_cmd",
+                "joint_order": ["joint1", "joint2", "finger_joint1"],
+            },
+            "right": {
+                "topic": "/right_cmd",
+                "joint_order": ["joint1", "joint2", "finger_joint1"],
+            },
+        }
+        config = ConfigLoader.from_dict(cfg_dict)
+
+        assert isinstance(config.action_topics["left"], ActionTopicSpec)
+        assert config.action_topics["left"].topic == "/left_cmd"
+        assert config.action_topics["left"].joint_order == [
             "joint1",
             "joint2",
             "finger_joint1",
         ]
-        assert config.action_topics["/right_cmd"].arm == "right"
+        assert config.action_topics["right"].topic == "/right_cmd"
 
-    def test_legacy_format_parsing(self):
-        """Legacy plain string format should produce ActionTopicConfig with empty joint_order."""
-        config_dict = {
-            "robot_state_topic": "/joint_states",
-            "action_topics": {
-                "/left_cmd": "left",
-            },
-            "camera_topics": ["/cam"],
-            "camera_topic_mapping": {"/cam": "head"},
+        # Derived property used by the joint extractor matches the legacy
+        # topic-keyed shape exactly.
+        derived = config.action_command_topics
+        assert set(derived.keys()) == {"/left_cmd", "/right_cmd"}
+        assert isinstance(derived["/left_cmd"], ActionTopicConfig)
+        assert derived["/left_cmd"].arm == "left"
+        assert derived["/left_cmd"].joint_order == [
+            "joint1",
+            "joint2",
+            "finger_joint1",
+        ]
+        assert derived["/right_cmd"].arm == "right"
+
+    def test_empty_action_topics_means_act_from_obs(self):
+        cfg_dict = self._base_joint_yaml()
+        cfg_dict["action_topics"] = {}
+        config = ConfigLoader.from_dict(cfg_dict)
+        assert config.action_topics == {}
+        assert config.action_command_topics == {}
+
+    def test_legacy_format_rejected(self):
+        """Old topic-keyed {topic: {arm, joint_order}} must fail (new-format-only)."""
+        cfg_dict = self._base_joint_yaml()
+        # legacy shape: key is topic, value lacks an explicit 'topic' field
+        cfg_dict["action_topics"] = {
+            "/left_cmd": {"arm": "left", "joint_order": ["joint1"]},
         }
-        with pytest.warns(DeprecationWarning, match="plain string format"):
-            config = ConfigLoader.from_dict(config_dict)
-
-        assert isinstance(config.action_topics["/left_cmd"], ActionTopicConfig)
-        assert config.action_topics["/left_cmd"].arm == "left"
-        assert config.action_topics["/left_cmd"].joint_order == []
+        with pytest.raises(ValueError):
+            ConfigLoader.from_dict(cfg_dict)
 
 
 # =============================================================================
@@ -269,28 +296,78 @@ class TestActionTopicConfig:
 # =============================================================================
 
 
-class TestValidateActionTopics:
-    """Test action topic validation."""
+def _minimal_joint_dict(**overrides) -> dict:
+    base = {
+        "data_space": "joint",
+        "observation_topics": {"left": "/joint_states", "right": "/joint_states"},
+        "action_topics": {
+            "left": {
+                "topic": "/left_cmd",
+                "joint_order": ["joint1", "finger_joint1"],
+            },
+            "right": {
+                "topic": "/right_cmd",
+                "joint_order": ["joint1", "finger_joint1"],
+            },
+        },
+        "joint_names": {
+            "separator": "_",
+            "source": {"follower": "observation"},
+            "arms": {"l": "left", "r": "right"},
+        },
+        "camera_topics": ["/cam"],
+        "camera_topic_mapping": {"/cam": "head"},
+    }
+    base.update(overrides)
+    return base
 
-    def test_valid_config(self):
-        topics = {
-            "/cmd": ActionTopicConfig(
-                arm="left", joint_order=["joint1", "finger_joint1"]
-            ),
-        }
-        errors = validate_action_topics(topics)
-        assert errors == []
 
-    def test_empty_arm(self):
-        topics = {
-            "/cmd": ActionTopicConfig(arm="", joint_order=["joint1"]),
-        }
-        errors = validate_action_topics(topics)
-        assert any("arm identifier" in e for e in errors)
+class TestValidateConfig:
+    """Exercise validate_config against the new unified schema."""
 
-    def test_empty_joint_order(self):
-        topics = {
-            "/cmd": ActionTopicConfig(arm="left", joint_order=[]),
-        }
-        errors = validate_action_topics(topics)
-        assert any("joint_order" in e for e in errors)
+    def test_valid_joint_config(self):
+        cfg = ConfigLoader.from_dict(_minimal_joint_dict())
+        validate_config(cfg)  # no raise
+
+    def test_joint_empty_joint_order_rejected(self):
+        cfg = ConfigLoader.from_dict(_minimal_joint_dict(
+            action_topics={
+                "left": {"topic": "/left_cmd", "joint_order": []},
+                "right": {"topic": "/right_cmd", "joint_order": ["joint1"]},
+            }
+        ))
+        with pytest.raises(ConfigurationError, match="joint_order"):
+            validate_config(cfg)
+
+    def test_joint_action_arm_missing_from_observation_rejected(self):
+        cfg = ConfigLoader.from_dict(_minimal_joint_dict(
+            action_topics={
+                "left": {"topic": "/left_cmd", "joint_order": ["joint1"]},
+                "ghost": {"topic": "/ghost_cmd", "joint_order": ["joint1"]},
+            }
+        ))
+        with pytest.raises(ConfigurationError, match="not present in observation_topics"):
+            validate_config(cfg)
+
+    def test_ee_with_action_topics_rejected(self):
+        cfg = ConfigLoader.from_dict({
+            "data_space": "ee",
+            "observation_topics": {"left": "/ee_pose_left"},
+            "action_topics": {
+                "left": {"topic": "/x", "joint_order": []},
+            },
+            "camera_topics": ["/cam"],
+            "camera_topic_mapping": {"/cam": "head"},
+        })
+        with pytest.raises(ConfigurationError, match="action_topics must be empty in ee mode"):
+            validate_config(cfg)
+
+    def test_ee_valid_empty_action_topics(self):
+        cfg = ConfigLoader.from_dict({
+            "data_space": "ee",
+            "observation_topics": {"left": "/ee_pose_left", "right": "/ee_pose_right"},
+            "action_topics": {},
+            "camera_topics": ["/cam"],
+            "camera_topic_mapping": {"/cam": "head"},
+        })
+        validate_config(cfg)  # no raise

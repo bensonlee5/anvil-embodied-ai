@@ -1,4 +1,21 @@
-"""Configuration schema for MCAP to LeRobot conversion"""
+"""Configuration schema for MCAP to LeRobot conversion.
+
+The unified config (introduced with EE-space support) has a single shape that
+works for joint and EE modes:
+
+    data_space:         "joint" | "ee"
+    observation_topics: { arm_id -> topic }
+    action_topics:      { arm_id -> ActionTopicSpec }   # empty in EE mode
+    joint_names:        JointNamePattern (joint mode only — splits /joint_states by arm)
+    camera_topics:      [...]
+    camera_topic_mapping: { topic -> dataset_camera_name }
+    image_resolution:   [W, H]
+
+The legacy joint-extraction code reads ``robot_state_topic`` (single string) and
+``action_command_topics`` (``{topic -> ActionTopicConfig}``). Both are exposed
+as ``@property`` derivations over the new fields so the joint extractor stays
+byte-identical apart from the attribute name.
+"""
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
@@ -6,186 +23,162 @@ from typing import Any, Dict, List
 
 @dataclass
 class JointNamePattern:
-    """
-    Configuration for parsing joint names from a single JointState topic.
+    """Parsing rules for joint names inside a shared /joint_states topic.
 
-    Joint names follow the pattern: {source}_{arm}_{joint_id}
+    Joint names follow ``{source}{separator}{arm}{separator}{joint_id}``::
 
-    Example joint names:
-        "leader_r_joint1"   -> action data, right arm, joint1
-        "follower_l_joint3" -> observation data, left arm, joint3
+        "follower_l_joint1" -> observation, left arm, joint1
 
-    The 'source' determines whether data goes to action or observation:
-        - leader/master = action (target positions the robot should reach)
-        - follower/puppet = observation (current robot state)
-
-    The 'arm' identifies which arm for bimanual robots:
-        - r/right = right arm
-        - l/left = left arm
+    Only ``source`` and ``arms`` mappings are required. The ``source`` map
+    classifies a name prefix as either ``observation`` or ``action`` (the
+    latter only relevant in leader-follower mode, which is not used by the
+    new unified configs). ``arms`` maps the per-arm identifier letter to its
+    canonical name.
     """
 
-    # Maps the first part of joint name to observation/action
-    # Example: {"leader": "action", "follower": "observation"}
-    #   - "leader_*" joints become action data
-    #   - "follower_*" joints become observation data
     source: Dict[str, str] = field(
         default_factory=lambda: {
             "leader": "action",
             "follower": "observation",
         }
     )
-
-    # Maps arm identifier to left/right (for bimanual robots)
-    # Example: {"r": "right", "l": "left"}
-    # Leave empty {} for single-arm robots
     arms: Dict[str, str] = field(
         default_factory=lambda: {
             "r": "right",
             "l": "left",
         }
     )
-
-    # Separator between parts (default: "_")
     separator: str = "_"
 
-    # DEPRECATED: Old field names for backward compatibility
     @property
     def role_prefix(self) -> Dict[str, str]:
-        """Deprecated: Use 'source' instead."""
+        """Alias kept for joint-extractor code that reads `role_prefix`."""
         return self.source
 
     @property
     def robot_prefix(self) -> Dict[str, str]:
-        """Deprecated: Use 'arms' instead."""
+        """Alias kept for joint-extractor code that reads `robot_prefix`."""
         return self.arms
 
 
 @dataclass
 class ActionTopicConfig:
-    """
-    Configuration for a single action command topic (quest teleop mode).
+    """Internal/legacy view of an action command topic, keyed by topic name.
 
-    Specifies which arm the topic controls and the explicit joint ordering
-    of the Float64MultiArray.data values.
-
-    Example:
-        ActionTopicConfig(
-            arm="left",
-            joint_order=["joint1", "joint2", ..., "joint7", "finger_joint1"]
-        )
+    Returned by :pyattr:`DataConfig.action_command_topics` so the joint
+    extractor methods can keep reading ``.arm`` / ``.joint_order``.
     """
 
-    # Arm identifier (e.g., "left", "right")
     arm: str = ""
+    joint_order: List[str] = field(default_factory=list)
 
-    # Explicit joint ordering for the Float64MultiArray.data array.
-    # Maps each index position to a joint_id name.
-    # Example: ["joint1", "joint2", ..., "joint7", "finger_joint1"]
-    #   -> data[0] = joint1, data[7] = finger_joint1
-    # These names must match the joint_ids parsed from /joint_states.
+
+@dataclass
+class ActionTopicSpec:
+    """User-facing per-arm action source.
+
+    The new YAML format is ``action_topics: { arm_id: ActionTopicSpec }``. In
+    EE mode this whole map is empty; in joint mode each entry provides the
+    Float64MultiArray command topic and the joint ordering that maps the
+    flat data array to canonical joint slots.
+    """
+
+    topic: str = ""
     joint_order: List[str] = field(default_factory=list)
 
 
 @dataclass
 class FeatureMapping:
-    """
-    Configuration for extracting features from JointState.
+    """Selects which JointState fields to extract for a given role.
 
-    Allows different feature configurations for observation vs action.
+    New unified configs set ``others: []`` for both observation and action;
+    velocity/effort are dropped going forward.
     """
 
-    # Primary field for state/action (typically "position")
     state: str = "position"
-
-    # Additional fields to extract (e.g., ["velocity", "effort"])
     others: List[str] = field(default_factory=list)
 
 
 @dataclass
 class DataConfig:
+    """Unified converter config.
+
+    ``data_space`` is the only switch between joint and EE conversion paths.
+    Arm scope is determined entirely by the keys of ``observation_topics`` —
+    there is no separate ``arms`` block. Insertion order of
+    ``observation_topics`` defines the per-arm concatenation order in the
+    output ``observation.state`` / ``action`` features.
     """
-    Manage parameters that can be dynamically adjusted during data conversion,
-    such as topics, motor features, time alignment delays, etc.
 
-    If recorder/robot settings change later, only need to adjust this config,
-    without major changes to conversion program.
-    """
+    data_space: str = "joint"
+    observation_topics: Dict[str, str] = field(default_factory=dict)
+    action_topics: Dict[str, ActionTopicSpec] = field(default_factory=dict)
 
-    # Single topic for all joint states (new architecture)
-    # All joints are in one JointState message, differentiated by joint names
-    robot_state_topic: str = "/joint_states"
-
-    # Joint name parsing configuration
     joint_name_pattern: JointNamePattern = field(default_factory=JointNamePattern)
 
-    # ====== Quest Teleop Mode ======
-    # When set, actions are read from separate command topics instead of
-    # from leader joints in the robot_state_topic.
-    #
-    # Maps ROS2 command topic -> ActionTopicConfig with arm identifier
-    # and explicit joint ordering for the Float64MultiArray.data array.
-    #
-    # Example:
-    #   {"/follower_l_forward_position_controller/commands":
-    #       ActionTopicConfig(arm="left",
-    #           joint_order=["joint1", ..., "joint7", "finger_joint1"])}
-    #
-    # If empty (default), leader-follower mode is used: actions come from
-    # leader joints parsed from robot_state_topic via joint_name_pattern.
-    action_topics: Dict[str, "ActionTopicConfig"] = field(default_factory=dict)
-
-    # When True, use observation joint positions as action when action_topics
-    # are configured but the topics are not present in the MCAP file.
-    # Useful for datasets recorded without a separate command topic.
-    action_from_observation: bool = False
-
-    # Number of frames to look ahead when action_from_observation=True.
-    # action[t] = observation[t + n]. Default: 10.
-    action_from_observation_n: int = 10
-
-
-    # Separate feature mappings for observation vs action
-    # This allows different features for input (observation) and output (action)
     observation_feature_mapping: FeatureMapping = field(
         default_factory=lambda: FeatureMapping(state="position", others=[])
     )
-
     action_feature_mapping: FeatureMapping = field(
-        default_factory=lambda: FeatureMapping(
-            state="position",
-            others=[],  # Actions typically only need position
-        )
+        default_factory=lambda: FeatureMapping(state="position", others=[])
     )
 
-    # Camera ROS topics
-    camera_topics: List[str] = field(
-        default_factory=lambda: [
-            "/camera1/image_raw",
-        ]
-    )
+    camera_topics: List[str] = field(default_factory=list)
+    camera_topic_mapping: Dict[str, str] = field(default_factory=dict)
+    image_resolution: List[int] = field(default_factory=lambda: [640, 480])
 
-    # Mapping camera topics to dataset camera names
-    camera_topic_mapping: Dict[str, str] = field(
-        default_factory=lambda: {
-            "/camera1/image_raw": "head",
-        }
-    )
-
-    # Image resolution configuration
-    # Target resolution for resizing images before adding to dataset
-    # Format: [width, height]
-    image_resolution: List[int] = field(
-        default_factory=lambda: [640, 480]  # [width, height]
-    )
-
-    # ========== DEPRECATED FIELDS (for backward compatibility) ==========
-
-    # DEPRECATED: Use robot_state_topic (singular) with joint_name_pattern
+    # Kept defaulted-empty so the legacy DataExtractor batch class doesn't
+    # blow up at import time. Never populated by the new loader.
     robot_state_topics: List[str] = field(default_factory=list)
-
-    # DEPRECATED: Use observation_feature_mapping and action_feature_mapping
     motor_feature_mapping: Dict[str, Any] = field(default_factory=dict)
 
+    # ------------------------------------------------------------------
+    # Derived properties (keep joint-extraction code byte-identical)
+    # ------------------------------------------------------------------
 
-# Default configuration
+    @property
+    def is_ee(self) -> bool:
+        return self.data_space == "ee"
+
+    @property
+    def arms(self) -> List[str]:
+        """Arms in concatenation order, taken from observation_topics insertion order."""
+        return list(self.observation_topics.keys())
+
+    @property
+    def robot_state_topic(self) -> str:
+        """Single distinct value of observation_topics.
+
+        Joint mode always shares ``/joint_states`` across arms, so this
+        collapses to one topic. Raises if multiple distinct values were
+        listed (which would be nonsensical for the joint path). Returns the
+        empty string when observation_topics is empty.
+        """
+        topics = set(self.observation_topics.values())
+        if not topics:
+            return ""
+        if len(topics) > 1:
+            raise ValueError(
+                "observation_topics has multiple distinct values "
+                f"{sorted(topics)}; robot_state_topic is undefined."
+            )
+        return next(iter(topics))
+
+    @property
+    def action_command_topics(self) -> Dict[str, ActionTopicConfig]:
+        """``{topic -> ActionTopicConfig(arm, joint_order)}`` for joint-path code.
+
+        Inverts the new per-arm ``action_topics`` map into the topic-keyed
+        shape the joint extractor methods consume. Empty in EE mode and in
+        the joint "act-from-obs" opt-in (empty ``action_topics``).
+        """
+        out: Dict[str, ActionTopicConfig] = {}
+        for arm_id, spec in self.action_topics.items():
+            if not spec.topic:
+                continue
+            out[spec.topic] = ActionTopicConfig(arm=arm_id, joint_order=list(spec.joint_order))
+        return out
+
+
+# Default configuration (empty maps — convert.py always supplies a real config).
 DEFAULT_DATA_CONFIG = DataConfig()

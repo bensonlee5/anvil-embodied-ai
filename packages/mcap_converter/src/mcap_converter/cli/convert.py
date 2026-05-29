@@ -35,6 +35,7 @@ from mcap_converter import (
     LeRobotWriter,
     McapReader,
 )
+from mcap_converter.config.validators import ConfigurationError, validate_config
 from mcap_converter.core.extractor import BufferedStreamExtractor
 from mcap_converter.core.reader import snap_fps
 
@@ -92,13 +93,9 @@ def collect_mcap_files(input_dir: str) -> List[Path]:
 
 def quick_scan_joint_names(mcap_path: str, config: DataConfig) -> dict:
     """
-    Quick scan to extract joint names from first JointState message.
+    Quick scan to extract joint names from first JointState message (joint mode only).
 
     Only reads the first message, so memory-efficient for large files.
-
-    In leader-follower mode: parses joint names to find observation (follower) joints.
-    In quest teleop mode: all joints in the JointState topic are observations,
-    so we group by arm without filtering by source/role prefix.
 
     Returns:
         Dictionary mapping robot prefix to joint names:
@@ -109,7 +106,10 @@ def quick_scan_joint_names(mcap_path: str, config: DataConfig) -> dict:
     reader = McapReader(mcap_path)
     joint_pattern = config.joint_name_pattern
     sep = joint_pattern.separator
-    quest_mode = bool(config.action_topics)
+    # "Quest mode" historically meant: actions come from separate command topics
+    # rather than `leader_*` joints in /joint_states. Under the unified config
+    # that's true whenever action_command_topics is non-empty.
+    quest_mode = bool(config.action_command_topics)
 
     for message in reader.read_messages(topics=[config.robot_state_topic]):
         ros_msg = message.ros_msg
@@ -197,6 +197,7 @@ def convert_session(
     max_episodes: int = None,
     mcap_files: List[Path] = None,
     debug_plot_episodes: int = 5,
+    cli_act_from_obs: bool = False,
 ):
     """
     Convert MCAP session to LeRobot dataset
@@ -213,6 +214,9 @@ def convert_session(
         buffer_seconds: Buffer window for time alignment in seconds (default: 5.0)
         config_path: Path to the conversion config YAML file (for copying to output)
         vcodec: Video codec for encoding ("h264", "hevc", or "libsvtav1")
+        cli_act_from_obs: Force ``action[t] = observation.state[t]`` even when
+            ``action_topics`` are configured (joint mode only; EE mode is
+            always act-from-obs).
     """
     session_start_time = time.time()
 
@@ -243,28 +247,41 @@ def convert_session(
         quiet=True,
     )
 
-    # Get joint names
-    log(f"Quick scan for joint names: [dim]{mcap_files[0]}[/dim]")
-    joint_names = quick_scan_joint_names(str(mcap_files[0]), config)
-    if not joint_names:
-        raise ValueError("Cannot get joint names from reference MCAP (no observation joints found)")
-
-    # Log detected robot mode
-    robots = [r for r in joint_names.keys() if r]
-    total_joints = sum(len(v) for v in joint_names.values())
-    quest_mode = bool(config.action_topics)
-    teleop_label = "[bold magenta]quest teleop[/bold magenta]" if quest_mode else "[bold cyan]leader-follower[/bold cyan]"
-    if robots:
-        log(f"Detected [bold cyan]bimanual[/bold cyan] robot ({teleop_label}): {robots}")
-        for robot in sorted(robots):
-            log(f"  {robot}: {joint_names[robot]}")
+    # Get joint names (joint mode only; EE mode has fixed per-arm dims)
+    if config.is_ee:
+        joint_names: dict = {}
+        log(
+            f"Detected [bold magenta]EE Cartesian[/bold magenta] mode "
+            f"({len(config.arms)} arm(s)): {config.arms}"
+        )
+        for arm_id, topic in config.observation_topics.items():
+            log(f"  {arm_id}: [dim]{topic}[/dim]")
     else:
-        log(f"Detected [bold cyan]single-arm[/bold cyan] robot ({teleop_label})")
-        log(f"  joints: {joint_names.get('', [])}")
-    log(f"Total joints: [bold]{total_joints}[/bold] (observation + action)")
-    if quest_mode:
-        for topic, topic_cfg in config.action_topics.items():
-            log(f"  Action topic ({topic_cfg.arm}): [dim]{topic}[/dim]")
+        log(f"Quick scan for joint names: [dim]{mcap_files[0]}[/dim]")
+        joint_names = quick_scan_joint_names(str(mcap_files[0]), config)
+        if not joint_names:
+            raise ValueError(
+                "Cannot get joint names from reference MCAP (no observation joints found)"
+            )
+
+        robots = [r for r in joint_names.keys() if r]
+        total_joints = sum(len(v) for v in joint_names.values())
+        quest_mode = bool(config.action_command_topics)
+        teleop_label = (
+            "[bold magenta]quest teleop[/bold magenta]" if quest_mode
+            else "[bold cyan]act-from-obs / leader-follower[/bold cyan]"
+        )
+        if robots:
+            log(f"Detected [bold cyan]bimanual[/bold cyan] robot ({teleop_label}): {robots}")
+            for robot in sorted(robots):
+                log(f"  {robot}: {joint_names[robot]}")
+        else:
+            log(f"Detected [bold cyan]single-arm[/bold cyan] robot ({teleop_label})")
+            log(f"  joints: {joint_names.get('', [])}")
+        log(f"Total joints: [bold]{total_joints}[/bold] (observation + action)")
+        if quest_mode:
+            for topic, topic_cfg in config.action_command_topics.items():
+                log(f"  Action topic ({topic_cfg.arm}): [dim]{topic}[/dim]")
 
     # Get camera names
     camera_names = list(config.camera_topic_mapping.values())
@@ -290,26 +307,34 @@ def convert_session(
         shutil.copy(config_path, conversion_config_dest)
         log(f"Copied conversion config: [dim]{conversion_config_dest}[/dim]")
     else:
-        # Save config from DataConfig object
+        # Save config from DataConfig object (new unified format)
         import yaml
 
-        config_to_save = {
-            "robot_state_topic": config.robot_state_topic,
-            "joint_names": {
+        config_to_save: dict = {
+            "data_space": config.data_space,
+            "observation_topics": dict(config.observation_topics),
+            "action_topics": {
+                arm_id: {"topic": spec.topic, "joint_order": list(spec.joint_order)}
+                for arm_id, spec in config.action_topics.items()
+            },
+            "camera_topics": list(config.camera_topics),
+            "camera_topic_mapping": dict(config.camera_topic_mapping),
+            "image_resolution": list(config.image_resolution),
+        }
+        # joint_names is joint-mode-only; omit from EE configs to avoid confusion
+        if not config.is_ee:
+            config_to_save["joint_names"] = {
                 "separator": config.joint_name_pattern.separator,
                 "source": config.joint_name_pattern.source,
                 "arms": config.joint_name_pattern.arms,
-            },
-            "camera_topic_mapping": config.camera_topic_mapping,
-        }
-        if config.action_topics:
-            config_to_save["action_topics"] = config.action_topics
+            }
 
         with open(conversion_config_dest, "w") as f:
             yaml.dump(
                 config_to_save,
                 f,
                 default_flow_style=False,
+                sort_keys=False,
             )
         log(f"Saved conversion config: [dim]{conversion_config_dest}[/dim]")
 
@@ -367,6 +392,7 @@ def convert_session(
                 fps=fps,
                 quiet=True,
                 progress_callback=on_frame_progress,
+                cli_act_from_obs=cli_act_from_obs,
             )
 
             corrupt_frame_error: Exception | None = None
@@ -460,14 +486,17 @@ def convert_session(
         with suppress_fd_output():
             writer.finalize(dataset)
 
-    # Debug plots: always generated after a successful conversion
-    if total_frames > 0:
+    # Debug plots: joint mode only. The current plot reads observation.state /
+    # action assuming joint positions; EE plots are out of scope for Task 1.
+    if total_frames > 0 and not config.is_ee:
         from mcap_converter.utils.debug_plot import plot_conversion_debug
         with console.status("[bold]Generating debug plots..."):
+            # action_from_observation_n is read from conversion_config.yaml if
+            # present; new configs no longer set it (act-from-obs implies n=0).
             plot_conversion_debug(
                 output_dir,
                 n_episodes=debug_plot_episodes,
-                action_from_observation_n=config.action_from_observation_n,
+                action_from_observation_n=0 if cli_act_from_obs else None,
             )
         log(f"Debug plots saved to [dim]{output_dir}/debug_plots/[/dim]")
 
@@ -530,13 +559,24 @@ def main(args=None):
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 examples:
-  mcap-convert -i data/raw/my-session -o data/datasets --config configs/mcap_converter/openarm_bimanual.yaml
+  # EE Cartesian bimanual (recommended for EE-space diffusion policy)
+  mcap-convert -i data/raw/my-session -o data/datasets --config configs/mcap_converter/openarm_ee_bimanual.yaml
   # output goes to data/datasets/my-session/
 
-  mcap-convert -i data/raw/my-session -o data/datasets --vcodec libsvtav1
-  mcap-convert -i data/raw/my-session -o data/datasets --fps 15 --push-to-hub
-  mcap-convert -i data/raw/my-session -o data/datasets --max-episodes 5
-  mcap-convert -i data/raw/my-session -o data/datasets --resume
+  # EE Cartesian left arm only
+  mcap-convert -i data/raw/my-session -o data/datasets --config configs/mcap_converter/openarm_ee_left.yaml
+
+  # Joint space bimanual (Quest teleop, action from command topics)
+  mcap-convert -i data/raw/my-session -o data/datasets --config configs/mcap_converter/openarm_joint_bimanual.yaml
+
+  # Joint space with action[t] = obs[t] (future window via delta_timestamps at train time)
+  mcap-convert -i data/raw/my-session -o data/datasets --config configs/mcap_converter/openarm_joint_bimanual.yaml --act-from-obs
+
+  # Common options
+  mcap-convert -i data/raw/my-session -o data/datasets --config ... --vcodec libsvtav1
+  mcap-convert -i data/raw/my-session -o data/datasets --config ... --fps 15 --push-to-hub
+  mcap-convert -i data/raw/my-session -o data/datasets --config ... --max-episodes 5
+  mcap-convert -i data/raw/my-session -o data/datasets --config ... --resume
 """,
     )
     parser.add_argument(
@@ -599,9 +639,12 @@ examples:
         help="only convert the first N episodes (default: convert all)",
     )
     parser.add_argument(
-        "--act-from-obs-n-step", type=int, default=None,
-        metavar="N",
-        help="override action_from_observation_n in config: action[t] = observation[t+N] (default: use config value, factory default 10)",
+        "--act-from-obs", action="store_true",
+        help=(
+            "force action[t] = observation.state[t] even when action_topics are "
+            "configured (joint mode only; EE mode is always act-from-obs). The "
+            "future window is applied by LeRobot delta_timestamps at train time."
+        ),
     )
     parser.add_argument(
         "--debug-plot-episodes", type=int, default=5,
@@ -637,9 +680,13 @@ examples:
         config = ConfigLoader.get_default()
         log("Using default configuration")
 
-    if args.act_from_obs_n_step is not None:
-        config.action_from_observation_n = args.act_from_obs_n_step
-        log(f"action_from_observation_n overridden to [bold]{args.act_from_obs_n_step}[/bold] via --act-from-obs-n-step")
+    # Validate config eagerly — better error messages than cryptic extraction failures
+    try:
+        validate_config(config)
+    except ConfigurationError as exc:
+        console.print(f"\n[bold red]Configuration error:[/bold red] {exc}\n")
+        exit(1)
+
 
     # Collect MCAP files once (reused for fps detection and conversion)
     all_mcap_files = collect_mcap_files(args.input_dir)
@@ -696,11 +743,13 @@ examples:
     banner.add_row("Video codec", args.vcodec)
     banner.add_row("Resume", "yes" if args.resume else "no")
     banner.add_row("Max episodes", str(args.max_episodes) if args.max_episodes else "all")
-    if config.action_from_observation:
-        n_label = str(config.action_from_observation_n)
-        if args.act_from_obs_n_step is not None:
-            n_label += " [yellow](CLI override)[/yellow]"
-        banner.add_row("act-from-obs n", n_label)
+    banner.add_row("Data space", config.data_space)
+    if args.act_from_obs and config.action_command_topics:
+        banner.add_row("Action source", "act-from-obs (CLI override)")
+    elif config.is_ee or not config.action_command_topics:
+        banner.add_row("Action source", "act-from-obs (empty action_topics)")
+    else:
+        banner.add_row("Action source", "command topics")
     banner.add_row("Debug plots", f"first {args.debug_plot_episodes} episodes")
 
     console.print(Panel(
@@ -744,6 +793,7 @@ examples:
             max_episodes=args.max_episodes,
             mcap_files=all_mcap_files,
             debug_plot_episodes=args.debug_plot_episodes,
+            cli_act_from_obs=args.act_from_obs,
         )
 
         # Upload to Hub if requested

@@ -100,26 +100,55 @@ Convert MCAP recordings into LeRobot v3.0 datasets.
 
 Pick the config that matches your recording setup:
 
-| Config | Teleop mode | Arms | Action source |
-|--------|-------------|------|---------------|
-| `openarm_bimanual.yaml` | Leader-follower | Bimanual | Leader joint positions |
-| `openarm_bimanual_quest.yaml` | Quest VR | Bimanual | Command topics |
-| `openarm_single_quest.yaml` | Quest VR | Single (right) | Command topics |
-| `openarm_single_quest_afo.yaml` | Quest VR | Single (right) | Observation lookahead |
+| Config | Data space | Teleop mode | Arms | `observation.state` | `action` |
+|--------|-----------|-------------|------|---------------------|---------|
+| `openarm_ee_bimanual.yaml` | **EE Cartesian** | Quest VR | Bimanual | `(16,)` xyz+quat+gripper × 2 | `(20,)` xyz+rot6d+gripper × 2 |
+| `openarm_ee_left.yaml` | **EE Cartesian** | Quest VR | Left only | `(8,)` xyz+quat+gripper | `(10,)` xyz+rot6d+gripper |
+| `openarm_joint_bimanual.yaml` | Joint | Quest VR | Bimanual | `(16,)` joint positions | `(16,)` from command topics |
+| `openarm_bimanual.yaml` | Joint | Leader-follower | Bimanual | `(16,)` joint positions | `(16,)` leader joints |
+| `openarm_bimanual_quest.yaml` | Joint | Quest VR | Bimanual | `(16,)` joint positions | `(16,)` from command topics |
+| `openarm_single_quest.yaml` | Joint | Quest VR | Single (right) | `(8,)` joint positions | `(8,)` from command topic |
+| `openarm_single_quest_afo.yaml` | Joint | Quest VR | Single (right) | `(8,)` joint positions | `(8,)` = obs[t] (future window at train time) |
 
 ```bash
+# EE Cartesian bimanual (recommended for EE-space diffusion policy)
 uv run mcap-convert \
   --input-dir data/raw/my-sessions \
-  --config configs/mcap_converter/target-config.yaml
+  --config configs/mcap_converter/openarm_ee_bimanual.yaml
+
+# Joint space (existing behavior)
+uv run mcap-convert \
+  --input-dir data/raw/my-sessions \
+  --config configs/mcap_converter/openarm_joint_bimanual.yaml
 ```
 
 Output is always saved to `<output-dir>/<input-dir-name>/` (default: `data/datasets/my-sessions/`).
 
-**`action_from_observation`** — use when `/follower_*/commands` was not recorded. Shifts observation forward by N frames:
+### EE Cartesian mode
+
+EE configs read from `/ee_pose_left` / `/ee_pose_right` (`anvil_msgs/msg/CommandedEEPose`):
 
 ```
-action[t] = observation.state[t + N]   (default N=10, ≈333ms at 30fps)
+observation.state per arm (8 dims): [x, y, z, qx, qy, qz, qw, gripper]
+action         per arm (10 dims): [x, y, z, r0, r1, r2, r3, r4, r5, gripper]
 ```
+
+The action uses 6D rotation representation (Zhou et al. 2019) for regression stability.
+`action[t] = observation.state[t]` in the converter — the future prediction window
+(`action[t] = ee_pose[t+k]`) is handled by LeRobot's `delta_timestamps` at train time.
+
+### `--act-from-obs` flag
+
+Force `action[t] = observation.state[t]` even when `action_topics` are configured in joint mode:
+
+```bash
+uv run mcap-convert \
+  --input-dir data/raw/my-sessions \
+  --config configs/mcap_converter/openarm_joint_bimanual.yaml \
+  --act-from-obs
+```
+
+The future window is applied by `delta_timestamps` at train time. EE mode is always act-from-obs.
 
 **Common flags:**
 
@@ -130,6 +159,7 @@ action[t] = observation.state[t + N]   (default N=10, ≈333ms at 30fps)
 | `--fps N` | Override output FPS (auto-detected by default) |
 | `--vcodec` | `h264` (default) · `hevc` · `libsvtav1` |
 | `--robot-type` | `anvil_openarm` (default) · `anvil_yam` |
+| `--act-from-obs` | Force `action[t] = obs[t]` regardless of configured action topics |
 
 Then validate:
 

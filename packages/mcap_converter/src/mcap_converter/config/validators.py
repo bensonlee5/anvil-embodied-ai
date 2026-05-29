@@ -1,223 +1,137 @@
-"""Configuration validation for mcap_converter package."""
+"""Configuration validation for the unified mcap_converter config."""
 
-import warnings
-from typing import Dict, List
+from typing import List
 
-from .schema import ActionTopicConfig, DataConfig, FeatureMapping, JointNamePattern
+from .schema import DataConfig, FeatureMapping, JointNamePattern
 
 
 class ConfigurationError(Exception):
     """Raised when configuration is invalid."""
 
-    pass
 
-
-def validate_joint_name_pattern(
-    pattern: JointNamePattern, quest_mode: bool = False
-) -> List[str]:
-    """
-    Validate joint name pattern configuration.
-
-    Args:
-        pattern: JointNamePattern instance to validate
-        quest_mode: If True, 'action' role mapping is not required
-                    (actions come from separate command topics)
-
-    Returns:
-        List of error messages (empty if valid)
-    """
-    errors = []
-
-    # Must have at least one role mapping
-    if not pattern.role_prefix:
-        errors.append("joint_name_pattern.role_prefix cannot be empty")
+def validate_joint_name_pattern(pattern: JointNamePattern) -> List[str]:
+    """Joint mode: source/arms/separator must be coherent."""
+    errors: List[str] = []
+    if not pattern.source:
+        errors.append("joint_names.source cannot be empty")
     else:
-        # Validate role values
-        valid_roles = {"observation", "action"}
-        for prefix, role in pattern.role_prefix.items():
-            if role not in valid_roles:
+        for prefix, role in pattern.source.items():
+            if role not in ("observation", "action"):
                 errors.append(
-                    f"joint_name_pattern: Invalid role '{role}' for prefix '{prefix}'. "
-                    f"Must be 'observation' or 'action'"
+                    f"joint_names.source: prefix {prefix!r} maps to {role!r}; "
+                    "must be 'observation' or 'action'"
                 )
-
-        # Should have observation role
-        roles = set(pattern.role_prefix.values())
-        if "observation" not in roles:
-            errors.append("joint_name_pattern.role_prefix must include an 'observation' mapping")
-        # Action role only required in leader-follower mode
-        if not quest_mode and "action" not in roles:
-            errors.append(
-                "joint_name_pattern.role_prefix must include an 'action' mapping "
-                "(or set action_topics for quest teleop mode)"
-            )
-
-    # Separator should not be empty
+        if "observation" not in set(pattern.source.values()):
+            errors.append("joint_names.source must include an 'observation' mapping")
     if not pattern.separator:
-        errors.append("joint_name_pattern.separator cannot be empty")
-
-    return errors
-
-
-def validate_action_topics(action_topics: Dict[str, "ActionTopicConfig"]) -> List[str]:
-    """
-    Validate action_topics configuration for quest teleop mode.
-
-    Args:
-        action_topics: Dict mapping ROS2 command topics to ActionTopicConfig
-
-    Returns:
-        List of error messages (empty if valid)
-    """
-    errors = []
-
-    for topic, topic_cfg in action_topics.items():
-        if not topic:
-            errors.append("action_topics: topic name cannot be empty")
-        if not topic_cfg.arm:
-            errors.append(f"action_topics: arm identifier for '{topic}' cannot be empty")
-        if not topic_cfg.joint_order:
-            errors.append(
-                f"action_topics: joint_order for '{topic}' cannot be empty. "
-                "Specify the ordered list of joint names matching the "
-                "Float64MultiArray.data indices."
-            )
-
+        errors.append("joint_names.separator cannot be empty")
     return errors
 
 
 def validate_feature_mapping(mapping: FeatureMapping, name: str) -> List[str]:
-    """
-    Validate feature mapping configuration.
-
-    Args:
-        mapping: FeatureMapping instance to validate
-        name: Name of the mapping for error messages
-
-    Returns:
-        List of error messages (empty if valid)
-    """
-    errors = []
+    errors: List[str] = []
     valid_fields = {"position", "velocity", "effort"}
-
-    # State field must be valid
     if not mapping.state:
         errors.append(f"{name}.state cannot be empty")
     elif mapping.state not in valid_fields:
-        errors.append(f"{name}.state '{mapping.state}' is not a valid JointState field")
-
-    # Others must be valid fields
-    for field in mapping.others:
-        if field not in valid_fields:
-            errors.append(f"{name}.others contains invalid field '{field}'")
-
+        errors.append(f"{name}.state {mapping.state!r} is not a valid JointState field")
+    for f in mapping.others:
+        if f not in valid_fields:
+            errors.append(f"{name}.others contains invalid field {f!r}")
     return errors
 
 
 def validate_config(config: DataConfig) -> None:
-    """
-    Validate configuration completeness and correctness.
-
-    Args:
-        config: DataConfig instance to validate
-
-    Raises:
-        ConfigurationError: If configuration is invalid
-    """
+    """Raises :class:`ConfigurationError` when the unified config is malformed."""
     errors: List[str] = []
 
-    # Check for deprecated fields and warn
-    if config.robot_state_topics:
-        warnings.warn(
-            "robot_state_topics is deprecated. Use robot_state_topic (singular) "
-            "with joint_name_pattern for role detection.",
-            DeprecationWarning,
-            stacklevel=2,
+    # data_space
+    if config.data_space not in ("joint", "ee"):
+        errors.append(f"data_space must be 'joint' or 'ee'; got {config.data_space!r}")
+
+    # observation_topics — required, defines arm scope
+    if not config.observation_topics:
+        errors.append(
+            "observation_topics cannot be empty; list one topic per arm "
+            "(e.g. { left: /joint_states, right: /joint_states })."
         )
 
-    if config.motor_feature_mapping:
-        warnings.warn(
-            "motor_feature_mapping is deprecated. Use observation_feature_mapping "
-            "and action_feature_mapping instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+    if config.data_space == "joint":
+        # All arms must share a single /joint_states topic — robot_state_topic property
+        # collapses to it. Reading the property validates uniqueness.
+        try:
+            _ = config.robot_state_topic
+        except ValueError as exc:
+            errors.append(str(exc))
 
-    # Validate robot_state_topic (new single topic)
-    if not config.robot_state_topic:
-        errors.append("robot_state_topic cannot be empty")
+        errors.extend(validate_joint_name_pattern(config.joint_name_pattern))
 
-    # Determine teleop mode
-    quest_mode = bool(config.action_topics)
+        for arm_id, spec in config.action_topics.items():
+            if not spec.topic:
+                errors.append(f"action_topics[{arm_id!r}].topic cannot be empty")
+            if not spec.joint_order:
+                errors.append(
+                    f"action_topics[{arm_id!r}].joint_order cannot be empty in joint mode; "
+                    "specify the ordered joint list matching Float64MultiArray.data."
+                )
+            if arm_id not in config.observation_topics:
+                errors.append(
+                    f"action_topics[{arm_id!r}] references an arm not present in observation_topics"
+                )
 
-    # Validate joint_name_pattern (relaxed for quest mode)
-    errors.extend(
-        validate_joint_name_pattern(config.joint_name_pattern, quest_mode=quest_mode)
-    )
+    if config.data_space == "ee":
+        if config.action_topics:
+            errors.append(
+                "action_topics must be empty in ee mode; the EE action is derived "
+                "from the same /ee_pose_<arm> topics listed in observation_topics."
+            )
 
-    # Validate action_topics if set (quest teleop mode)
-    if quest_mode:
-        errors.extend(validate_action_topics(config.action_topics))
+    # observation_feature_mapping
+    errors.extend(validate_feature_mapping(
+        config.observation_feature_mapping, "observation_feature_mapping"
+    ))
+    errors.extend(validate_feature_mapping(
+        config.action_feature_mapping, "action_feature_mapping"
+    ))
 
-    # Validate feature mappings
-    errors.extend(
-        validate_feature_mapping(config.observation_feature_mapping, "observation_feature_mapping")
-    )
-    errors.extend(validate_feature_mapping(config.action_feature_mapping, "action_feature_mapping"))
-
-    # Validate camera_topics
+    # cameras
     if not config.camera_topics:
         errors.append("camera_topics cannot be empty")
-
-    # Validate camera_topic_mapping
     if not config.camera_topic_mapping:
         errors.append("camera_topic_mapping cannot be empty")
     else:
-        # Check all camera topics have mappings
-        for topic in config.camera_topics:
-            if topic not in config.camera_topic_mapping:
-                errors.append(f"camera topic '{topic}' missing from camera_topic_mapping")
+        for t in config.camera_topics:
+            if t not in config.camera_topic_mapping:
+                errors.append(f"camera topic {t!r} missing from camera_topic_mapping")
 
-    # Validate image_resolution
+    # image_resolution
     if not config.image_resolution or len(config.image_resolution) != 2:
         errors.append("image_resolution must be [width, height]")
     elif any(dim <= 0 for dim in config.image_resolution):
         errors.append("image_resolution dimensions must be positive")
 
     if errors:
-        raise ConfigurationError("Configuration validation failed:\n  - " + "\n  - ".join(errors))
+        raise ConfigurationError(
+            "Configuration validation failed:\n  - " + "\n  - ".join(errors)
+        )
 
 
 def validate_topics_exist(config: DataConfig, available_topics: List[str]) -> None:
-    """
-    Validate that configured topics exist in the MCAP file.
+    """Cross-check that observation/action/camera topics are present in the MCAP."""
+    missing: List[str] = []
+    seen_obs = set()
 
-    Args:
-        config: DataConfig instance
-        available_topics: List of topics available in the MCAP file
+    for arm_id, topic in config.observation_topics.items():
+        if topic in seen_obs:
+            continue  # Shared /joint_states across arms — only check once
+        seen_obs.add(topic)
+        if topic not in available_topics:
+            missing.append(f"observation_topics[{arm_id!r}]: {topic}")
 
-    Raises:
-        ConfigurationError: If required topics are not available
-    """
-    missing = []
+    for arm_id, spec in config.action_topics.items():
+        if spec.topic and spec.topic not in available_topics:
+            missing.append(f"action_topics[{arm_id!r}].topic: {spec.topic}")
 
-    # Check single robot_state_topic (new architecture)
-    if config.robot_state_topic and config.robot_state_topic not in available_topics:
-        missing.append(f"robot_state_topic: {config.robot_state_topic}")
-
-    # Legacy support: check robot_state_topics if used
-    if config.robot_state_topics:
-        for topic in config.robot_state_topics:
-            if topic not in available_topics:
-                missing.append(f"robot_state_topic: {topic}")
-
-    # Check action topics (quest teleop mode)
-    if config.action_topics:
-        for topic in config.action_topics:
-            if topic not in available_topics:
-                missing.append(f"action_topic: {topic}")
-
-    # Check camera topics
     for topic in config.camera_topics:
         if topic not in available_topics:
             missing.append(f"camera_topic: {topic}")

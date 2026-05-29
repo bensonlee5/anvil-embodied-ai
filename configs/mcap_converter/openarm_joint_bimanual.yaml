@@ -1,0 +1,61 @@
+# =============================================================================
+# OpenArm MCAP to LeRobot — JOINT space, BIMANUAL (Quest teleop)
+# =============================================================================
+#
+# Refactor of openarm_bimanual_quest.yaml into the unified config format.
+# Output is UNCHANGED from the legacy quest config:
+#   observation.state  float32 (16,)  = [left_joints..., right_joints...]
+#   action             float32 (16,)  = [left_joints..., right_joints...]   (from command topics)
+#   observation.images.{chest,waist,wrist_l,wrist_r}
+#
+# Velocity and effort are no longer emitted (observation_feature_mapping.others
+# is empty). Existing datasets converted with the legacy config are unaffected.
+# =============================================================================
+
+data_space: "joint"
+
+observation_topics:
+  left:  "/joint_states"
+  right: "/joint_states"
+
+# Action source = separate per-arm command topics (Quest teleop pattern).
+# joint_order maps the flat Float64MultiArray.data array to canonical joint
+# slots; if omitted or empty, action[t] = observation.state[t] (act-from-obs).
+action_topics:
+  left:
+    topic: "/follower_l_forward_position_controller/commands"
+    joint_order: ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "finger_joint1"]
+  right:
+    topic: "/follower_r_forward_position_controller/commands"
+    joint_order: ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "finger_joint1"]
+
+# How to split a shared /joint_states topic into per-arm joints.
+joint_names:
+  separator: "_"
+  source:
+    follower: observation
+  arms:
+    r: right
+    l: left
+
+observation_feature_mapping:
+  state: "position"
+  others: []
+
+action_feature_mapping:
+  state: "position"
+  others: []
+
+camera_topics:
+  - "/cam_waist/image_raw/compressed"
+  - "/cam_wrist_r/image_raw/compressed"
+  - "/cam_chest/image_raw/compressed"
+  - "/cam_wrist_l/image_raw/compressed"
+
+camera_topic_mapping:
+  "/cam_waist/image_raw/compressed":  "waist"
+  "/cam_wrist_r/image_raw/compressed": "wrist_r"
+  "/cam_chest/image_raw/compressed":  "chest"
+  "/cam_wrist_l/image_raw/compressed": "wrist_l"
+
+image_resolution: [640, 480]

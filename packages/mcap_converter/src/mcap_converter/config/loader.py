@@ -1,277 +1,184 @@
-"""Configuration loader for YAML files"""
+"""Configuration loader for the unified YAML format.
 
-import warnings
+Schema (joint and EE share the same top-level keys; ``data_space`` switches
+encoding only)::
+
+    data_space: "joint" | "ee"
+    observation_topics:
+      <arm_id>: <topic>
+      ...
+    action_topics:
+      <arm_id>:
+        topic: <topic>
+        joint_order: [...]
+      ...                              # empty in EE mode
+    joint_names:                       # joint mode only
+      separator: "_"
+      source:  { follower: observation }
+      arms:    { l: left, r: right }
+    observation_feature_mapping:       # new configs use others: []
+      state: position
+      others: []
+    camera_topics: [...]
+    camera_topic_mapping: { <topic>: <name>, ... }
+    image_resolution: [W, H]
+
+Legacy formats (singular ``robot_state_topic`` field, topic-keyed
+``action_topics``, ``robot_state_topics`` plural, ``motor_feature_mapping``,
+``action_from_observation*``) are no longer accepted.
+"""
+
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import yaml
 
-from .schema import ActionTopicConfig, DataConfig, FeatureMapping, JointNamePattern
+from .schema import (
+    ActionTopicSpec,
+    DataConfig,
+    FeatureMapping,
+    JointNamePattern,
+)
 
 
 class ConfigLoader:
-    """Load and validate configuration from YAML files"""
+    """Load configuration from YAML / dict into a :class:`DataConfig`."""
+
+    # ------------------------------------------------------------------
+    # YAML I/O
+    # ------------------------------------------------------------------
 
     @staticmethod
     def load_yaml(config_path: str) -> Dict[str, Any]:
-        """Load YAML configuration file
-
-        Args:
-            config_path: Path to YAML config file
-
-        Returns:
-            Dictionary with configuration values
-
-        Raises:
-            FileNotFoundError: If config file doesn't exist
-            yaml.YAMLError: If YAML parsing fails
-        """
         config_file = Path(config_path)
-
         if not config_file.exists():
             raise FileNotFoundError(f"Config file not found: {config_path}")
-
         with open(config_file, "r") as f:
-            config_dict = yaml.safe_load(f)
+            return yaml.safe_load(f) or {}
 
-        return config_dict or {}
+    @staticmethod
+    def from_yaml(config_path: str) -> DataConfig:
+        return ConfigLoader.from_dict(ConfigLoader.load_yaml(config_path))
+
+    @staticmethod
+    def get_default() -> DataConfig:
+        return DataConfig()
+
+    # ------------------------------------------------------------------
+    # New unified format parsing
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _parse_joint_name_pattern(pattern_dict: Optional[Dict]) -> JointNamePattern:
-        """Parse joint_name_pattern / joint_names from dictionary.
-
-        Supports both new field names (source, arms) and legacy names (role_prefix, robot_prefix).
-
-        Args:
-            pattern_dict: Dictionary with pattern configuration
-
-        Returns:
-            JointNamePattern instance
-        """
         if not pattern_dict:
             return JointNamePattern()
-
         defaults = JointNamePattern()
-
-        # Support both new and legacy field names
-        # New: source, arms
-        # Legacy: role_prefix, robot_prefix
-        source = pattern_dict.get("source") or pattern_dict.get("role_prefix", defaults.source)
-        arms = pattern_dict.get("arms") or pattern_dict.get("robot_prefix", defaults.arms)
-        separator = pattern_dict.get("separator", defaults.separator)
-
         return JointNamePattern(
-            source=source,
-            arms=arms,
-            separator=separator,
+            source=pattern_dict.get("source", defaults.source),
+            arms=pattern_dict.get("arms", defaults.arms),
+            separator=pattern_dict.get("separator", defaults.separator),
         )
 
     @staticmethod
-    def _parse_action_topics(topics_dict: Optional[Dict]) -> Dict[str, ActionTopicConfig]:
-        """Parse action_topics from dictionary.
-
-        Supports both new format (nested dict with arm/joint_order) and
-        legacy format (plain string arm identifier).
-
-        Args:
-            topics_dict: Dictionary mapping topic names to config
-
-        Returns:
-            Dictionary mapping topic names to ActionTopicConfig instances
-        """
-        if not topics_dict:
+    def _parse_observation_topics(value: Any) -> Dict[str, str]:
+        if not value:
             return {}
-
-        result = {}
-        for topic, value in topics_dict.items():
-            if isinstance(value, str):
-                # Legacy format: {topic: "arm_id"}
-                warnings.warn(
-                    f"action_topics: plain string format for '{topic}' is deprecated. "
-                    "Use nested format with 'arm' and 'joint_order' keys instead.",
-                    DeprecationWarning,
-                    stacklevel=4,
-                )
-                result[topic] = ActionTopicConfig(arm=value, joint_order=[])
-            elif isinstance(value, dict):
-                # New format: {topic: {arm: "...", joint_order: [...]}}
-                result[topic] = ActionTopicConfig(
-                    arm=value.get("arm", ""),
-                    joint_order=value.get("joint_order", []),
-                )
-            else:
+        if not isinstance(value, dict):
+            raise ValueError(
+                "observation_topics must be a mapping of arm_id -> topic, "
+                f"got {type(value).__name__}"
+            )
+        out: Dict[str, str] = {}
+        for arm_id, topic in value.items():
+            if not isinstance(topic, str) or not topic:
                 raise ValueError(
-                    f"action_topics: invalid value type for '{topic}': {type(value)}"
+                    f"observation_topics[{arm_id!r}] must be a non-empty topic string"
                 )
-        return result
+            out[str(arm_id)] = topic
+        return out
+
+    @staticmethod
+    def _parse_action_topics(value: Any) -> Dict[str, ActionTopicSpec]:
+        """Parse ``action_topics: { arm_id: { topic, joint_order } }``.
+
+        Empty / missing → ``{}`` (EE mode, or joint "act-from-obs" opt-in).
+        """
+        if not value:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError(
+                "action_topics must be a mapping of arm_id -> { topic, joint_order }, "
+                f"got {type(value).__name__}"
+            )
+        out: Dict[str, ActionTopicSpec] = {}
+        for arm_id, spec in value.items():
+            if not isinstance(spec, dict):
+                raise ValueError(
+                    f"action_topics[{arm_id!r}] must be a mapping with keys "
+                    f"'topic' and 'joint_order'; got {type(spec).__name__}"
+                )
+            topic = spec.get("topic", "")
+            if not topic or not isinstance(topic, str):
+                raise ValueError(
+                    f"action_topics[{arm_id!r}].topic must be a non-empty string"
+                )
+            joint_order = list(spec.get("joint_order") or [])
+            out[str(arm_id)] = ActionTopicSpec(topic=topic, joint_order=joint_order)
+        return out
 
     @staticmethod
     def _parse_feature_mapping(
         mapping_dict: Optional[Dict], default: FeatureMapping
     ) -> FeatureMapping:
-        """Parse feature_mapping from dictionary.
-
-        Args:
-            mapping_dict: Dictionary with feature mapping configuration
-            default: Default FeatureMapping to use for missing values
-
-        Returns:
-            FeatureMapping instance
-        """
         if not mapping_dict:
             return default
-
         return FeatureMapping(
             state=mapping_dict.get("state", default.state),
-            others=mapping_dict.get("others", default.others),
+            others=list(mapping_dict.get("others", default.others)),
         )
-
-    @staticmethod
-    def _migrate_legacy_config(config_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Migrate legacy configuration format to new format.
-
-        Args:
-            config_dict: Original configuration dictionary
-
-        Returns:
-            Migrated configuration dictionary
-        """
-        # Migrate robot_state_topics to robot_state_topic
-        if "robot_state_topics" in config_dict and "robot_state_topic" not in config_dict:
-            topics = config_dict["robot_state_topics"]
-            if topics:
-                # Use first topic as the single topic
-                config_dict["robot_state_topic"] = topics[0]
-                warnings.warn(
-                    "robot_state_topics is deprecated. Use robot_state_topic (singular) "
-                    "with joint_name_pattern for role detection. "
-                    f"Using first topic: {topics[0]}",
-                    DeprecationWarning,
-                    stacklevel=4,
-                )
-
-        # Migrate motor_feature_mapping to observation/action feature mappings
-        if "motor_feature_mapping" in config_dict:
-            old_mapping = config_dict["motor_feature_mapping"]
-            if old_mapping and "observation_feature_mapping" not in config_dict:
-                config_dict["observation_feature_mapping"] = {
-                    "state": old_mapping.get("state", "position"),
-                    "others": old_mapping.get("others", []),
-                }
-            if old_mapping and "action_feature_mapping" not in config_dict:
-                config_dict["action_feature_mapping"] = {
-                    "state": old_mapping.get("state", "position"),
-                    "others": [],  # Actions typically don't need extras
-                }
-            warnings.warn(
-                "motor_feature_mapping is deprecated. Use observation_feature_mapping "
-                "and action_feature_mapping instead.",
-                DeprecationWarning,
-                stacklevel=4,
-            )
-
-        return config_dict
-
-    @staticmethod
-    def from_yaml(config_path: str) -> DataConfig:
-        """Create DataConfig from YAML file
-
-        Args:
-            config_path: Path to YAML config file
-
-        Returns:
-            DataConfig instance with values from YAML
-
-        Example YAML structure (new format):
-            robot_state_topic: "/joint_states"
-            joint_name_pattern:
-              role_prefix:
-                leader: "action"
-                follower: "observation"
-              robot_prefix:
-                r: "right"
-                l: "left"
-              separator: "_"
-            observation_feature_mapping:
-              state: "position"
-              others: ["velocity", "effort"]
-            action_feature_mapping:
-              state: "position"
-              others: []
-            camera_topics:
-              - "/camera1/image_raw"
-            camera_topic_mapping:
-              "/camera1/image_raw": "head"
-        """
-        config_dict = ConfigLoader.load_yaml(config_path)
-
-        # Apply legacy migration
-        config_dict = ConfigLoader._migrate_legacy_config(config_dict)
-
-        return ConfigLoader.from_dict(config_dict)
 
     @staticmethod
     def from_dict(config_dict: Dict[str, Any]) -> DataConfig:
-        """Create DataConfig from dictionary
-
-        Args:
-            config_dict: Configuration dictionary
-
-        Returns:
-            DataConfig instance
-        """
-        # Apply legacy migration
-        config_dict = ConfigLoader._migrate_legacy_config(config_dict)
-
-        # Get defaults
         defaults = DataConfig()
 
-        # Parse nested configuration objects
-        # Support both 'joint_names' (new) and 'joint_name_pattern' (legacy)
-        joint_names_dict = config_dict.get("joint_names") or config_dict.get("joint_name_pattern")
-        joint_name_pattern = ConfigLoader._parse_joint_name_pattern(joint_names_dict)
+        data_space = str(config_dict.get("data_space", defaults.data_space))
+        if data_space not in ("joint", "ee"):
+            raise ValueError(
+                f"data_space must be 'joint' or 'ee'; got {data_space!r}"
+            )
 
-        observation_feature_mapping = ConfigLoader._parse_feature_mapping(
-            config_dict.get("observation_feature_mapping"), defaults.observation_feature_mapping
+        observation_topics = ConfigLoader._parse_observation_topics(
+            config_dict.get("observation_topics")
+        )
+        action_topics = ConfigLoader._parse_action_topics(
+            config_dict.get("action_topics")
         )
 
+        joint_name_pattern = ConfigLoader._parse_joint_name_pattern(
+            config_dict.get("joint_names") or config_dict.get("joint_name_pattern")
+        )
+
+        observation_feature_mapping = ConfigLoader._parse_feature_mapping(
+            config_dict.get("observation_feature_mapping"),
+            defaults.observation_feature_mapping,
+        )
         action_feature_mapping = ConfigLoader._parse_feature_mapping(
-            config_dict.get("action_feature_mapping"), defaults.action_feature_mapping
+            config_dict.get("action_feature_mapping"),
+            defaults.action_feature_mapping,
         )
 
         return DataConfig(
-            # New fields
-            robot_state_topic=config_dict.get("robot_state_topic", defaults.robot_state_topic),
+            data_space=data_space,
+            observation_topics=observation_topics,
+            action_topics=action_topics,
             joint_name_pattern=joint_name_pattern,
-            action_topics=ConfigLoader._parse_action_topics(
-                config_dict.get("action_topics")
-            ),
-            action_from_observation=config_dict.get(
-                "action_from_observation", defaults.action_from_observation
-            ),
-            action_from_observation_n=config_dict.get(
-                "action_from_observation_n", defaults.action_from_observation_n
-            ),
             observation_feature_mapping=observation_feature_mapping,
             action_feature_mapping=action_feature_mapping,
-            # Camera config
-            camera_topics=config_dict.get("camera_topics", defaults.camera_topics),
-            camera_topic_mapping=config_dict.get(
-                "camera_topic_mapping", defaults.camera_topic_mapping
+            camera_topics=list(config_dict.get("camera_topics") or defaults.camera_topics),
+            camera_topic_mapping=dict(
+                config_dict.get("camera_topic_mapping") or defaults.camera_topic_mapping
             ),
-            image_resolution=config_dict.get("image_resolution", defaults.image_resolution),
-            # Legacy fields (for backward compatibility)
-            robot_state_topics=config_dict.get("robot_state_topics", defaults.robot_state_topics),
-            motor_feature_mapping=config_dict.get(
-                "motor_feature_mapping", defaults.motor_feature_mapping
+            image_resolution=list(
+                config_dict.get("image_resolution") or defaults.image_resolution
             ),
         )
-
-    @staticmethod
-    def get_default() -> DataConfig:
-        """Get default configuration
-
-        Returns:
-            Default DataConfig instance
-        """
-        return DataConfig()

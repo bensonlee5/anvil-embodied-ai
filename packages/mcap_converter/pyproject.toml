@@ -34,7 +34,11 @@ dependencies = [
     "pyyaml~=6.0",
     "huggingface-hub>=1.0.0,<2.0.0",
     "rich>=13.0",
+    "anvil-shared",
 ]
+
+[tool.uv.sources]
+anvil-shared = { workspace = true }
 
 [project.optional-dependencies]
 dev = [

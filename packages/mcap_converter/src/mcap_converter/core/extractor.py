@@ -1,5 +1,6 @@
 """Data extraction from MCAP files"""
 
+import logging
 from collections import deque
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
@@ -9,6 +10,8 @@ from ..config.schema import DEFAULT_DATA_CONFIG, DataConfig, JointNamePattern
 from ..exceptions import DataExtractionError
 from ..utils.image_utils import decode_compressed_image, decode_image
 from .reader import McapReader
+
+log = logging.getLogger(__name__)
 
 # =============================================================================
 # Shared Utilities
@@ -561,6 +564,7 @@ class BufferedStreamExtractor:
         fps: int = 30,
         quiet: bool = False,
         progress_callback: Optional[Callable[[int], None]] = None,
+        cli_act_from_obs: bool = False,
     ):
         """
         Initialize buffered stream extractor.
@@ -571,6 +575,9 @@ class BufferedStreamExtractor:
             fps: Frame rate for buffer size calculation (default: 30)
             quiet: If True, suppress all print output (default: False)
             progress_callback: Called with frames_yielded count after each frame
+            cli_act_from_obs: When True, force ``action[t] = observation.state[t]``
+                regardless of whether ``action_topics`` are configured (joint mode
+                only; EE mode is always effectively act-from-obs).
         """
         self.config = config
         self.fps = fps
@@ -581,12 +588,24 @@ class BufferedStreamExtractor:
         self.target_size = tuple(config.image_resolution)  # (width, height)
         self.quiet = quiet
         self.progress_callback = progress_callback
+        self._cli_act_from_obs = cli_act_from_obs
 
         # Joint name pattern for parsing (reuse from DataExtractor)
         self._joint_pattern = config.joint_name_pattern
 
         # Cache for action topic reorder permutations: {topic: np.ndarray}
         self._action_reorder_cache: Dict[str, np.ndarray] = {}
+
+    @property
+    def act_from_obs(self) -> bool:
+        """Whether ``action[t] = observation.state[t]`` (no command-topic source).
+
+        True when the CLI flag forces it or when action_topics is empty. In EE
+        mode this is structurally true because action_topics is always empty,
+        but the EE align still encodes action with rot6d (not a literal copy
+        of the quaternion-encoded state).
+        """
+        return self._cli_act_from_obs or not bool(self.config.action_command_topics)
 
     @staticmethod
     def _check_action_topics_present(mcap_path: str, action_topic_set: set) -> None:
@@ -665,32 +684,46 @@ class BufferedStreamExtractor:
             cam: deque() for cam in self.config.camera_topic_mapping.values()
         }
 
-        # Joint state buffers: {(role, robot): {'buffer': deque, 'joint_names': list}}
+        # Per-mode signal buffers (only one of these is populated per run).
+        # Joint mode: {(role, robot): {'buffer': deque, 'joint_names': list}}
         joint_buffers: Dict[Tuple[str, str], Dict] = {}
+        # EE mode: {arm_id: deque of (ts, pos_xyz np.ndarray, quat_xyzw np.ndarray, gripper float)}
+        ee_buffers: Dict[str, deque] = {}
+        # Reverse map topic -> [arm_id, ...] for EE dispatch (a topic may serve
+        # multiple arms in pathological configs; the loop fans out the message
+        # to every arm that listed this topic).
+        ee_topic_to_arms: Dict[str, List[str]] = {}
 
-        # Build topic list for reading (cameras + joint states + action commands)
+        # Build topic list for reading (cameras + joint or ee signals)
         all_topics = list(all_camera_topics)
-        all_topics.append(self.config.robot_state_topic)
+        action_topic_set: set = set()
 
-        # Include action command topics if configured (quest teleop mode).
-        # When action_from_observation=True the config explicitly requests
-        # observation-shifted actions — ignore any recorded command topics so
-        # the pipeline is deterministic regardless of what was captured.
-        action_topic_set = set()
-        if self.config.action_topics:
-            if self.config.action_from_observation:
-                n = self.config.action_from_observation_n
-                ms = int(n / self.fps * 1000)
-                topic_lines = "\n".join(f"    {t}" for t in self.config.action_topics)
-                print(
-                    f"\n[ACTION SOURCE] action_from_observation=true — "
-                    f"command topic(s) in config will be IGNORED:\n"
-                    f"{topic_lines}\n"
-                    f"  → action[t] = observation[t + {n}]  "
-                    f"(≈{ms} ms lookahead at {self.fps} fps)\n"
-                )
+        if self.config.is_ee:
+            for arm_id, topic in self.config.observation_topics.items():
+                ee_topic_to_arms.setdefault(topic, []).append(arm_id)
+                ee_buffers[arm_id] = deque()
+            for t in ee_topic_to_arms:
+                if t not in all_topics:
+                    all_topics.append(t)
+        else:
+            # Joint mode: shared /joint_states topic for all arms.
+            rst = self.config.robot_state_topic
+            if rst:
+                all_topics.append(rst)
+            if self.act_from_obs:
+                if not self.quiet:
+                    if self._cli_act_from_obs and self.config.action_command_topics:
+                        print(
+                            "\n[ACTION SOURCE] --act-from-obs override: "
+                            "action[t] = observation.state[t]; command topics ignored.\n"
+                        )
+                    else:
+                        print(
+                            "\n[ACTION SOURCE] action_topics empty: "
+                            "action[t] = observation.state[t]\n"
+                        )
             else:
-                action_topic_set = set(self.config.action_topics.keys())
+                action_topic_set = set(self.config.action_command_topics.keys())
                 all_topics.extend(action_topic_set)
                 # Fast-fail: verify at least one action topic is recorded in this MCAP.
                 # Reads only the file footer index (O(1)) — no message scanning.
@@ -706,15 +739,21 @@ class BufferedStreamExtractor:
         for message in reader.read_messages(topics=all_topics):
             topic = message.channel.topic
 
-            # Handle joint state messages
-            if topic == self.config.robot_state_topic:
-                self._buffer_joint_state(message, joint_buffers)
-                continue
-
-            # Handle action command messages (quest teleop mode)
-            if topic in action_topic_set:
-                self._buffer_action_command(message, topic, joint_buffers)
-                continue
+            # EE mode: one topic feeds one or more arms.
+            if self.config.is_ee:
+                arms_for_topic = ee_topic_to_arms.get(topic)
+                if arms_for_topic is not None:
+                    self._buffer_ee_pose(message, arms_for_topic, ee_buffers)
+                    continue
+            else:
+                # Joint state messages
+                if topic == self.config.robot_state_topic:
+                    self._buffer_joint_state(message, joint_buffers)
+                    continue
+                # Joint action command messages
+                if topic in action_topic_set:
+                    self._buffer_action_command(message, topic, joint_buffers)
+                    continue
 
             # Handle camera messages
             if topic not in topic_to_cam:
@@ -747,7 +786,8 @@ class BufferedStreamExtractor:
                 # Subsampling: only yield if this frame is at or past the next target timestamp
                 if frame_ts >= next_yield_ts:
                     frame = self._align_frame_at_cursor(
-                        camera_buffers, joint_buffers, cursor, main_cam, task, resize_image
+                        camera_buffers, joint_buffers, ee_buffers,
+                        cursor, main_cam, task, resize_image,
                     )
                     if frame is not None:
                         yield frame
@@ -768,10 +808,13 @@ class BufferedStreamExtractor:
                         if len(buffer) > 0:
                             buffer.popleft()
 
-                    # Sync joint buffers to remove old samples
+                    # Sync signal buffers to remove old samples
                     if camera_buffers[main_cam]:
                         new_oldest_ts = camera_buffers[main_cam][0][0]
-                        self._sync_joint_buffers(joint_buffers, new_oldest_ts)
+                        if self.config.is_ee:
+                            self._sync_ee_buffers(ee_buffers, new_oldest_ts)
+                        else:
+                            self._sync_joint_buffers(joint_buffers, new_oldest_ts)
 
                     cursor -= 1  # Adjust cursor after removal
 
@@ -782,7 +825,8 @@ class BufferedStreamExtractor:
             frame_ts = camera_buffers[main_cam][cursor][0]
             if next_yield_ts is None or frame_ts >= next_yield_ts:
                 frame = self._align_frame_at_cursor(
-                    camera_buffers, joint_buffers, cursor, main_cam, task, resize_image
+                    camera_buffers, joint_buffers, ee_buffers,
+                    cursor, main_cam, task, resize_image,
                 )
                 if frame is not None:
                     yield frame
@@ -799,41 +843,45 @@ class BufferedStreamExtractor:
         if frames_yielded == 0:
             # Diagnostic: show why no frames were produced
             cam_counts = {cam: len(buf) for cam, buf in camera_buffers.items()}
-            joint_keys = {
-                f"{role}:{robot or 'default'}": len(d["buffer"])
-                for (role, robot), d in joint_buffers.items()
-            }
             print(f"[BufferedStream] WARNING: 0 frames produced — diagnostics:")
             print(f"  Camera buffers: {cam_counts}")
-            print(
-                f"  Joint buffers:  {joint_keys if joint_keys else '(empty — no joint data received)'}"
-            )
             if not cam_counts or all(c == 0 for c in cam_counts.values()):
                 print(f"  -> No camera images found. Check that these topics exist in the MCAP:")
                 for t in self.config.camera_topics:
                     print(f"       {t}")
-            if not joint_keys:
-                print(
-                    f"  -> No joint state data. Check robot_state_topic: {self.config.robot_state_topic}"
-                )
-                if self.config.action_topics:
-                    print(
-                        f"  -> No action data. Check action_topics: {list(self.config.action_topics.keys())}"
-                    )
-            elif not any(k.startswith("action:") for k in joint_keys):
-                if self.config.action_topics:
-                    print(f"  -> No action data received from action_topics:")
-                    for t in self.config.action_topics:
-                        print(f"       {t}")
-                else:
-                    print(
-                        f"  -> No action data parsed from joint_states (no leader prefix matched)."
-                    )
+
+            if self.config.is_ee:
+                ee_counts = {arm: len(buf) for arm, buf in ee_buffers.items()}
+                print(f"  EE buffers:    {ee_counts if ee_counts else '(empty — no /ee_pose data received)'}")
+                if not ee_counts or all(c == 0 for c in ee_counts.values()):
+                    print(f"  -> No EE pose data. Check observation_topics:")
+                    for arm_id, topic in self.config.observation_topics.items():
+                        print(f"       {arm_id} -> {topic}")
+            else:
+                joint_keys = {
+                    f"{role}:{robot or 'default'}": len(d["buffer"])
+                    for (role, robot), d in joint_buffers.items()
+                }
+                print(f"  Joint buffers: {joint_keys if joint_keys else '(empty — no joint data received)'}")
+                if not joint_keys:
+                    print(f"  -> No joint state data. Check robot_state_topic: {self.config.robot_state_topic}")
+                    cmd_topics = self.config.action_command_topics
+                    if cmd_topics:
+                        print(f"  -> No action data. Check action command topics: {list(cmd_topics.keys())}")
+                elif not any(k.startswith("action:") for k in joint_keys) and not self.act_from_obs:
+                    cmd_topics = self.config.action_command_topics
+                    if cmd_topics:
+                        print(f"  -> No action data received from action command topics:")
+                        for t in cmd_topics:
+                            print(f"       {t}")
+                    else:
+                        print(f"  -> No action data parsed from joint_states (no leader prefix matched).")
 
     def _align_frame_at_cursor(
         self,
         camera_buffers: Dict[str, deque],
         joint_buffers: Dict[Tuple[str, str], Dict],
+        ee_buffers: Dict[str, deque],
         cursor: int,
         main_cam: str,
         task: str,
@@ -844,7 +892,8 @@ class BufferedStreamExtractor:
 
         Args:
             camera_buffers: Per-camera buffers
-            joint_buffers: Joint state buffers (keyed by (role, robot))
+            joint_buffers: Joint-mode signal buffers (keyed by (role, robot))
+            ee_buffers: EE-mode signal buffers (keyed by arm_id)
             cursor: Index of frame to align in main camera buffer
             main_cam: Name of main camera
             task: Task name
@@ -878,18 +927,19 @@ class BufferedStreamExtractor:
             else:
                 return None
 
-        # Align joint states
-        if joint_buffers:
-            has_action_buffer = any(role == "action" for (role, _) in joint_buffers)
-            action_ts = (
-                main_ts + self.frame_interval * self.config.action_from_observation_n
-                if self.config.action_from_observation and not has_action_buffer
-                else None
+        # Align non-camera signals — mode-specific
+        if self.config.is_ee:
+            signals = self._align_ee_signals(ee_buffers, main_ts)
+        elif joint_buffers:
+            signals = self._align_joint_states(
+                joint_buffers, main_ts, act_from_obs=self.act_from_obs
             )
-            joint_aligned = self._align_joint_states(joint_buffers, main_ts, action_ts=action_ts)
-            if joint_aligned is None:
-                return None  # Skip frame if joint states not available
-            frame.update(joint_aligned)
+        else:
+            signals = None
+
+        if signals is None:
+            return None
+        frame.update(signals)
 
         frame["task"] = task
         return frame
@@ -898,7 +948,7 @@ class BufferedStreamExtractor:
         self,
         joint_buffers: Dict[Tuple[str, str], Dict],
         target_ts: float,
-        action_ts: Optional[float] = None,
+        act_from_obs: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """
         Align joint states to target timestamp.
@@ -910,9 +960,10 @@ class BufferedStreamExtractor:
         Args:
             joint_buffers: Joint state buffers keyed by (role, robot)
             target_ts: Target timestamp for observation alignment
-            action_ts: If provided, look up observation data at this timestamp as
-                       the action (used with action_from_observation=True so that
-                       action[t] = observation[t+1] rather than observation[t]).
+            act_from_obs: When True, ``action[t] = observation.state[t]`` per arm
+                — used when ``action_topics`` is empty or ``--act-from-obs`` is
+                set. The future window is applied at train time by
+                ``delta_timestamps``.
 
         Returns:
             Dictionary with aligned joint state features, or None if data missing
@@ -943,22 +994,12 @@ class BufferedStreamExtractor:
             else:  # action
                 action_data[robot] = {"pos": pos.copy()}
 
-        # Fallback: use observation at action_ts (t+1) as action when action_topics
-        # are configured but not recorded in this MCAP.
-        if not action_data and obs_data and self.config.action_from_observation:
-            if action_ts is None:
-                # No next timestamp available (last frame) — skip this frame
-                return None
-            action_data = {}
-            for (role, robot), data in joint_buffers.items():
-                if role != "observation":
-                    continue
-                buffer = data["buffer"]
-                action_idx = self._find_nearest_in_buffer(buffer, action_ts)
-                if action_idx is None:
-                    return None
-                _, pos, _, _ = buffer[action_idx]
-                action_data[robot] = {"pos": pos.copy()}
+        # Unified act-from-obs rule: when no action source is configured (or
+        # the CLI forces it), set action[t] = observation.state[t] per arm.
+        # The future window is later applied by LeRobot's delta_timestamps at
+        # training time.
+        if act_from_obs and obs_data:
+            action_data = {robot: {"pos": v["pos"].copy()} for robot, v in obs_data.items()}
 
         # Check if multi-robot (has named robots like 'left', 'right')
         robots = sorted([r for r in set(obs_data.keys()) | set(action_data.keys()) if r])
@@ -1163,7 +1204,7 @@ class BufferedStreamExtractor:
         timestamp = message_timestamp(message)
 
         # Get action topic config
-        topic_cfg = self.config.action_topics[topic]
+        topic_cfg = self.config.action_command_topics[topic]
         robot = topic_cfg.arm
         key = ("action", robot)
 
@@ -1242,3 +1283,102 @@ class BufferedStreamExtractor:
                 if prefix not in joint_names:
                     joint_names[prefix] = data["joint_names"]
         return joint_names
+
+    # ------------------------------------------------------------------
+    # EE-mode helpers
+    # ------------------------------------------------------------------
+
+    def _buffer_ee_pose(
+        self,
+        message,
+        arms_for_topic: List[str],
+        ee_buffers: Dict[str, deque],
+    ) -> None:
+        """Decode a CommandedEEPose message and append to every arm it serves.
+
+        We buffer the raw ``(pos, quat, gripper)`` tuple once and defer encoding
+        (state vs action) to align time, so the same decode is reused for both
+        the 8-dim quaternion state and the 10-dim rot6d action.
+        """
+        ros_msg = message.ros_msg
+        timestamp = message.log_time.timestamp()
+
+        pos = np.array(
+            [
+                ros_msg.pose.position.x,
+                ros_msg.pose.position.y,
+                ros_msg.pose.position.z,
+            ],
+            dtype=np.float64,
+        )
+        quat = np.array(
+            [
+                ros_msg.pose.orientation.x,
+                ros_msg.pose.orientation.y,
+                ros_msg.pose.orientation.z,
+                ros_msg.pose.orientation.w,
+            ],
+            dtype=np.float64,
+        )
+        if not hasattr(ros_msg, "gripper"):
+            log.warning(
+                "[EE] Message on topic '%s' has no 'gripper' field — defaulting to 0.0. "
+                "Check that the topic publishes anvil_msgs/msg/CommandedEEPose.",
+                arms_for_topic[0] if arms_for_topic else "?",
+            )
+        gripper = float(getattr(ros_msg, "gripper", 0.0))
+
+        sample = (timestamp, pos, quat, gripper)
+        for arm_id in arms_for_topic:
+            ee_buffers[arm_id].append(sample)
+
+    def _align_ee_signals(
+        self,
+        ee_buffers: Dict[str, deque],
+        target_ts: float,
+    ) -> Optional[Dict[str, Any]]:
+        """Align per-arm EE pose buffers to the camera frame at ``target_ts``.
+
+        Builds the unified canonical features by concatenating per-arm slices in
+        the insertion order of ``config.observation_topics``::
+
+            observation.state  = concat([xyz, quat_xyzw, gripper] per arm)   (8 * n_arms,)
+            action             = concat([xyz, rot6d, gripper]   per arm)     (10 * n_arms,)
+
+        Returns ``None`` if any arm has no buffered pose yet.
+        """
+        # Lazy import keeps the converter independent of training packages.
+        from anvil_shared.rotation import matrix_to_rot6d, quat_to_matrix
+
+        state_slices: List[np.ndarray] = []
+        action_slices: List[np.ndarray] = []
+        for arm_id in self.config.observation_topics:  # insertion order
+            buffer = ee_buffers.get(arm_id)
+            if not buffer:
+                return None
+            idx = self._find_nearest_in_buffer(buffer, target_ts)
+            if idx is None:
+                return None
+            _, pos, quat, gripper = buffer[idx]
+            rot6d = matrix_to_rot6d(quat_to_matrix(quat))
+            state_slices.append(
+                np.concatenate([pos, quat, np.array([gripper], dtype=np.float64)])
+            )
+            action_slices.append(
+                np.concatenate([pos, rot6d, np.array([gripper], dtype=np.float64)])
+            )
+
+        return {
+            "observation.state": np.concatenate(state_slices).astype(np.float32),
+            "action": np.concatenate(action_slices).astype(np.float32),
+        }
+
+    def _sync_ee_buffers(
+        self,
+        ee_buffers: Dict[str, deque],
+        oldest_ts: float,
+    ) -> None:
+        """Drop EE samples older than the oldest camera frame to bound memory."""
+        for buffer in ee_buffers.values():
+            while buffer and buffer[0][0] < oldest_ts:
+                buffer.popleft()
