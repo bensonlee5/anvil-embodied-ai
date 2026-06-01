@@ -14,6 +14,10 @@ model:
   # VLA task prompt — required for SmolVLA / Pi0 / Pi0.5, ignored for ACT / Diffusion
   # Set to the task the model was trained/finetuned for.
   task_description: null
+  # dtype: optional weight dtype after loading. null = use checkpoint default (safe).
+  # Set to "bfloat16" to halve VRAM for VLA models (Pi0/Pi0.5/SmolVLA).
+  # TODO(inference-opt): validate bfloat16 numerics on real GPU before enabling.
+  dtype: null
 
 # -----------------------------------------------------------------------------
 # Inference Tuning (per model type)

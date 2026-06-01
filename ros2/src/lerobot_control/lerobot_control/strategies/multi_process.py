@@ -106,7 +106,23 @@ class MultiProcessStrategy:
         self._node.get_logger().info(f"Created shared memory for {len(self._camera_names)} cameras")
 
     def _start_workers(self) -> None:
-        """Start image worker processes."""
+        """Start image worker processes.
+
+        # TODO(inference-opt B6): evaluate faster JPEG decode paths:
+        #   - Confirm whether the cv2 in the Docker image is linked against
+        #     libjpeg-turbo (run: python -c "import cv2; print(cv2.getBuildInformation())"
+        #     and look for "JPEG: libjpeg-turbo"). If not, rebuild or switch to
+        #     PyTurboJPEG / turbojpeg for ~2-4× decode speedup.
+        #   - Consider CPU affinity pinning (os.sched_setaffinity) for workers to
+        #     avoid contending with the main inference process on shared L3 cache.
+        #   - Measure first: check _log_input_stats camera Hz vs target; if camera
+        #     Hz is consistently ≥ control_freq the decode path is not the bottleneck.
+        # TODO(inference-opt B7): torch.compile for ACT/Diffusion select_action.
+        #   VLA models explicitly disable compile (compile_model=False in ModelLoader).
+        #   Add an opt-in YAML field (e.g. model.compile: false) and wrap select_action
+        #   with torch.compile(mode="reduce-overhead") only when enabled. Must account
+        #   for first-call recompile latency (pairs with B4 warmup).
+        """
         self._node.get_logger().info("Starting image worker processes...")
 
         # Use 'spawn' context for clean subprocess start
@@ -176,6 +192,13 @@ class MultiProcessStrategy:
                 if not self._image_buffer.has_new_frame(name):
                     missing.append(name)
             self._last_incomplete_reason = f"waiting for cameras: {missing}"
+            # TODO(inference-opt B8): add an opt-in, DEFAULT-OFF per-camera
+            # max-staleness tolerance so a briefly-lagging camera doesn't stall
+            # the whole observation. This changes semantics (stale frame instead
+            # of skipping) and must default off to avoid safety/correctness
+            # implications. Design: add `camera_max_staleness_ms: null` to YAML;
+            # when set and non-null, allow re-using the previous frame for cameras
+            # whose last frame age ≤ max_staleness_ms, with a log warning.
             return None
 
         if self._joint_positions is None:

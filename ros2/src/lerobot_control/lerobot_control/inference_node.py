@@ -343,6 +343,11 @@ class LeRobotInferenceNode(Node):
 
         self.n_action_steps_override = config_overrides.get("n_action_steps")
 
+        # Optional dtype override (e.g. "bfloat16"). Read from model: block in YAML.
+        # None = no cast; behaviour identical to before this field existed.
+        _model_cfg = self.config.get("model", {})
+        _dtype = _model_cfg.get("dtype", None)
+
         loader = ModelLoader(
             self.model_path,
             self.device,
@@ -350,6 +355,7 @@ class LeRobotInferenceNode(Node):
             config_overrides=config_overrides,
             logger=self.get_logger(),
             rtc_config_yaml=getattr(self, "rtc_config_yaml", {}),
+            dtype=_dtype,
         )
         self.model, self.preprocessor, self.postprocessor = loader.load_with_processors()
         self._loader = loader
@@ -361,6 +367,11 @@ class LeRobotInferenceNode(Node):
         if self._is_vla:
             self._setup_vla_inference()
             self._start_inference_thread()
+
+        # TODO(inference-opt B4): run one dummy-observation forward pass here to
+        # warm up CUDA kernels and reduce the first-real-inference latency spike.
+        # Needs GPU validation across all 5 model families (ACT, Diffusion, SmolVLA,
+        # Pi0, Pi05) — dummy obs must match preprocessed shapes and dtypes exactly.
 
         if self.model_type in {"smolvla", "pi0", "pi05"} and not self.task_description:
             self.get_logger().warn(
@@ -727,9 +738,15 @@ class LeRobotInferenceNode(Node):
         return np.asarray(a).flatten()
 
     def _move_to_device(self, data):
-        """Recursively move tensors to the configured device."""
+        """Recursively move tensors to the configured device.
+
+        Uses non_blocking=True to allow the CPU→GPU copy to overlap with
+        CPU-side work when the source tensor is already page-locked.
+        # TODO(inference-opt): allocate SharedImageBuffer frames in pinned
+        # (page-locked) memory to fully unlock async overlap here.
+        """
         if torch.is_tensor(data):
-            return data.to(self.device)
+            return data.to(self.device, non_blocking=True)
         if isinstance(data, dict):
             return {key: self._move_to_device(value) for key, value in data.items()}
         if isinstance(data, tuple):
@@ -899,12 +916,18 @@ class LeRobotInferenceNode(Node):
                 eff_ctrl_hz = action_fps * eh / cs if cs > 0 else 0
                 logger.info(f"  [DEBUG] Action FPS {action_fps:.1f}  Eff ctrl Hz {eff_ctrl_hz:.1f}")
 
+        # VLA skip count is always logged (not DEBUG-only) so field runs surface it.
+        if self._vla_skip_count > 0:
+            logger.warn(
+                f"  VLA skips: {self._vla_skip_count} actions missed (queue empty) — "
+                "raise queue_trigger_threshold or lower execution_horizon if persistent"
+            )
+        self._vla_skip_count = 0
+
         if self._debug and self._queue_depths:
             depths = np.array(self._queue_depths)
-            skip_pct = self._vla_skip_count / max(len(self._queue_depths) + self._vla_skip_count, 1) * 100
-            logger.info(f"  [DEBUG] Queue depth min={depths.min()} mean={depths.mean():.0f} max={depths.max()} skip={skip_pct:.1f}%")
+            logger.info(f"  [DEBUG] Queue depth min={depths.min()} mean={depths.mean():.0f} max={depths.max()}")
             self._queue_depths.clear()
-            self._vla_skip_count = 0
 
         if self._debug and self._smooth_tracker is not None:
             smooth = self._smooth_tracker.get_stats()

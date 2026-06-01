@@ -524,6 +524,8 @@ The orange "Raw" line shows model output **before** postprocessing — useful fo
 
 ## 4. Run Inference
 
+> 📖 For the full picture — node architecture, single-PC vs distributed two-PC setup, DDS middleware, config reference, and troubleshooting — see the **[Inference Guide](docs/inference-guide.md)**.
+
 All inference scenarios go through `scripts/run_inference.sh`:
 
 ```bash

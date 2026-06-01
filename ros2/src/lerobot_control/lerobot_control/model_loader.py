@@ -78,6 +78,7 @@ class ModelLoader:
         seed: int = 42,
         config_overrides: dict = None,
         rtc_config_yaml: dict = None,
+        dtype: str | None = None,
     ):
         """
         Initialize model loader.
@@ -95,6 +96,12 @@ class ModelLoader:
             rtc_config_yaml: Dict from the ``rtc:`` YAML section. When set and
                 the model is a VLA (pi0/pi05/smolvla), RTCConfig is injected
                 after loading and ``model.init_rtc_processor()`` is called.
+            dtype: Optional dtype string for casting the model after loading
+                (e.g. ``"bfloat16"``, ``"float16"``, ``"float32"``). ``None``
+                (default) preserves whatever dtype ``from_pretrained`` produces,
+                keeping behaviour identical to before this flag existed.
+                # TODO(inference-opt): consider defaulting to "bfloat16" for VLA
+                # models once validated on real GPU hardware — would halve VRAM.
         """
         self.model_path = Path(model_path)
         self.device = device
@@ -104,6 +111,7 @@ class ModelLoader:
         self.seed = seed
         self.config_overrides = config_overrides or {}
         self.rtc_config_yaml = rtc_config_yaml or {}
+        self.dtype = dtype
         self._model = None
         self._pre_processor = None
         self._post_processor = None
@@ -134,6 +142,20 @@ class ModelLoader:
                 print(f"[{level.upper()}] {msg}")
         else:
             print(f"[{level.upper()}] {msg}")
+
+    def _resolve_dtype(self) -> "torch.dtype | None":
+        """Map the string dtype setting to a torch.dtype, or None (no cast)."""
+        _map = {
+            "bfloat16": torch.bfloat16,
+            "float16":  torch.float16,
+            "float32":  torch.float32,
+        }
+        if self.dtype is None:
+            return None
+        result = _map.get(self.dtype.lower())
+        if result is None:
+            self._log("warn", f"Unknown dtype '{self.dtype}' — ignoring, using checkpoint default")
+        return result
 
     def _detect_model_type(self) -> str | None:
         """Read model type from config.json in the checkpoint directory."""
@@ -219,9 +241,37 @@ class ModelLoader:
                 raise ValueError(f"Unsupported model type: {self.model_type}")
 
             model = model.to(self.device)
+
+            # Optional dtype cast (B2). Default None = no cast (behaviour unchanged).
+            _torch_dtype = self._resolve_dtype()
+            if _torch_dtype is not None:
+                model = model.to(_torch_dtype)
+
             model.eval()
             self._model = model
-            self._log("info", f"Model loaded successfully on {self.device}")
+
+            # Log effective dtype and device
+            try:
+                _eff_dtype = next(model.parameters()).dtype
+            except StopIteration:
+                _eff_dtype = None
+            self._log("info", f"Model loaded on {self.device}, dtype={_eff_dtype}")
+
+            # B3: log attention_implementation for VLA models; warn on 'eager'
+            if self.model_type in {"pi0", "pi05", "smolvla"}:
+                _attn_impl = getattr(getattr(model, "config", None), "attention_implementation", None)
+                if _attn_impl is not None:
+                    if _attn_impl == "eager":
+                        self._log(
+                            "warn",
+                            f"[{self.model_type}] attention_implementation='eager' — "
+                            "this is the slowest path and significantly increases VRAM. "
+                            "See the Pi0/Pi0.5 memory footprint note in docs/inference-guide.md. "
+                            # TODO(inference-opt): expose as an override field once per-model
+                            # safety has been validated (flex/fa2 may not be available everywhere).
+                        )
+                    else:
+                        self._log("info", f"[{self.model_type}] attention_implementation='{_attn_impl}'")
 
             # Snapshot checkpoint n_action_steps before any overrides
             if hasattr(model, "config"):
