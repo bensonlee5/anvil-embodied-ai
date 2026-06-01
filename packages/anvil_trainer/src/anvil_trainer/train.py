@@ -38,6 +38,7 @@ from anvil_trainer.patches import TransformRunner, patched_lerobot
 # Existing tests and user code may import them from `anvil_trainer.train`.
 from anvil_trainer.transforms import (  # noqa: E402, F401
     DeltaActionTransform,
+    EEDeltaTransform,
     ExcludeObservationTransform,
     TaskOverrideTransform,
     Transform,

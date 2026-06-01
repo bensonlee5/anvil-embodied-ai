@@ -35,6 +35,7 @@ from anvil_trainer.config import TrainingConfig
 from anvil_trainer.transforms import (
     DataIntegrityError,
     DeltaActionTransform,
+    EEDeltaTransform,
     ExcludeObservationTransform,
     TaskOverrideTransform,
     Transform,
@@ -68,6 +69,7 @@ class TransformRunner:
             ExcludeObservationTransform(),
             TaskOverrideTransform(),
             DeltaActionTransform(),
+            EEDeltaTransform(),
         ]
         self.active_transforms = [t for t in transforms if t.is_enabled(config)]
         self._val_dataloader = None   # set by apply_val_loss_patch when make_dataset is called
@@ -281,6 +283,96 @@ class TransformRunner:
             )
             return None
 
+    def _compute_ee_delta_stats(self, full_dataset: Any) -> dict | None:
+        """Compute EE delta action stats for ``ee_delta`` training.
+
+        The EE dataset stores absolute rot6d actions. In ``ee_delta`` mode the
+        training target is the *relative* action:
+            delta_xyz   = action_xyz  - state_xyz
+            delta_rot6d = matrix_to_rot6d(R_state.T @ R_action)   (SO(3) relative)
+            gripper     = action_gripper   (absolute, not delta)
+
+        This method computes those relative actions over the full dataset and
+        derives MEAN_STD statistics for normalisation, replacing the absolute
+        stats stored in ``meta/stats.json``.
+
+        Returns the patched stats dict, or ``None`` on failure.
+        """
+        if not self.config.is_ee_delta:
+            return None
+
+        import numpy as np
+        try:
+            from anvil_shared.rotation import matrix_to_rot6d, quat_to_matrix, rot6d_to_matrix
+
+            hf = full_dataset.hf_dataset
+            actions_np = np.array(hf["action"], dtype=np.float64)        # (N, 10*n_arms)
+            states_np  = np.array(hf["observation.state"], dtype=np.float64)  # (N, 8*n_arms)
+            episode_idx_np = np.array(hf["episode_index"], dtype=np.int64).ravel()
+
+            if states_np.ndim == 3:
+                states_np = states_np[:, -1, :]   # multi-step obs → most recent
+
+            n_arms = states_np.shape[-1] // 8
+            if n_arms == 0 or states_np.shape[-1] % 8 != 0:
+                raise DataIntegrityError(
+                    f"[ee_delta_stats] observation.state dim {states_np.shape[-1]} is not 8*n_arms"
+                )
+
+            N = len(actions_np)
+            all_deltas = np.empty_like(actions_np)
+
+            for i in range(N):
+                for arm in range(n_arms):
+                    s0, a0 = arm * 8, arm * 10
+                    state_xyz  = states_np[i, s0:s0+3]
+                    state_quat = states_np[i, s0+3:s0+7]
+                    act_xyz    = actions_np[i, a0:a0+3]
+                    act_r6d    = actions_np[i, a0+3:a0+9]
+                    act_grip   = actions_np[i, a0+9]
+
+                    R_state  = quat_to_matrix(state_quat)
+                    R_action = rot6d_to_matrix(act_r6d)
+                    R_rel    = R_state.T @ R_action
+
+                    all_deltas[i, a0:a0+3]  = act_xyz - state_xyz
+                    all_deltas[i, a0+3:a0+9] = matrix_to_rot6d(R_rel)
+                    all_deltas[i, a0+9]     = act_grip  # gripper: keep absolute
+
+            orig = full_dataset.meta.stats.get("action", {})
+            delta_mean = all_deltas.mean(axis=0)
+            delta_std  = np.where(all_deltas.std(axis=0) < 1e-6, 1e-6, all_deltas.std(axis=0))
+            delta_min  = all_deltas.min(axis=0)
+            delta_max  = all_deltas.max(axis=0)
+
+            # Gripper keeps its original absolute stats
+            for arm in range(n_arms):
+                grip_idx = arm * 10 + 9
+                orig_mean_arr = np.array(orig.get("mean", delta_mean))
+                orig_std_arr  = np.array(orig.get("std",  delta_std))
+                orig_min_arr  = np.array(orig.get("min",  delta_min))
+                orig_max_arr  = np.array(orig.get("max",  delta_max))
+                delta_mean[grip_idx] = orig_mean_arr[grip_idx] if len(orig_mean_arr) > grip_idx else delta_mean[grip_idx]
+                delta_std[grip_idx]  = orig_std_arr[grip_idx]  if len(orig_std_arr)  > grip_idx else delta_std[grip_idx]
+                delta_min[grip_idx]  = orig_min_arr[grip_idx]  if len(orig_min_arr)  > grip_idx else delta_min[grip_idx]
+                delta_max[grip_idx]  = orig_max_arr[grip_idx]  if len(orig_max_arr)  > grip_idx else delta_max[grip_idx]
+
+            patched_stats = {
+                "mean":  delta_mean.tolist(),
+                "std":   delta_std.tolist(),
+                "min":   delta_min.tolist(),
+                "max":   delta_max.tolist(),
+                "count": orig.get("count", N),
+            }
+            full_dataset.meta.stats["action"] = patched_stats
+            log.info("[ee_delta_stats] Computed SO(3) delta stats over %d frames, %d arm(s)", N, n_arms)
+            return patched_stats
+        except DataIntegrityError:
+            raise
+        except Exception as e:
+            log.warning("[ee_delta_stats] Failed: %s — falling back to absolute stats", e)
+            return None
+
     def apply_metadata_patches(self) -> None:
         """Apply metadata patches before importing lerobot training."""
         for transform in self.active_transforms:
@@ -362,13 +454,14 @@ class TransformRunner:
             full_dataset = original_make_dataset(cfg)
             total_ep = full_dataset.num_episodes
 
-            # Compute delta action stats when DeltaActionTransform is active so
-            # that lerobot's normalizer is built against delta statistics rather
-            # than the absolute-action stats stored in meta/stats.json.  The
-            # helper patches full_dataset.meta.stats in place for the early-
-            # return path and returns the dict so we can re-apply it to the
-            # filtered train_dataset below.
-            _patched_action_stats = val_state._compute_delta_action_stats(full_dataset)
+            # Compute action stats:
+            #   - joint delta modes  → _compute_delta_action_stats (elementwise subtract)
+            #   - ee_delta           → _compute_ee_delta_stats (SO(3) relative)
+            #   - absolute / ee_absolute → no patching needed (stats from dataset as-is)
+            if val_state.config.is_ee_delta:
+                _patched_action_stats = val_state._compute_ee_delta_stats(full_dataset)
+            else:
+                _patched_action_stats = val_state._compute_delta_action_stats(full_dataset)
 
             # Check if split_info.json already exists in last checkpoint (for resume)
             split_info_path = Path(cfg.output_dir) / "checkpoints" / "last" / "pretrained_model" / "split_info.json"
@@ -489,6 +582,9 @@ class TransformRunner:
             # Backward compat: old inference nodes read use_delta_actions
             "use_delta_actions": self.config.use_delta_actions,
             "delta_sequential": self.config.delta_sequential,
+            # EE Cartesian fields
+            "is_ee": self.config.is_ee,
+            "is_ee_delta": self.config.is_ee_delta,
         }
         if self.config.delta_exclude_joints:
             anvil_cfg_base["delta_exclude_joints"] = self.config.delta_exclude_joints

@@ -69,9 +69,12 @@ class TrainingConfig:
 
     exclude_observation: list[str] | None = None
     task_override: str | None = None
-    # action_type: "absolute" | "delta_obs_t" | "delta_sequential"
-    # delta_obs_t:     delta[k] = action[t+k] - obs[t]  (all k share the same obs reference)
-    # delta_sequential: delta[0] = action[t] - obs[t], delta[k] = action[t+k] - action[t+k-1]
+    # action_type values:
+    #   "absolute"          — joint positions, no delta (default)
+    #   "delta_obs_t"       — joint delta: delta[k] = action[t+k] - obs[t]
+    #   "delta_sequential"  — joint delta: k=0 uses obs; k>0 uses prev action
+    #   "ee_absolute"       — EE Cartesian rot6d, no delta transform
+    #   "ee_delta"          — EE Cartesian delta: xyz subtract + SO(3) relative rotation
     action_type: str = "absolute"
     delta_exclude_joints: list[str] | None = None  # Joint names to keep in absolute space when using delta actions
     delta_stats_n_steps: int = 1  # Look-ahead steps for delta stats (1 = single-frame, N = k=0..N-1 multi-step)
@@ -93,6 +96,14 @@ class TrainingConfig:
     @property
     def delta_sequential(self) -> bool:
         return self.action_type == "delta_sequential"
+
+    @property
+    def is_ee(self) -> bool:
+        return self.action_type in ("ee_absolute", "ee_delta")
+
+    @property
+    def is_ee_delta(self) -> bool:
+        return self.action_type == "ee_delta"
 
     @classmethod
     def from_env_and_args(cls) -> TrainingConfig:
@@ -118,7 +129,7 @@ class TrainingConfig:
             if action_type == "absolute":
                 action_type = "delta_obs_t"
             sys.argv.remove("--use-delta-actions")
-        _VALID_ACTION_TYPES = {"absolute", "delta_obs_t", "delta_sequential"}
+        _VALID_ACTION_TYPES = {"absolute", "delta_obs_t", "delta_sequential", "ee_absolute", "ee_delta"}
         if action_type not in _VALID_ACTION_TYPES:
             raise ValueError(
                 f"--action-type={action_type!r} is not valid. "

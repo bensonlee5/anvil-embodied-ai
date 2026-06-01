@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import numpy as np
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -186,6 +187,7 @@ class DeltaActionTransform(Transform):
         return "delta_actions"
 
     def is_enabled(self, config: TrainingConfig) -> bool:
+        # EE action types use a separate EEDeltaTransform — never route them here.
         return config.action_type in ("delta_obs_t", "delta_sequential")
 
     @staticmethod
@@ -328,6 +330,118 @@ class DeltaActionTransform(Transform):
                 action_last - len(self._exclude_indices),
                 len(self._exclude_indices),
                 config.delta_exclude_joints or [],
+            )
+            self._first_apply = False
+
+        return item
+
+
+# =============================================================================
+# EEDeltaTransform — SE(3) relative EE actions
+# =============================================================================
+
+
+class EEDeltaTransform(Transform):
+    """Convert absolute EE actions to relative (SE(3) delta) representation.
+
+    For each arm slice (10 dims: [xyz(3), rot6d(6), gripper(1)]):
+      delta_xyz   = action_xyz - state_xyz                          (3,)
+      delta_rot6d = matrix_to_rot6d(R_state.T @ R_action)          (6,) SO(3) relative rotation
+      gripper     = action_gripper (kept absolute, like delta_exclude_joints) (1,)
+
+    The state is taken from observation.state, which uses an 8-dim per-arm layout:
+      [xyz(3), quat_xyzw(4), gripper(1)]
+
+    So for n_arms arms: action (10*n_arms,) and state (8*n_arms,) — different dims,
+    must be sliced by arm, not naively subtracted.
+
+    The number of arms is auto-detected from observation.state dim:  n_arms = dim // 8.
+    """
+
+    def __init__(self):
+        self._first_apply: bool = True
+
+    @property
+    def name(self) -> str:
+        return "ee_delta"
+
+    def is_enabled(self, config: TrainingConfig) -> bool:
+        return config.is_ee_delta
+
+    def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
+        import torch
+        from anvil_shared.rotation import (
+            matrix_to_rot6d,
+            quat_to_matrix,
+            rot6d_to_matrix,
+        )
+
+        if "action" not in item or "observation.state" not in item:
+            return item
+
+        action = item["action"]  # (..., 10*n_arms)
+        state = item["observation.state"]  # (..., 8*n_arms)
+
+        # Multi-step obs: use most recent step as the delta reference
+        if state.dim() > 1:
+            state = state[-1]  # (8*n_arms,)
+
+        state_np = state.detach().cpu().numpy().astype("float64")
+        action_np = action.detach().cpu().numpy().astype("float64")
+
+        n_arms = state_np.shape[-1] // 8
+        if n_arms == 0 or state_np.shape[-1] % 8 != 0:
+            raise DataIntegrityError(
+                f"[ee_delta] observation.state dim {state_np.shape[-1]} is not a multiple of 8; "
+                "expected 8 * n_arms (EE bimanual=16, left-only=8)."
+            )
+        if action_np.shape[-1] != 10 * n_arms:
+            raise DataIntegrityError(
+                f"[ee_delta] action dim {action_np.shape[-1]} != 10 * {n_arms} arms; "
+                "state suggests {n_arms} arm(s) but action disagrees."
+            )
+
+        # Process each chunk step; action may be (10*n_arms,) or (horizon, 10*n_arms)
+        single = action_np.ndim == 1
+        if single:
+            action_np = action_np[np.newaxis, :]  # (1, 10*n_arms)
+
+        import numpy as np
+        delta_np = action_np.copy()
+
+        for arm_idx in range(n_arms):
+            s0 = arm_idx * 8   # state slice start
+            a0 = arm_idx * 10  # action slice start
+
+            state_xyz  = state_np[s0:s0+3]
+            state_quat = state_np[s0+3:s0+7]  # [qx,qy,qz,qw]
+            R_state    = quat_to_matrix(state_quat)  # (3,3)
+
+            for k in range(action_np.shape[0]):
+                act_xyz   = action_np[k, a0:a0+3]
+                act_r6d   = action_np[k, a0+3:a0+9]
+                act_grip  = action_np[k, a0+9]
+
+                # xyz delta
+                delta_np[k, a0:a0+3] = act_xyz - state_xyz
+
+                # SO(3) relative rotation: R_rel = R_state.T @ R_action
+                R_action = rot6d_to_matrix(act_r6d)
+                R_rel    = R_state.T @ R_action
+                delta_np[k, a0+3:a0+9] = matrix_to_rot6d(R_rel)
+
+                # gripper: keep absolute
+                delta_np[k, a0+9] = act_grip
+
+        if single:
+            delta_np = delta_np[0]  # back to (10*n_arms,)
+
+        item["action"] = torch.tensor(delta_np, dtype=action.dtype)
+
+        if self._first_apply:
+            log.info(
+                "[ee_delta] active — %d arm(s), action (10×n)→delta(xyz)+SO(3)+gripper",
+                n_arms,
             )
             self._first_apply = False
 

@@ -11,7 +11,7 @@ from pathlib import Path
 from .config import EvalConfig
 from .dataset import EvaluationDataset, get_episode_indices
 from .evaluator import EpisodeEvaluator, load_model
-from .metrics import compute_episode_metrics
+from .metrics import compute_episode_metrics, compute_summary_metrics
 from .plotting import plot_episode_joints, plot_summary_box_plot
 from .reporting import write_metrics_csv, write_metrics_summary
 
@@ -193,7 +193,8 @@ def main() -> None:
         _pred_for_metrics = result.raw_output if result.raw_output is not None else result.predicted
         _gt_for_metrics = result.raw_ground_truth if result.raw_ground_truth is not None else result.ground_truth
         metrics = compute_episode_metrics(
-            _pred_for_metrics, _gt_for_metrics, result.joint_names, ep_idx, split_label
+            _pred_for_metrics, _gt_for_metrics, result.joint_names, ep_idx, split_label,
+            action_type=evaluator.action_type,
         )
         all_metrics.append(metrics)
         
@@ -215,6 +216,26 @@ def main() -> None:
     
     # Summary plot
     plot_summary_box_plot(all_metrics, eval_dataset.joint_names, plots_dir / "summary_per_joint_mae.png")
+
+    # EE pass/fail summary
+    if evaluator.is_ee:
+        summary = compute_summary_metrics(all_metrics)
+        for split_name, split_data in summary.items():
+            ee_data = split_data.get("ee", {})
+            for arm, arm_data in ee_data.items():
+                pos_pass = arm_data.get("pass_position", False)
+                ori_pass = arm_data.get("pass_orientation", False)
+                pos_m    = arm_data.get("position_error_m_mean", float("nan"))
+                ori_deg  = arm_data.get("orientation_error_deg_mean", float("nan"))
+                grip_m   = arm_data.get("gripper_error_m_mean", float("nan"))
+                status   = "PASS" if (pos_pass and ori_pass) else "FAIL"
+                log.info(
+                    "[anvil-eval][EE %s] %s | arm=%s | pos=%.4f m (%s) | ori=%.2f° (%s) | grip=%.4f m",
+                    split_name, status, arm,
+                    pos_m, "✓" if pos_pass else "✗",
+                    ori_deg, "✓" if ori_pass else "✗",
+                    grip_m,
+                )
 
     log.info("[anvil-eval] Evaluation complete!")
 

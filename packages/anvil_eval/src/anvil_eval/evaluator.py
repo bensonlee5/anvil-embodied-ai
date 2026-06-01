@@ -67,6 +67,8 @@ class EpisodeEvaluator:
         if self.action_type == "absolute" and anvil_cfg.get("use_delta_actions", False):
             self.action_type = "delta_obs_t"
         self.use_delta_actions: bool = self.action_type in ("delta_obs_t", "delta_sequential")
+        self.is_ee: bool = self.action_type in ("ee_absolute", "ee_delta")
+        self.is_ee_delta: bool = self.action_type == "ee_delta"
         self.delta_exclude_joints = anvil_cfg.get("delta_exclude_joints", [])
         self.task_description = task_description
         self.joint_names = joint_names
@@ -85,7 +87,7 @@ class EpisodeEvaluator:
         """Evaluate model predictions for a single episode."""
         _ensure_model_loader_importable()
         from lerobot_control.model_loader import reset_model_state
-        from lerobot_control.delta_restore import restore_delta_chunk
+        from lerobot_control.delta_restore import restore_delta_chunk, restore_ee_delta_chunk
 
         predicted_actions: list[np.ndarray] = []
         ground_truth_actions: list[np.ndarray] = []
@@ -127,8 +129,9 @@ class EpisodeEvaluator:
             # Detect whether a new action chunk is about to be generated.
             # When queue is empty, select_action runs model and fills queue.
             # We capture obs_state as the delta reference for the whole chunk.
+            _needs_restore = self.use_delta_actions or self.is_ee_delta
             _is_new_chunk = (
-                self.use_delta_actions
+                _needs_restore
                 and hasattr(self.model, "_queues")
                 and len(self.model._queues.get("action", [])) == 0
             )
@@ -153,7 +156,7 @@ class EpisodeEvaluator:
                 # On new chunk: collect all remaining normalized queue items BEFORE postprocessing.
                 # The model's queue stores normalized values; we must denormalize the full chunk
                 # together so delta restore operates in a consistent physical space.
-                if _is_new_chunk and self.use_delta_actions and hasattr(self.model, "_queues"):
+                if _is_new_chunk and _needs_restore and hasattr(self.model, "_queues"):
                     _rest_norm = [a.detach().clone() for a in self.model._queues.get("action", [])]
                 else:
                     _rest_norm = None
@@ -170,35 +173,34 @@ class EpisodeEvaluator:
             # Compute raw ground truth (same space as raw model output)
             if self.use_delta_actions and _obs_flat is not None:
                 raw_gt_list.append(self._compute_delta_gt(gt_action, _obs_flat, _prev_gt, exclude_indices))
+            elif self.is_ee_delta and _obs_flat is not None:
+                raw_gt_list.append(self._compute_ee_delta_gt(gt_action, _obs_flat))
             else:
                 raw_gt_list.append(gt_action)
             _prev_gt = gt_action.copy()
 
             # Chunk-level delta restore using shadow queue to avoid re-entering normalized space.
-            if self.use_delta_actions:
+            if _needs_restore:
+                _restore_fn = (
+                    (lambda chunk, ref: restore_ee_delta_chunk(chunk, ref))
+                    if self.is_ee_delta
+                    else (lambda chunk, ref: restore_delta_chunk(chunk, ref, self.action_type, exclude_indices))
+                )
                 if _is_new_chunk and self._delta_ref_state is not None:
                     if _rest_norm is not None:
-                        # Denormalize the rest of the chunk (each element in physical/delta space)
                         _rest_denorm = [_tensor_to_np(a) for a in _rest_norm]
                         _chunk = np.stack([action] + _rest_denorm) if _rest_denorm else action[np.newaxis]
                     else:
                         _chunk = action[np.newaxis]
-                    _abs = restore_delta_chunk(
-                        _chunk, self._delta_ref_state, self.action_type, exclude_indices
-                    )
-                    # Populate shadow queue with future absolute actions (skip index 0 = current)
+                    _abs = _restore_fn(_chunk, self._delta_ref_state)
                     _abs_shadow_queue = deque(_abs[1:])
                     action = _abs[0]
                 elif _abs_shadow_queue:
-                    # Non-new-chunk with queue model: pop pre-restored absolute action
                     action = _abs_shadow_queue.popleft()
                 elif not hasattr(self.model, "_queues"):
-                    # Models without chunk queue (e.g. ACT): per-step restore
                     _ref = self._delta_ref_state if self._delta_ref_state is not None else _obs_flat
                     if _ref is not None:
-                        _abs = restore_delta_chunk(
-                            action[np.newaxis], _ref, self.action_type, exclude_indices
-                        )
+                        _abs = _restore_fn(action[np.newaxis], _ref)
                         action = _abs[0]
 
             predicted_actions.append(action)
@@ -269,6 +271,39 @@ class EpisodeEvaluator:
             if i < len(delta_gt):
                 delta_gt[i] = gt_action[i]
         return delta_gt
+
+    def _compute_ee_delta_gt(
+        self,
+        gt_action: np.ndarray,
+        obs_state: np.ndarray,
+    ) -> np.ndarray:
+        """Compute EE ground-truth in delta space (mirrors EEDeltaTransform in training).
+
+        Per arm (10-dim action, 8-dim state):
+          delta_xyz   = gt_xyz  - state_xyz
+          delta_rot6d = matrix_to_rot6d(R_state.T @ R_gt)
+          gripper     = gt_gripper (absolute)
+        """
+        from anvil_shared.rotation import matrix_to_rot6d, quat_to_matrix, rot6d_to_matrix
+
+        n_arms = obs_state.shape[-1] // 8
+        delta = gt_action.copy()
+        for arm in range(n_arms):
+            s0, a0 = arm * 8, arm * 10
+            state_xyz  = obs_state[s0:s0+3]
+            state_quat = obs_state[s0+3:s0+7]
+            gt_xyz     = gt_action[a0:a0+3]
+            gt_r6d     = gt_action[a0+3:a0+9]
+
+            R_state  = quat_to_matrix(state_quat)
+            R_gt     = rot6d_to_matrix(gt_r6d)
+            R_rel    = R_state.T @ R_gt
+
+            delta[a0:a0+3]  = gt_xyz - state_xyz
+            delta[a0+3:a0+9] = matrix_to_rot6d(R_rel)
+            # delta[a0+9] = gt_action[a0+9]  (gripper: kept absolute — no change)
+        return delta
+
 
 def load_model(checkpoint: str, device: str):
     """Load model + processors from checkpoint using ModelLoader.
