@@ -43,7 +43,7 @@ def plot_episode_joints(
     ncols = min(4, n_joints)
     nrows_abs = math.ceil(n_joints / ncols)
 
-    show_delta = action_type in ("delta_obs_t", "delta_sequential") and raw_ground_truth is not None
+    show_delta = action_type in ("delta_obs_t", "delta_sequential", "ee_delta") and raw_ground_truth is not None
     nrows_delta = math.ceil(n_joints / ncols) if show_delta else 0
     total_rows = nrows_abs + nrows_delta
 
@@ -68,7 +68,7 @@ def plot_episode_joints(
         ax = axes[abs_row][col]
         ax.plot(frames, ground_truth[:, orig_idx], "b-", linewidth=1.0, label="GT")
         ax.plot(frames, predicted[:, orig_idx], "r--", linewidth=1.0, label="Pred")
-        if obs_states is not None:
+        if obs_states is not None and orig_idx < obs_states.shape[1]:
             ax.plot(frames, obs_states[:, orig_idx], color="purple",
                     linewidth=0.9, alpha=0.7, label="Obs")
         joint_mae = metrics.per_joint_mae.get(name, 0.0)
