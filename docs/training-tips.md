@@ -147,28 +147,66 @@ uv run anvil-trainer \
   --camera-filter=chest,waist
 ```
 
-### Delta actions
+### Action types
 
-For tasks where the robot needs to return to similar poses repeatedly, training in delta action space (action = residual rather than absolute target) can make learning easier. Use `--action-type` to select the mode:
+Use `--action-type` to select the action representation:
 
-| `--action-type` | Formula | When to use |
-|---|---|---|
-| `absolute` | raw target position | default; most tasks |
-| `delta_obs_t` | target − observation at chunk time | tasks with repeated returns to similar poses; equivalent to `--use-delta-actions` |
-| `delta_sequential` | target − previous action | smoother trajectories where inter-step residuals are small |
+| `--action-type` | Space | Formula | When to use |
+|---|---|---|---|
+| `absolute` | Joint | raw target joint position | default; most joint-space tasks |
+| `delta_obs_t` | Joint | target − observation at chunk time | tasks with repeated returns to similar poses |
+| `delta_sequential` | Joint | target − previous action | smoother trajectories, small inter-step residuals |
+| `ee_absolute` | EE Cartesian | raw EE pose (xyz + rot6d + gripper) | EE-space diffusion; simplest starting point |
+| `ee_delta` | EE Cartesian | SE(3) relative: Δxyz + R_state.T·R_action | EE-space; may generalise better across workspace positions |
 
 The chosen mode is persisted to `anvil_config.json` in the checkpoint and auto-read at inference — no manual inference YAML change needed.
 
 ```bash
-# delta_obs_t (shorthand)
+# Joint delta (shorthand)
 uv run anvil-trainer ... --use-delta-actions
 
-# delta_obs_t (explicit)
-uv run anvil-trainer ... --action-type=delta_obs_t
+# EE absolute
+uv run anvil-trainer ... --action-type=ee_absolute
 
-# delta_sequential
-uv run anvil-trainer ... --action-type=delta_sequential
+# EE delta
+uv run anvil-trainer ... --action-type=ee_delta
 ```
+
+### Normalization mapping and clip_sample
+
+The correct `ACTION` normalization depends on the **model family**, not just the action type:
+
+**Diffusion Policy — always use `MIN_MAX` for `ACTION`:**
+
+Diffusion's denoising loop applies `clip_sample=True` with `clip_sample_range=1.0`, which hard-clamps model outputs to `[-1, +1]` in normalized space.
+- `MIN_MAX` maps `[actual_min, actual_max] → [-1, +1]` exactly, so clip_sample never fires on any in-distribution target. ✓
+- `MEAN_STD` maps `[mean − σ, mean + σ] → [-1, +1]`, clipping ~32% of targets at ±1 standard deviation. ✗
+
+Use the diffusion default (`MIN_MAX` for `ACTION`) — do not override it:
+
+```bash
+# Correct — let diffusion use its default MIN_MAX for ACTION
+uv run anvil-trainer \
+  --policy.type=diffusion \
+  --action-type=ee_absolute     # or ee_delta, absolute, delta_obs_t
+```
+
+**ACT / VLA (pi0, pi05, smolvla) — `MEAN_STD` is fine for delta actions:**
+
+These models have no clip_sample mechanism. `MEAN_STD` is numerically cleaner for zero-centered delta distributions and does not create hard boundaries:
+
+```bash
+uv run anvil-trainer \
+  --policy.type=act \
+  --action-type=delta_obs_t \
+  --policy.normalization_mapping='{"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}'
+```
+
+### Delta stats and horizon
+
+For any delta action type (`delta_obs_t`, `delta_sequential`, `ee_delta`), `anvil-trainer` automatically computes delta stats over all k=0…horizon−1 training targets before the normalizer is built. This is critical: training targets at step k are `action[t+k] − obs[t]`, which grow with k. Stats computed from k=0 only would under-represent large-k targets, causing them to exceed the normalization range and be clipped (for diffusion) or poorly scaled (for all models).
+
+The horizon is read directly from the policy config (`action_delta_indices`) so stats always stay in sync with whatever `--policy.horizon` you set — no manual flag needed.
 
 ### Steps and batch size
 
