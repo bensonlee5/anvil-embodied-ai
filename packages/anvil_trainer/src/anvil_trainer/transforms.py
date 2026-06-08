@@ -398,7 +398,7 @@ class EEDeltaTransform(Transform):
         if action_np.shape[-1] != 10 * n_arms:
             raise DataIntegrityError(
                 f"[ee_delta] action dim {action_np.shape[-1]} != 10 * {n_arms} arms; "
-                "state suggests {n_arms} arm(s) but action disagrees."
+                f"state suggests {n_arms} arm(s) but action disagrees."
             )
 
         # Process each chunk step; action may be (10*n_arms,) or (horizon, 10*n_arms)
@@ -406,7 +406,6 @@ class EEDeltaTransform(Transform):
         if single:
             action_np = action_np[np.newaxis, :]  # (1, 10*n_arms)
 
-        import numpy as np
         delta_np = action_np.copy()
 
         for arm_idx in range(n_arms):

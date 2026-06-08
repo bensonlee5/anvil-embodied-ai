@@ -23,6 +23,21 @@ from __future__ import annotations
 import numpy as np
 
 
+def _ensure_anvil_shared() -> None:
+    """Add packages/anvil_shared/src to sys.path so rotation helpers are importable.
+
+    Called lazily inside EE functions so the import overhead is paid only when
+    those functions are actually used.
+    """
+    import os
+    import sys
+
+    _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../"))
+    _shared_src = os.path.join(_repo_root, "packages", "anvil_shared", "src")
+    if _shared_src not in sys.path:
+        sys.path.insert(0, _shared_src)
+
+
 def resolve_action_type(cfg: dict) -> str:
     """Return normalised action_type string from an anvil_config dict.
 
@@ -95,17 +110,13 @@ def restore_ee_delta_chunk(
     Args:
         chunk_np: (chunk_size, 10*n_arms) delta-space model output.
         obs_t:    (8*n_arms,) observation state at chunk generation time.
+                  If 2-D (e.g. stacked obs), the last row is used.
 
     Returns:
         (chunk_size, 10*n_arms) absolute EE actions (rot6d encoded, same layout as action).
     """
     try:
-        import sys
-        import os
-        _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../"))
-        _shared_src = os.path.join(_repo_root, "packages", "anvil_shared", "src")
-        if _shared_src not in sys.path:
-            sys.path.insert(0, _shared_src)
+        _ensure_anvil_shared()
         from anvil_shared.rotation import matrix_to_rot6d, quat_to_matrix, rot6d_to_matrix
     except ImportError as e:
         raise ImportError(
@@ -114,10 +125,14 @@ def restore_ee_delta_chunk(
         ) from e
 
     chunk_np = np.asarray(chunk_np, dtype=np.float64)
-    obs_t    = np.asarray(obs_t, dtype=np.float64)
+    obs_t    = np.asarray(obs_t,    dtype=np.float64)
 
     if chunk_np.ndim == 1:
         chunk_np = chunk_np[np.newaxis, :]
+
+    # Accept stacked multi-step obs (e.g. shape (n_obs_steps, 8*n_arms)); use last row.
+    if obs_t.ndim > 1:
+        obs_t = obs_t[-1]
 
     chunk_size = chunk_np.shape[0]
     n_arms = obs_t.shape[-1] // 8
@@ -147,20 +162,22 @@ def restore_ee_delta_chunk(
     return abs_chunk
 
 
-def rot6d_chunk_to_quat(chunk_np: np.ndarray, n_arms: int = 1) -> list[dict]:
+def rot6d_chunk_to_quat(chunk_np: np.ndarray, n_arms: int | None = None) -> list[dict]:
     """Convert a chunk of absolute rot6d EE actions to per-step per-arm pose dicts.
 
     Returns a list of chunk_size dicts, each with key ``{arm_idx}``:
       {"pos": (3,), "quat": (4,) [x,y,z,w], "gripper": float}
 
+    Args:
+        chunk_np: (chunk_size, 10*n_arms) absolute rot6d actions.
+        n_arms:   Number of arms. If None (default), derived from chunk_np shape
+                  as ``chunk_np.shape[1] // 10``. Pass an explicit value only to
+                  process a subset of arms.
+
     Useful for publishing ``CommandedEEPose`` in the inference node.
     """
     try:
-        import sys, os
-        _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../"))
-        _shared_src = os.path.join(_repo_root, "packages", "anvil_shared", "src")
-        if _shared_src not in sys.path:
-            sys.path.insert(0, _shared_src)
+        _ensure_anvil_shared()
         from anvil_shared.rotation import matrix_to_quat, rot6d_to_matrix
     except ImportError as e:
         raise ImportError("rot6d_chunk_to_quat requires anvil_shared.rotation.") from e
@@ -168,6 +185,16 @@ def rot6d_chunk_to_quat(chunk_np: np.ndarray, n_arms: int = 1) -> list[dict]:
     chunk_np = np.asarray(chunk_np, dtype=np.float64)
     if chunk_np.ndim == 1:
         chunk_np = chunk_np[np.newaxis, :]
+
+    # Derive n_arms from shape by default to avoid silent arm-drop on bimanual chunks.
+    n_arms_actual = chunk_np.shape[1] // 10
+    if n_arms is None:
+        n_arms = n_arms_actual
+    elif n_arms > n_arms_actual:
+        raise ValueError(
+            f"rot6d_chunk_to_quat: n_arms={n_arms} exceeds arms in chunk "
+            f"({n_arms_actual} from shape {chunk_np.shape})"
+        )
 
     result = []
     for k in range(chunk_np.shape[0]):

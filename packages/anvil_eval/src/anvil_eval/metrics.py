@@ -28,12 +28,14 @@ class EEMetrics:
     orientation_error_per_step: dict[str, list[float]] = field(default_factory=dict)
 
     @property
-    def position_pass(self, threshold: float = 0.02) -> bool:
-        return all(v < threshold for v in self.position_error_m.values())
+    def position_pass(self) -> bool:
+        """True when all arms have position error < 0.02 m."""
+        return all(v < 0.02 for v in self.position_error_m.values())
 
     @property
-    def orientation_pass(self, threshold: float = 0.0873) -> bool:  # 5 degrees
-        return all(v < threshold for v in self.orientation_error_rad.values())
+    def orientation_pass(self) -> bool:
+        """True when all arms have orientation error < 5° (0.0873 rad)."""
+        return all(v < 0.0873 for v in self.orientation_error_rad.values())
 
 
 @dataclass
@@ -77,21 +79,16 @@ def compute_ee_metrics(
     """
     from anvil_shared.rotation import rot6d_to_matrix
 
-    # Collect arm prefix ordering from action_names
-    seen: list[str] = []
-    for name in action_names:
-        prefix = name.rsplit("_", 1)[0] if "_" in name else name
-        if prefix not in seen:
-            seen.append(prefix)
-    # Each arm has 10 dims; detect by grouping consecutive same-prefix names
-    arm_names = [p for p in seen if action_names.count(p + "_x") == 1 or True]
-    # Simpler: n_arms = total_dims // 10
     n_arms = predicted.shape[1] // 10
-    # Derive arm labels from names (first name per 10-dim block)
+    # action_names must be either full-length (10*n_arms) or empty; partial lists
+    # can produce mixed label namespaces across episodes and corrupt aggregation.
+    names_ok = len(action_names) == 10 * n_arms
     arm_labels = []
     for arm_idx in range(n_arms):
-        a0 = arm_idx * 10
-        label = action_names[a0].rsplit("_", 1)[0] if a0 < len(action_names) else f"arm{arm_idx}"
+        if names_ok:
+            label = action_names[arm_idx * 10].rsplit("_", 1)[0]
+        else:
+            label = f"arm{arm_idx}"
         arm_labels.append(label)
 
     pos_error:     dict[str, float] = {}

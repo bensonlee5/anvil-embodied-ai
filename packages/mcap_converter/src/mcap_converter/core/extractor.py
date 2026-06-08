@@ -92,7 +92,12 @@ def message_timestamp(message) -> float:
 
 
 class DataExtractor:
-    """
+    """DEPRECATED: batch-mode extractor. Use BufferedStreamExtractor instead.
+
+    This class was not updated for the unified DataConfig schema
+    (action_topics is now arm-keyed, not topic-keyed). It remains for
+    backward compatibility only and should not be used in new code.
+
     Extract joint states and images from MCAP files
 
     Supports new single-topic architecture where all joints are in one JointState
@@ -197,9 +202,10 @@ class DataExtractor:
             for t in self.config.camera_topics
         }
 
-        # Include action command topics if configured (quest teleop mode)
-        if self.config.action_topics:
-            interested_topics.extend(self.config.action_topics.keys())
+        # Include action command topics if configured (quest teleop mode).
+        # Use action_command_topics (topic-keyed) not action_topics (arm-keyed).
+        if self.config.action_command_topics:
+            interested_topics.extend(self.config.action_command_topics.keys())
 
         # Also include legacy topics if configured
         if self.config.robot_state_topics:
@@ -212,7 +218,7 @@ class DataExtractor:
             if topic == self.config.robot_state_topic:
                 self._extract_joint_state_single_topic(message, extracted_data)
             # Handle action command topics (quest teleop mode)
-            elif self.config.action_topics and topic in self.config.action_topics:
+            elif self.config.action_command_topics and topic in self.config.action_command_topics:
                 self._extract_action_command(message, topic, extracted_data)
             # Handle legacy multi-topic architecture
             elif self.config.robot_state_topics and topic in self.config.robot_state_topics:
