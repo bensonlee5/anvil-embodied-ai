@@ -367,7 +367,7 @@ class TransformRunner:
                         R_state  = quat_to_matrix(sta[i, s0+3:s0+7])
                         R_action = rot6d_to_matrix(act[i, a0+3:a0+9])
                         d[i, a0+3:a0+9] = matrix_to_rot6d(R_state.T @ R_action)
-                    # gripper: absolute pass-through (d[:, a0+9] = act[:, a0+9] — no change)
+                    d[:, a0+9] = act[:, a0+9]  # gripper: keep absolute (not delta-ized)
                 return d[mask]
 
             all_deltas = np.concatenate(

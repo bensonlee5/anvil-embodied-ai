@@ -119,7 +119,8 @@ def compute_ee_metrics(
                 R_gt   = rot6d_to_matrix(gt_r6d[t])
                 trace  = np.clip((np.trace(R_pred.T @ R_gt) - 1.0) / 2.0, -1.0, 1.0)
                 ori_err_steps[t] = float(np.arccos(trace))
-            except Exception:
+            except ValueError:
+                # rot6d_to_matrix raises ValueError for degenerate inputs
                 ori_err_steps[t] = 0.0
         ori_error[label] = float(np.mean(ori_err_steps))
         ori_per_step[label] = ori_err_steps.tolist()

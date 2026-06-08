@@ -389,12 +389,12 @@ class EEDeltaTransform(Transform):
         state_np = state.detach().cpu().numpy().astype("float64")
         action_np = action.detach().cpu().numpy().astype("float64")
 
-        n_arms = state_np.shape[-1] // 8
-        if n_arms == 0 or state_np.shape[-1] % 8 != 0:
+        if state_np.shape[-1] % 8 != 0 or state_np.shape[-1] == 0:
             raise DataIntegrityError(
-                f"[ee_delta] observation.state dim {state_np.shape[-1]} is not a multiple of 8; "
+                f"[ee_delta] observation.state dim {state_np.shape[-1]} is not a positive multiple of 8; "
                 "expected 8 * n_arms (EE bimanual=16, left-only=8)."
             )
+        n_arms = state_np.shape[-1] // 8
         if action_np.shape[-1] != 10 * n_arms:
             raise DataIntegrityError(
                 f"[ee_delta] action dim {action_np.shape[-1]} != 10 * {n_arms} arms; "

@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 import torch
 
-from anvil_trainer.transforms import DataIntegrityError
+from anvil_trainer.transforms import DataIntegrityError, EEDeltaTransform
 from anvil_trainer.train import (
     DeltaActionTransform,
     TrainingConfig,
@@ -385,3 +385,125 @@ class TestComputeDeltaStats:
         ds = self._make_fake_dataset(np.zeros((10, 2)), np.zeros((10, 1)))
         with pytest.raises(DataIntegrityError, match="missing_joint"):
             runner._compute_delta_action_stats(ds)
+
+
+# =============================================================================
+# EEDeltaTransform tests
+# =============================================================================
+
+
+def _identity_rot6d_t():
+    """Torch tensor: rot6d for identity rotation [1,0,0, 0,1,0]."""
+    return torch.tensor([1., 0., 0., 0., 1., 0.], dtype=torch.float32)
+
+
+def _identity_quat_t():
+    """Torch tensor: identity quaternion [qx,qy,qz,qw]."""
+    return torch.tensor([0., 0., 0., 1.], dtype=torch.float32)
+
+
+def _make_ee_item(n_arms=1, horizon=None):
+    """Build a dataset item with EE state+action layout.
+
+    state: (8*n_arms,)  [xyz, quat, gripper] per arm — identity pose
+    action: (horizon, 10*n_arms) or (10*n_arms,) — identity rot6d pose
+    """
+    def arm_state():
+        return torch.cat([torch.zeros(3), _identity_quat_t(), torch.tensor([0.05])])
+
+    def arm_action():
+        return torch.cat([torch.zeros(3), _identity_rot6d_t(), torch.tensor([0.05])])
+
+    state = torch.cat([arm_state() for _ in range(n_arms)])
+    if horizon is not None:
+        action = torch.stack([torch.cat([arm_action() for _ in range(n_arms)])
+                               for _ in range(horizon)])
+    else:
+        action = torch.cat([arm_action() for _ in range(n_arms)])
+    return {"observation.state": state, "action": action}
+
+
+class TestEEDeltaTransform:
+    """Tests for EEDeltaTransform (SE(3) relative EE actions)."""
+
+    def test_is_enabled_only_for_ee_delta(self):
+        assert EEDeltaTransform().is_enabled(TrainingConfig(action_type="ee_delta"))
+        assert not EEDeltaTransform().is_enabled(TrainingConfig(action_type="ee_absolute"))
+        assert not EEDeltaTransform().is_enabled(TrainingConfig(action_type="absolute"))
+        assert not EEDeltaTransform().is_enabled(TrainingConfig(action_type="delta_obs_t"))
+
+    def test_noop_when_keys_missing(self):
+        cfg = TrainingConfig(action_type="ee_delta")
+        t = EEDeltaTransform()
+        item_no_action = {"observation.state": torch.zeros(8)}
+        item_no_state  = {"action": torch.zeros(10)}
+        assert t.apply(item_no_action, cfg) == item_no_action
+        assert t.apply(item_no_state,  cfg) == item_no_state
+
+    def test_identity_pose_gives_zero_delta_xyz_and_identity_rot6d(self):
+        """Identity pose → delta_xyz=0, delta_rot6d=identity [1,0,0,0,1,0]."""
+        cfg = TrainingConfig(action_type="ee_delta")
+        item = _make_ee_item(n_arms=1, horizon=None)
+        result = EEDeltaTransform().apply(item, cfg)
+        delta = result["action"].numpy()
+        # xyz delta should be 0
+        np.testing.assert_allclose(delta[:3], 0.0, atol=1e-6)
+        # rot6d delta should be identity (R_state.T @ R_action = I → rot6d(I) = [1,0,0,0,1,0])
+        np.testing.assert_allclose(delta[3:9], [1., 0., 0., 0., 1., 0.], atol=1e-6)
+        # gripper kept absolute
+        assert delta[9] == pytest.approx(0.05, abs=1e-6)
+
+    def test_gripper_is_absolute_not_delta(self):
+        """Gripper must pass through unchanged, not subtracted from state gripper."""
+        cfg = TrainingConfig(action_type="ee_delta")
+        item = _make_ee_item(n_arms=1)
+        item["action"][9] = 0.03   # action gripper
+        item["observation.state"][7] = 0.01  # state gripper (different)
+        result = EEDeltaTransform().apply(item, cfg)
+        # delta gripper == action gripper (absolute), NOT 0.03 - 0.01
+        assert result["action"][9].item() == pytest.approx(0.03, abs=1e-6)
+
+    def test_handles_chunk_2d_action(self):
+        """2-D (horizon, 10*n_arms) action is correctly processed per step."""
+        cfg = TrainingConfig(action_type="ee_delta")
+        item = _make_ee_item(n_arms=1, horizon=4)
+        result = EEDeltaTransform().apply(item, cfg)
+        assert result["action"].shape == (4, 10)
+        # All steps with identity pose → same delta
+        for k in range(4):
+            np.testing.assert_allclose(result["action"][k, :3].numpy(), 0.0, atol=1e-6)
+            np.testing.assert_allclose(
+                result["action"][k, 3:9].numpy(), [1., 0., 0., 0., 1., 0.], atol=1e-6
+            )
+
+    def test_bimanual_both_arms_processed(self):
+        """Both arms in a bimanual item get their deltas computed."""
+        cfg = TrainingConfig(action_type="ee_delta")
+        item = _make_ee_item(n_arms=2)
+        result = EEDeltaTransform().apply(item, cfg)
+        delta = result["action"].numpy()
+        assert delta.shape == (20,)
+        # arm 0 (indices 0-9)
+        np.testing.assert_allclose(delta[0:3],  0.0, atol=1e-6)
+        np.testing.assert_allclose(delta[3:9],  [1., 0., 0., 0., 1., 0.], atol=1e-6)
+        # arm 1 (indices 10-19)
+        np.testing.assert_allclose(delta[10:13], 0.0, atol=1e-6)
+        np.testing.assert_allclose(delta[13:19], [1., 0., 0., 0., 1., 0.], atol=1e-6)
+
+    def test_uses_last_obs_step_for_multi_step_state(self):
+        """When state is (n_obs_steps, 8), use state[-1] as reference."""
+        cfg = TrainingConfig(action_type="ee_delta")
+        item = _make_ee_item(n_arms=1)
+        # Stack state as 2-step obs; last step is identity, first has non-zero xyz
+        wrong_state = torch.cat([torch.tensor([9., 9., 9.]), _identity_quat_t(), torch.tensor([0.05])])
+        right_state = item["observation.state"].clone()
+        item["observation.state"] = torch.stack([wrong_state, right_state])  # (2, 8)
+        result = EEDeltaTransform().apply(item, cfg)
+        # Should use right_state (last), so delta_xyz = 0
+        np.testing.assert_allclose(result["action"][:3].numpy(), 0.0, atol=1e-6)
+
+    def test_shape_mismatch_raises_data_integrity_error(self):
+        cfg = TrainingConfig(action_type="ee_delta")
+        item = {"observation.state": torch.zeros(9), "action": torch.zeros(10)}
+        with pytest.raises(DataIntegrityError, match="multiple of 8"):
+            EEDeltaTransform().apply(item, cfg)
