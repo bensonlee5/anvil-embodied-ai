@@ -29,6 +29,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from anvil_shared.provenance import git_provenance
 from anvil_shared.splits import compute_split_episodes, load_split_info, save_split_info
 
 from anvil_trainer.config import TrainingConfig
@@ -489,6 +490,7 @@ class TransformRunner:
             # Backward compat: old inference nodes read use_delta_actions
             "use_delta_actions": self.config.use_delta_actions,
             "delta_sequential": self.config.delta_sequential,
+            **git_provenance(),
         }
         if self.config.delta_exclude_joints:
             anvil_cfg_base["delta_exclude_joints"] = self.config.delta_exclude_joints

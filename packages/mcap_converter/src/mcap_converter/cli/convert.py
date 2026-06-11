@@ -29,6 +29,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
+from anvil_shared.provenance import git_provenance
 from mcap_converter import (
     ConfigLoader,
     DataConfig,
@@ -312,6 +313,15 @@ def convert_session(
                 default_flow_style=False,
             )
         log(f"Saved conversion config: [dim]{conversion_config_dest}[/dim]")
+
+    # Append git provenance to conversion_config.yaml (skip when resuming — already present)
+    if resume_from == 0:
+        provenance = git_provenance()
+        if provenance:
+            import yaml
+            with open(conversion_config_dest, "a") as _f:
+                _f.write("\n# --- provenance ---\n")
+                yaml.dump(provenance, _f, default_flow_style=False)
 
     # Process each MCAP file as one episode
     total_frames = 0
