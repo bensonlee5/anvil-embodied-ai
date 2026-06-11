@@ -6,9 +6,7 @@ metadata before training starts — see ``patch_metadata``.
 """
 from __future__ import annotations
 
-import json
 import logging
-import numpy as np
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -20,7 +18,18 @@ log = logging.getLogger(__name__)
 
 
 class DataIntegrityError(ValueError):
-    """Raised when dataset features violate expected contracts (e.g. action joint missing from obs state)."""
+    """Raised when dataset features violate expected contracts."""
+
+
+def _parse_names(info: dict, feat_key: str) -> list[str]:
+    """Extract feature names from info.json for the given feature key.
+
+    Handles both flat string lists and grouped dicts with ``motor_names``.
+    """
+    names = info.get("features", {}).get(feat_key, {}).get("names", [])
+    if names and isinstance(names[0], dict):
+        names = [n for group in names for n in group.get("motor_names", [])]
+    return names
 
 
 # =============================================================================
@@ -153,209 +162,24 @@ class TaskOverrideTransform(Transform):
 
 
 # =============================================================================
-# DeltaActionTransform
+# EERelTransform — SE(3) relative EE actions
 # =============================================================================
 
 
-class DeltaActionTransform(Transform):
-    """Convert absolute actions to delta actions (action - observation.state).
+class EERelTransform(Transform):
+    """Convert absolute EE actions to SE(3)-relative representation.
 
-    For each joint i: delta[i] = target_position[i] - current_position[i]
-    where current_position comes from observation.state (most recent step).
+    For each arm slice (10 dims: [xyz(3), rot6d(6), gripper(1)]) relative to
+    the current observation state (8 dims per arm: [xyz(3), quat_xyzw(4), gripper(1)]):
 
-    Joints listed in config.delta_exclude_joints are kept in absolute space —
-    useful for grippers whose targets are better expressed as absolute positions.
+        delta_xyz   = action_xyz - state_xyz
+        delta_rot6d = matrices_to_rot6d(R_state.T @ R_action)   SO(3) relative rotation
+        gripper     = action_gripper  (kept absolute)
 
-    Joint names are resolved from meta/info.json when dataset_root is set.
-    Every action joint (not in delta_exclude_joints) must have a matching name
-    in observation.state — if not, a DataIntegrityError is raised at first use.
-    When info.json is unavailable, shapes must match exactly.
+    The number of arms is auto-detected from observation.state dim: n_arms = dim // 8.
 
-    The configuration is persisted to anvil_config.json in each checkpoint so
-    the inference node can apply the correct inverse transform automatically.
-    """
-
-    def __init__(self):
-        self._mappings_built: bool = False
-        self._exclude_indices: list[int] = []
-        # action_idx → state_idx; None means fall back to positional (no info.json)
-        self._action_to_state_map: list[int] | None = None
-        self._first_apply: bool = True
-
-    @property
-    def name(self) -> str:
-        return "delta_actions"
-
-    def is_enabled(self, config: TrainingConfig) -> bool:
-        # EE action types use a separate EEDeltaTransform — never route them here.
-        return config.action_type in ("delta_obs_t", "delta_sequential")
-
-    @staticmethod
-    def _parse_names(info: dict, feat_key: str) -> list[str]:
-        names = info.get("features", {}).get(feat_key, {}).get("names", [])
-        if names and isinstance(names[0], dict):
-            names = [n for group in names for n in group.get("motor_names", [])]
-        return names
-
-    def _build_mappings(self, config: TrainingConfig) -> None:
-        """Load info.json once, validate action↔state names, build index maps."""
-        if self._mappings_built:
-            return
-        self._mappings_built = True
-
-        if not config.dataset_root:
-            return  # no info.json — positional fallback; shape validated in apply()
-
-        info_path = Path(config.dataset_root) / "meta" / "info.json"
-        if not info_path.exists():
-            log.warning("[delta_actions] %s not found — using positional mapping", info_path)
-            return
-
-        with open(info_path) as f:
-            info = json.load(f)
-
-        action_names = self._parse_names(info, "action")
-        state_names = self._parse_names(info, "observation.state")
-
-        # Resolve exclude indices from action names
-        for joint in (config.delta_exclude_joints or []):
-            if joint in action_names:
-                idx = action_names.index(joint)
-                self._exclude_indices.append(idx)
-                log.info("[delta_actions] Excluding joint '%s' (index %d) from delta", joint, idx)
-            else:
-                log.warning("[delta_actions] Joint '%s' not found in action names %s", joint, action_names)
-
-        if not action_names or not state_names:
-            return  # names missing from info.json — positional fallback
-
-        # Validate: every non-excluded action joint must exist in observation.state
-        exclude_names = set(config.delta_exclude_joints or [])
-        missing = [n for n in action_names if n not in exclude_names and n not in state_names]
-        if missing:
-            raise DataIntegrityError(
-                "[delta_actions] Data integrity error: the following action joints have no "
-                f"matching entry in observation.state:\n"
-                f"  Missing:                 {missing}\n"
-                f"  action names:            {action_names}\n"
-                f"  observation.state names: {state_names}\n"
-                f"  delta_exclude_joints:    {sorted(exclude_names)}\n"
-                "Fix: add the joints to --delta-exclude-joints or correct the dataset."
-            )
-
-        # Build action_idx → state_idx mapping (excluded joints map to -1)
-        state_index = {n: i for i, n in enumerate(state_names)}
-        self._action_to_state_map = [
-            state_index.get(n, -1) for n in action_names
-        ]
-
-    def _resolve_exclude_indices(self, config: TrainingConfig) -> list[int]:
-        """Return cached exclude indices (used by TransformRunner stats computation)."""
-        self._build_mappings(config)
-        return self._exclude_indices
-
-    def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
-        if "action" not in item or "observation.state" not in item:
-            return item
-
-        self._build_mappings(config)
-
-        action = item["action"]
-        state = item["observation.state"]
-
-        # When state has multiple observation steps (e.g. [n_obs_steps, n_joints]),
-        # use only the most recent step as the reference for the delta.
-        if state.dim() > 1:
-            state = state[-1]
-
-        original_action = action.clone()
-        action_last = action.shape[-1]
-        state_last = state.shape[-1]
-
-        is_sequential = getattr(config, "delta_sequential", False)
-
-        if self._action_to_state_map is not None:
-            # Name-based mapping: each action joint → its counterpart in state by name
-            delta = original_action.clone()
-            exclude_set = set(self._exclude_indices)
-
-            if is_sequential and action.dim() == 2:
-                # delta_sequential:
-                #   k=0: action[0] - state
-                #   k>0: action[k] - action[k-1]
-                for a_idx, s_idx in enumerate(self._action_to_state_map):
-                    if a_idx not in exclude_set:
-                        delta[0, a_idx] = action[0, a_idx] - state[s_idx]
-                for k in range(1, action.shape[0]):
-                    for a_idx in range(action.shape[1]):
-                        if a_idx not in exclude_set:
-                            delta[k, a_idx] = action[k, a_idx] - action[k - 1, a_idx]
-            else:
-                # delta_obs_t: all k relative to obs (existing broadcast logic)
-                for a_idx, s_idx in enumerate(self._action_to_state_map):
-                    if a_idx not in exclude_set:
-                        delta[..., a_idx] = action[..., a_idx] - state[..., s_idx]
-
-            item["action"] = delta
-        elif action_last == state_last:
-            # Positional fallback (info.json unavailable) — shapes match, safe to subtract
-            if is_sequential and action.dim() == 2:
-                delta = original_action.clone()
-                exclude_set = set(self._exclude_indices)
-                for a_idx in range(action.shape[1]):
-                    if a_idx not in exclude_set:
-                        delta[0, a_idx] = action[0, a_idx] - state[a_idx]
-                for k in range(1, action.shape[0]):
-                    for a_idx in range(action.shape[1]):
-                        if a_idx not in exclude_set:
-                            delta[k, a_idx] = action[k, a_idx] - action[k - 1, a_idx]
-                item["action"] = delta
-            else:
-                item["action"] = action - state
-                for idx in self._exclude_indices:
-                    item["action"][..., idx] = original_action[..., idx]
-        else:
-            raise DataIntegrityError(
-                f"[delta_actions] action has {action_last} joints but observation.state has "
-                f"{state_last} joints and no info.json is available for name-based mapping. "
-                "Provide dataset_root so joint names can be resolved, or fix the dataset."
-            )
-
-        if self._first_apply:
-            mode = "sequential" if is_sequential else "obs_t"
-            log.info(
-                "[delta_actions] active (mode=%s) — %d joints total: %d get delta, %d kept absolute %s",
-                mode,
-                action_last,
-                action_last - len(self._exclude_indices),
-                len(self._exclude_indices),
-                config.delta_exclude_joints or [],
-            )
-            self._first_apply = False
-
-        return item
-
-
-# =============================================================================
-# EEDeltaTransform — SE(3) relative EE actions
-# =============================================================================
-
-
-class EEDeltaTransform(Transform):
-    """Convert absolute EE actions to relative (SE(3) delta) representation.
-
-    For each arm slice (10 dims: [xyz(3), rot6d(6), gripper(1)]):
-      delta_xyz   = action_xyz - state_xyz                          (3,)
-      delta_rot6d = matrix_to_rot6d(R_state.T @ R_action)          (6,) SO(3) relative rotation
-      gripper     = action_gripper (kept absolute, like delta_exclude_joints) (1,)
-
-    The state is taken from observation.state, which uses an 8-dim per-arm layout:
-      [xyz(3), quat_xyzw(4), gripper(1)]
-
-    So for n_arms arms: action (10*n_arms,) and state (8*n_arms,) — different dims,
-    must be sliced by arm, not naively subtracted.
-
-    The number of arms is auto-detected from observation.state dim:  n_arms = dim // 8.
+    The shared ``ee_transform.ee_rel_forward`` function performs the actual computation
+    (vectorised over the horizon dimension, no per-frame Python loop).
     """
 
     def __init__(self):
@@ -363,24 +187,20 @@ class EEDeltaTransform(Transform):
 
     @property
     def name(self) -> str:
-        return "ee_delta"
+        return "ee_rel"
 
     def is_enabled(self, config: TrainingConfig) -> bool:
-        return config.is_ee_delta
+        return config.is_ee_rel
 
     def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
         import torch
-        from anvil_shared.rotation import (
-            matrix_to_rot6d,
-            quat_to_matrix,
-            rot6d_to_matrix,
-        )
+        from anvil_shared.ee_transform import ee_rel_forward, n_arms_from_dims
 
         if "action" not in item or "observation.state" not in item:
             return item
 
-        action = item["action"]  # (..., 10*n_arms)
-        state = item["observation.state"]  # (..., 8*n_arms)
+        action = item["action"]             # (..., 10*n_arms)
+        state = item["observation.state"]   # (..., 8*n_arms)
 
         # Multi-step obs: use most recent step as the delta reference
         if state.dim() > 1:
@@ -389,57 +209,27 @@ class EEDeltaTransform(Transform):
         state_np = state.detach().cpu().numpy().astype("float64")
         action_np = action.detach().cpu().numpy().astype("float64")
 
-        if state_np.shape[-1] % 8 != 0 or state_np.shape[-1] == 0:
-            raise DataIntegrityError(
-                f"[ee_delta] observation.state dim {state_np.shape[-1]} is not a positive multiple of 8; "
-                "expected 8 * n_arms (EE bimanual=16, left-only=8)."
-            )
-        n_arms = state_np.shape[-1] // 8
-        if action_np.shape[-1] != 10 * n_arms:
-            raise DataIntegrityError(
-                f"[ee_delta] action dim {action_np.shape[-1]} != 10 * {n_arms} arms; "
-                f"state suggests {n_arms} arm(s) but action disagrees."
-            )
+        # Validate dimensions (raises DataIntegrityError on mismatch)
+        try:
+            n_arms = n_arms_from_dims(state_np.shape[-1], action_np.shape[-1])
+        except ValueError as exc:
+            raise DataIntegrityError(str(exc)) from exc
 
-        # Process each chunk step; action may be (10*n_arms,) or (horizon, 10*n_arms)
+        # Flatten single-step to (1, D) so ee_rel_forward always sees 2-D input
         single = action_np.ndim == 1
         if single:
-            action_np = action_np[np.newaxis, :]  # (1, 10*n_arms)
+            action_np = action_np[None, :]
 
-        delta_np = action_np.copy()
-
-        for arm_idx in range(n_arms):
-            s0 = arm_idx * 8   # state slice start
-            a0 = arm_idx * 10  # action slice start
-
-            state_xyz  = state_np[s0:s0+3]
-            state_quat = state_np[s0+3:s0+7]  # [qx,qy,qz,qw]
-            R_state    = quat_to_matrix(state_quat)  # (3,3)
-
-            for k in range(action_np.shape[0]):
-                act_xyz   = action_np[k, a0:a0+3]
-                act_r6d   = action_np[k, a0+3:a0+9]
-                act_grip  = action_np[k, a0+9]
-
-                # xyz delta
-                delta_np[k, a0:a0+3] = act_xyz - state_xyz
-
-                # SO(3) relative rotation: R_rel = R_state.T @ R_action
-                R_action = rot6d_to_matrix(act_r6d)
-                R_rel    = R_state.T @ R_action
-                delta_np[k, a0+3:a0+9] = matrix_to_rot6d(R_rel)
-
-                # gripper: keep absolute
-                delta_np[k, a0+9] = act_grip
+        delta_np = ee_rel_forward(action_np, state_np)
 
         if single:
-            delta_np = delta_np[0]  # back to (10*n_arms,)
+            delta_np = delta_np[0]
 
         item["action"] = torch.tensor(delta_np, dtype=action.dtype)
 
         if self._first_apply:
             log.info(
-                "[ee_delta] active — %d arm(s), action (10×n)→delta(xyz)+SO(3)+gripper",
+                "[ee_rel] active — %d arm(s), action (abs rot6d) → SE(3) relative",
                 n_arms,
             )
             self._first_apply = False

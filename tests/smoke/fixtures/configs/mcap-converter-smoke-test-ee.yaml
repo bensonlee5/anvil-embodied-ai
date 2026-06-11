@@ -1,0 +1,22 @@
+# Smoke test config — EE Cartesian, SINGLE ARM (right only).
+# action_topics: {} is mandatory — action is derived from the same /ee_pose_right
+# topic used for observation, re-encoded as rot6d.
+
+data_space: "ee"
+
+observation_topics:
+  right: "/ee_pose_right"
+
+action_topics: {}
+
+camera_topics:
+  - "/cam_waist/image_raw/compressed"
+  - "/cam_wrist_r/image_raw/compressed"
+  - "/cam_chest/image_raw/compressed"
+
+camera_topic_mapping:
+  "/cam_waist/image_raw/compressed":  "waist"
+  "/cam_wrist_r/image_raw/compressed": "wrist_r"
+  "/cam_chest/image_raw/compressed":  "chest"
+
+image_resolution: [640, 480]

@@ -75,6 +75,27 @@ def _compute_aggregate(metrics_list: list[EpisodeMetrics]) -> dict[str, Any]:
         agg["per_joint_mae"][jn] = sum(m.per_joint_mae.get(jn, 0) for m in metrics_list) / n
         agg["per_joint_mse"][jn] = sum(m.per_joint_mse.get(jn, 0) for m in metrics_list) / n
 
+    # EE Cartesian metrics (only when present)
+    ee_eps = [m for m in metrics_list if m.ee is not None]
+    if ee_eps:
+        arm_names = list(ee_eps[0].ee.position_error_m.keys())
+        pos_thresh, ori_thresh_deg = 0.02, 5.0
+        ee_agg: dict[str, Any] = {}
+        for arm in arm_names:
+            pos_vals  = [m.ee.position_error_m.get(arm, float("nan")) for m in ee_eps]
+            ori_vals  = [m.ee.orientation_error_rad.get(arm, float("nan")) for m in ee_eps]
+            grip_vals = [m.ee.gripper_error_m.get(arm, float("nan")) for m in ee_eps]
+            ee_agg[arm] = {
+                "position_error_m_mean":        float(np.nanmean(pos_vals)),
+                "position_error_m_std":         float(np.nanstd(pos_vals)),
+                "orientation_error_deg_mean":   float(np.degrees(np.nanmean(ori_vals))),
+                "orientation_error_deg_std":    float(np.degrees(np.nanstd(ori_vals))),
+                "gripper_error_m_mean":         float(np.nanmean(grip_vals)),
+                "pass_position":  bool(np.nanmean(pos_vals) < pos_thresh),
+                "pass_orientation": bool(np.degrees(np.nanmean(ori_vals)) < ori_thresh_deg),
+            }
+        agg["ee"] = ee_agg
+
     return agg
 
 

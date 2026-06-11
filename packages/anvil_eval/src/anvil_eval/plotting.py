@@ -25,15 +25,15 @@ def plot_episode_joints(
     output_path: Path,
     raw_output: np.ndarray | None = None,
     obs_states: np.ndarray | None = None,
-    action_type: str = "absolute",
+    action_type: str = "joint_abs",
     raw_ground_truth: np.ndarray | None = None,
 ) -> None:
     """Plot predicted vs ground-truth joint trajectories for one episode.
 
     Layout (per joint column):
     - Top block (absolute scale): GT, Pred, obs_state
-    - Bottom block (delta scale, when action_type is delta and raw_ground_truth provided):
-      raw model output and ΔGT taken directly from raw_ground_truth (pre-computed by evaluator)
+    - Bottom block (relative scale, when action_type is ee_rel and raw_ground_truth provided):
+      raw model output and ΔGT in relative EE space (pre-computed by evaluator)
     """
     import matplotlib.pyplot as plt
 
@@ -43,7 +43,7 @@ def plot_episode_joints(
     ncols = min(4, n_joints)
     nrows_abs = math.ceil(n_joints / ncols)
 
-    show_delta = action_type in ("delta_obs_t", "delta_sequential", "ee_delta") and raw_ground_truth is not None
+    show_delta = action_type == "ee_rel" and raw_ground_truth is not None
     nrows_delta = math.ceil(n_joints / ncols) if show_delta else 0
     total_rows = nrows_abs + nrows_delta
 
@@ -117,7 +117,7 @@ def plot_monitor_signals(
     joint_names: list[str],
     title: str,
     output_path: Path,
-    action_type: str = "absolute",
+    action_type: str = "joint_abs",
     ncols: int = 4,
     dpi: int = 120,
 ) -> None:
@@ -125,33 +125,19 @@ def plot_monitor_signals(
 
     Layout (per joint column):
     - Top block: obs_state, control_cmd
-    - Bottom block (when action_type is delta): raw model output, delta_cmd
-
-    delta_cmd is computed from cmd based on action_type:
-    - delta_obs_t:      delta_cmd[t] = cmd[t] - obs[t]
-    - delta_sequential: delta_cmd[0] = cmd[0] - obs[0]; delta_cmd[t] = cmd[t] - cmd[t-1]
+    - Bottom block (when action_type is ee_rel): raw model output in relative EE space
     """
     import matplotlib.pyplot as plt
 
     n_joints = obs.shape[1]
     frames = np.arange(obs.shape[0])
 
-    show_delta = action_type in ("delta_obs_t", "delta_sequential") and raw_output is not None
+    # Bottom block shown for ee_rel: raw model output in relative EE space
+    show_delta = action_type == "ee_rel" and raw_output is not None
     ncols = min(ncols, n_joints)
     nrows_abs = math.ceil(n_joints / ncols)
     nrows_delta = math.ceil(n_joints / ncols) if show_delta else 0
     total_rows = nrows_abs + nrows_delta
-
-    # Compute delta_cmd in model-output space based on action_type
-    delta_cmd: np.ndarray | None = None
-    if show_delta:
-        d = min(raw_output.shape[1], cmd.shape[1], obs.shape[1])
-        if action_type == "delta_sequential":
-            delta_cmd = np.zeros((obs.shape[0], d), dtype=np.float32)
-            delta_cmd[0] = cmd[0, :d] - obs[0, :d]
-            delta_cmd[1:] = np.diff(cmd[:, :d], axis=0)
-        else:  # delta_obs_t
-            delta_cmd = cmd[:, :d] - obs[:, :d]
 
     def _joint_label(j: int) -> str:
         return joint_names[j] if j < len(joint_names) else f"joint[{j}]"
@@ -182,13 +168,10 @@ def plot_monitor_signals(
             ax_d = axes[delta_row][col]
             if raw_output is not None and j < raw_output.shape[1]:
                 ax_d.plot(frames, raw_output[:, j], color="darkorange", linewidth=0.8,
-                          linestyle=":", label="raw output (delta)")
-            if delta_cmd is not None and j < delta_cmd.shape[1]:
-                ax_d.plot(frames, delta_cmd[:, j], color="crimson", linewidth=0.8,
-                          linestyle="--", label="delta cmd")
-            ax_d.set_title(f"{_joint_label(j)} [delta]", fontsize=8)
+                          linestyle=":", label="raw output (rel)")
+            ax_d.set_title(f"{_joint_label(j)} [rel]", fontsize=8)
             ax_d.set_xlabel("step", fontsize=7)
-            ax_d.set_ylabel("delta [rad]", fontsize=7)
+            ax_d.set_ylabel("rel", fontsize=7)
             ax_d.tick_params(labelsize=6)
             if j == 0:
                 ax_d.legend(fontsize=6, loc="upper right")
@@ -225,6 +208,10 @@ def plot_summary_box_plot(
     n_joints = len(ordered_joint_names)
 
     if n_splits == 0 or n_joints == 0:
+        return
+
+    # EE mode: per_joint_mae is empty (generic metrics suppressed); nothing to plot
+    if all_metrics and not all_metrics[0].per_joint_mae:
         return
 
     fig, ax = plt.subplots(figsize=(max(10, n_joints * 1.5), 6))

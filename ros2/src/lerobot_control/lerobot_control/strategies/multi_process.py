@@ -51,6 +51,12 @@ class MultiProcessStrategy:
         self._joint_efforts: dict[str, float] | None = None
         self._joint_timestamp: float | None = None
 
+        # EE state: ordered flat list per arm (x,y,z,qx,qy,qz,qw,gripper), set in EE mode
+        self._ee_state_by_arm: dict[str, list[float]] | None = None
+        self._is_ee: bool = False
+        # Ordered arm list for building observation.state in EE mode
+        self._ee_arm_order: list[str] = []
+
         # Metrics tracker (set via setup)
         self._metrics = None
 
@@ -86,8 +92,18 @@ class MultiProcessStrategy:
         # Start image worker processes
         self._start_workers()
 
-        # Subscribe to joint states (lightweight, runs in main process)
-        self._setup_joint_subscription(joint_state_topic)
+        # EE mode: subscribe to CommandedEEPose topics; otherwise subscribe to JointState
+        arms_config: dict = config.get("arms", {})
+        ee_arms = {
+            name: ac for name, ac in arms_config.items() if "ee_command_topic" in ac
+        }
+        if ee_arms:
+            self._is_ee = True
+            self._ee_arm_order = list(ee_arms.keys())
+            self._ee_state_by_arm = {}
+            self._setup_ee_subscriptions(ee_arms)
+        else:
+            self._setup_joint_subscription(joint_state_topic)
 
         self._node.get_logger().info(
             f"MultiProcessStrategy initialized with {len(self._worker_processes)} image workers"
@@ -148,6 +164,40 @@ class MultiProcessStrategy:
         )
         self._node.get_logger().info(f"Subscribed to: {joint_state_topic}")
 
+    def _setup_ee_subscriptions(self, ee_arms: dict) -> None:
+        """Subscribe to CommandedEEPose topics for each EE arm (EE mode)."""
+        from anvil_msgs.msg import CommandedEEPose
+
+        qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
+        for arm_name, arm_config in ee_arms.items():
+            obs_topic = arm_config.get("ee_obs_topic", f"/ee_pose_{arm_name}")
+
+            def _make_cb(name: str):
+                def _cb(msg: CommandedEEPose) -> None:
+                    if self._metrics:
+                        self._metrics.record_joint_state()
+                    p = msg.pose.position
+                    o = msg.pose.orientation
+                    self._ee_state_by_arm[name] = [
+                        p.x, p.y, p.z,
+                        o.x, o.y, o.z, o.w,
+                        msg.gripper,
+                    ]
+                return _cb
+
+            self._node.create_subscription(
+                CommandedEEPose,
+                obs_topic,
+                _make_cb(arm_name),
+                qos,
+                callback_group=self._callback_group,
+            )
+            self._node.get_logger().info(f"Subscribed to EE obs: {obs_topic} (arm={arm_name})")
+
     def _joint_callback(self, msg: JointState) -> None:
         """Process joint state (lightweight, no GIL issue)."""
         # Record metrics
@@ -178,9 +228,14 @@ class MultiProcessStrategy:
             self._last_incomplete_reason = f"waiting for cameras: {missing}"
             return None
 
-        if self._joint_positions is None:
-            self._last_incomplete_reason = "waiting for joint state"
-            return None
+        if self._is_ee:
+            if not self._ee_state_by_arm:
+                self._last_incomplete_reason = "waiting for EE pose"
+                return None
+        else:
+            if self._joint_positions is None:
+                self._last_incomplete_reason = "waiting for joint state"
+                return None
 
         # Build observation dict
         observation = self._build_observation(images)
@@ -190,7 +245,7 @@ class MultiProcessStrategy:
         self,
         images: dict[str, tuple],
     ) -> dict[str, torch.Tensor]:
-        """Build observation dict from shared memory images and joint state."""
+        """Build observation dict from shared memory images and state."""
         observation = {}
 
         # Add images (already decompressed by workers)
@@ -200,6 +255,16 @@ class MultiProcessStrategy:
             # Rearrange to (C, H, W) and add batch dimension
             image_tensor = image_tensor.permute(2, 0, 1).unsqueeze(0)
             observation[f"observation.images.{camera_name}"] = image_tensor
+
+        if self._is_ee:
+            # EE state: concatenate per-arm [x,y,z,qx,qy,qz,qw,gripper] in arm order
+            state_flat: list[float] = []
+            for arm_name in self._ee_arm_order:
+                state_flat.extend(self._ee_state_by_arm.get(arm_name, [0.0] * 8))
+            observation["observation.state"] = torch.tensor(
+                state_flat, dtype=torch.float32
+            ).unsqueeze(0)
+            return observation
 
         # Build state observations (position / velocity / effort) based on config
         if self._joint_positions:

@@ -36,9 +36,7 @@
 #   EVAL_SYNTHESIZE_COMMANDS     — "true" to republish joint_states as GT commands (auto-set)
 #   EVAL_SYNTHESIZE_COMMAND_TOPIC — topic to publish synthesized commands (auto-set)
 #   EVAL_SYNTHESIZE_ARM_JOINT_NAMES — ROS2 array of joint names to extract (auto-set)
-#   EVAL_USE_DELTA_ACTIONS — "true" when model was trained with delta actions (auto-set from anvil_config.json)
-#   EVAL_ACTION_TYPE       — delta mode: "delta_obs_t" or "delta_sequential" (auto-set from anvil_config.json)
-#   EVAL_DELTA_EXCLUDE_JOINTS — ROS2 array of joints kept absolute in delta mode (auto-set)
+#   EVAL_ACTION_TYPE       — action type: "joint_abs", "ee_abs", or "ee_rel" (auto-set from anvil_config.json)
 #   EVAL_DATASET_FPS       — training dataset fps (auto-set from meta/info.json, default 30); used to
 #                            downsample 60fps MCAP GT to match training data rate
 #   MONITOR_ENABLE        — "true" to publish /monitor/* topics for inference_monitor_node
@@ -161,10 +159,8 @@ services:
         -p gt_topics:=${EVAL_GT_TOPICS:-["/follower_l_forward_position_controller/commands","/follower_r_forward_position_controller/commands"]}
         -p pred_topics:=${EVAL_PRED_TOPICS:-["/eval/follower_l_forward_position_controller/commands","/eval/follower_r_forward_position_controller/commands"]}
         -p arm_names:=${EVAL_ARM_NAMES:-["left","right"]}
-        -p use_delta_actions:=${EVAL_USE_DELTA_ACTIONS:-false}
-        -p action_type:=${EVAL_ACTION_TYPE:-delta_obs_t}
+        -p action_type:=${EVAL_ACTION_TYPE:-joint_abs}
         -p dataset_fps:=${EVAL_DATASET_FPS:-30}
-        -p delta_exclude_joints:=${EVAL_DELTA_EXCLUDE_JOINTS:-[]}
 
 networks:
   ros2_eval:

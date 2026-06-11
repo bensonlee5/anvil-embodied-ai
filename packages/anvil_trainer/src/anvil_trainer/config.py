@@ -51,6 +51,41 @@ def _parse_resume_path(raw: str) -> tuple[str, str]:
     return raw, "last"
 
 
+def _parse_names(info: dict, feat_key: str) -> list[str]:
+    """Extract feature names from info.json for the given feature key.
+
+    Handles both flat string lists and grouped dicts with ``motor_names``.
+    """
+    names = info.get("features", {}).get(feat_key, {}).get("names", [])
+    if names and isinstance(names[0], dict):
+        names = [n for group in names for n in group.get("motor_names", [])]
+    return names
+
+
+_VALID_ACTION_TYPES = {"joint_abs", "ee_abs", "ee_rel"}
+
+# Suffix components that appear in EE datasets but not joint datasets.
+# Feature names may be bare ("qx") or arm-prefixed ("right_qx", "left_r0").
+_EE_STATE_MARKER_SUFFIXES = {"qx", "qy", "qz", "qw"}
+_EE_ACTION_MARKER_SUFFIXES = {"r0", "r1", "r2", "r3", "r4", "r5"}
+
+
+def _has_ee_markers(names: list[str], markers: set[str]) -> bool:
+    """Return True if any name is or ends with an EE marker suffix.
+
+    Handles both bare names (``qx``) and arm-prefixed names (``right_qx``).
+    """
+    for name in names:
+        # bare match: name == "qx"
+        if name in markers:
+            return True
+        # suffix match: name == "right_qx" → last segment after "_" is "qx"
+        _, _, suffix = name.rpartition("_")
+        if suffix in markers:
+            return True
+    return False
+
+
 @dataclass
 class TrainingConfig:
     """
@@ -61,7 +96,7 @@ class TrainingConfig:
             Use the key suffix after "observation." — supports both image and non-image keys:
             e.g. ["images.chest", "images.wrist_l", "velocity", "effort"]
         task_override: Override task string for all samples (for SmolVLA)
-        use_delta_actions: Convert actions to delta (action - observation.state)
+        action_type: One of "joint_abs", "ee_abs", "ee_rel".
         dataset_root: Path to local dataset (for validation)
         note: Free-text note attached to this run (stored in anvil_config.json and wandb)
         note_append: Text to append to the existing note when resuming a run
@@ -70,14 +105,10 @@ class TrainingConfig:
     exclude_observation: list[str] | None = None
     task_override: str | None = None
     # action_type values:
-    #   "absolute"          — joint positions, no delta (default)
-    #   "delta_obs_t"       — joint delta: delta[k] = action[t+k] - obs[t]
-    #   "delta_sequential"  — joint delta: k=0 uses obs; k>0 uses prev action
-    #   "ee_absolute"       — EE Cartesian rot6d, no delta transform
-    #   "ee_delta"          — EE Cartesian delta: xyz subtract + SO(3) relative rotation
-    action_type: str = "absolute"
-    delta_exclude_joints: list[str] | None = None  # Joint names to keep in absolute space when using delta actions
-    delta_stats_n_steps: int = 1  # Look-ahead steps for delta stats (1 = single-frame, N = k=0..N-1 multi-step)
+    #   "joint_abs" — joint absolute positions (default)
+    #   "ee_abs"    — EE Cartesian rot6d, absolute
+    #   "ee_rel"    — EE Cartesian rot6d, SE(3) relative (delta xyz + relative rotation)
+    action_type: str = "joint_abs"
     dataset_root: str | None = None
     output_dir: str | None = None
     resume_job_path: str | None = None   # Job root dir (before checkpoints/)
@@ -90,20 +121,12 @@ class TrainingConfig:
     note_append: str | None = None  # Append to existing note during --resume
 
     @property
-    def use_delta_actions(self) -> bool:
-        return self.action_type in ("delta_obs_t", "delta_sequential")
-
-    @property
-    def delta_sequential(self) -> bool:
-        return self.action_type == "delta_sequential"
-
-    @property
     def is_ee(self) -> bool:
-        return self.action_type in ("ee_absolute", "ee_delta")
+        return self.action_type in ("ee_abs", "ee_rel")
 
     @property
-    def is_ee_delta(self) -> bool:
-        return self.action_type == "ee_delta"
+    def is_ee_rel(self) -> bool:
+        return self.action_type == "ee_rel"
 
     @classmethod
     def from_env_and_args(cls) -> TrainingConfig:
@@ -115,39 +138,33 @@ class TrainingConfig:
             LEROBOT_TASK_OVERRIDE: Task string override
 
         Command line args:
-            --action-type=absolute|delta_obs_t|delta_sequential
-            --use-delta-actions: Legacy flag, maps to --action-type=delta_obs_t
+            --action-type=joint_abs|ee_abs|ee_rel
         """
         excl_str = _pop_argv("exclude-observation") or os.environ.get("LEROBOT_EXCLUDE_OBSERVATION", "")
         exclude_observation = [k.strip() for k in excl_str.split(",") if k.strip()] or None
 
         task_override = _pop_argv("task-description") or os.environ.get("LEROBOT_TASK_OVERRIDE", "") or None
 
-        action_type = _pop_argv("action-type") or "absolute"
-        # Backward compat: --use-delta-actions maps to delta_obs_t
+        action_type = _pop_argv("action-type") or "joint_abs"
+
+        # Legacy flag: --use-delta-actions is no longer supported.
         if "--use-delta-actions" in sys.argv:
-            if action_type == "absolute":
-                action_type = "delta_obs_t"
             sys.argv.remove("--use-delta-actions")
-        _VALID_ACTION_TYPES = {"absolute", "delta_obs_t", "delta_sequential", "ee_absolute", "ee_delta"}
+            raise ValueError(
+                "--use-delta-actions is no longer supported. "
+                "Use --action-type=joint_abs (joint absolute, the default) instead. "
+                "For EE space training: --action-type=ee_abs or --action-type=ee_rel."
+            )
+
+        # Strip removed flags silently (they may appear in old scripts)
+        for _legacy in ("delta-exclude-joints", "delta-stats-n-steps"):
+            _pop_argv(_legacy)
+
         if action_type not in _VALID_ACTION_TYPES:
             raise ValueError(
                 f"--action-type={action_type!r} is not valid. "
                 f"Choose from: {sorted(_VALID_ACTION_TYPES)}"
             )
-
-        _dej_raw = _pop_argv("delta-exclude-joints")
-        delta_exclude_joints: list[str] | None = (
-            [j.strip() for j in _dej_raw.split(",") if j.strip()] if _dej_raw else None
-        )
-
-        _dsns_raw = _pop_argv("delta-stats-n-steps") or "1"
-        try:
-            delta_stats_n_steps = int(_dsns_raw)
-        except ValueError:
-            raise ValueError(
-                f"--delta-stats-n-steps={_dsns_raw!r} is not a valid integer."
-            ) from None
 
         _sr_raw = _pop_argv("split-ratio")
         if _sr_raw:
@@ -228,8 +245,11 @@ class TrainingConfig:
 
             output_dir = resume_job_path
 
-            # Auto-inherit action_type and delta_exclude_joints from checkpoint if not set on CLI
-            if action_type == "absolute":
+            # Auto-inherit action_type from checkpoint if not set on CLI.
+            # Resume mechanism is preserved as-is; only the joint-delta legacy
+            # mappings are removed here (use_delta_actions → delta_obs_t and
+            # delta_exclude_joints inheritance no longer exist).
+            if action_type == "joint_abs":
                 ckpt_anvil = (
                     Path(resume_job_path) / "checkpoints" / resume_checkpoint
                     / "pretrained_model" / "anvil_config.json"
@@ -237,19 +257,12 @@ class TrainingConfig:
                 if ckpt_anvil.exists():
                     try:
                         prev = json.loads(ckpt_anvil.read_text())
-                        _inherited = prev.get("action_type", "absolute")
-                        if _inherited == "absolute" and prev.get("use_delta_actions", False):
-                            _inherited = "delta_obs_t"
-                        action_type = _inherited
-                        if action_type != "absolute":
+                        _inherited = prev.get("action_type", "joint_abs")
+                        if _inherited in _VALID_ACTION_TYPES and _inherited != "joint_abs":
+                            action_type = _inherited
                             log.info(
-                                "[anvil_trainer] --resume: inherited action_type=%s from checkpoint", action_type,
-                            )
-                        if delta_exclude_joints is None and prev.get("delta_exclude_joints"):
-                            delta_exclude_joints = prev["delta_exclude_joints"]
-                            log.info(
-                                "[anvil_trainer] --resume: inherited delta_exclude_joints=%s from checkpoint",
-                                delta_exclude_joints,
+                                "[anvil_trainer] --resume: inherited action_type=%s from checkpoint",
+                                action_type,
                             )
                     except Exception:
                         pass
@@ -344,8 +357,6 @@ class TrainingConfig:
             exclude_observation=exclude_observation,
             task_override=task_override,
             action_type=action_type,
-            delta_exclude_joints=delta_exclude_joints,
-            delta_stats_n_steps=delta_stats_n_steps,
             dataset_root=dataset_root,
             output_dir=output_dir,
             resume_job_path=resume_job_path,
@@ -365,14 +376,11 @@ class TrainingConfig:
         with open(yaml_path) as f:
             data = yaml.safe_load(f)
 
-        _action_type = data.get("action_type", "absolute")
-        if _action_type == "absolute" and data.get("use_delta_actions", False):
-            _action_type = "delta_obs_t"
+        _action_type = data.get("action_type", "joint_abs")
         return cls(
             exclude_observation=data.get("exclude_observation"),
             task_override=data.get("task_override"),
             action_type=_action_type,
-            delta_exclude_joints=data.get("delta_exclude_joints"),
             dataset_root=data.get("dataset_root"),
             split_ratio=data.get("split_ratio", [8.0, 1.0, 1.0]),
             backbone=data.get("backbone", "resnet18"),
@@ -396,6 +404,78 @@ class TrainingConfig:
             full_key = f"observation.{suffix}"
             if full_key not in available:
                 log.warning("[anvil_trainer] --exclude-observation key not in dataset: %s", full_key)
+
+    def validate_action_space(self) -> None:
+        """Validate that the dataset's action space matches the chosen action_type.
+
+        Reads ``meta/info.json`` from ``dataset_root`` (skipped when unset or
+        info.json missing).  Raises ``DataIntegrityError`` on mismatch with a
+        message suggesting the correct type.
+        """
+        if not self.dataset_root:
+            return
+
+        info_path = Path(self.dataset_root) / "meta" / "info.json"
+        if not info_path.exists():
+            log.warning("[anvil_trainer] Cannot validate action_type: %s not found", info_path)
+            return
+
+        with open(info_path) as f:
+            info = json.load(f)
+
+        from anvil_trainer.transforms import DataIntegrityError
+
+        state_names = _parse_names(info, "observation.state")
+        action_names = _parse_names(info, "action")
+
+        # Determine whether this is an EE dataset from feature names.
+        has_ee_state  = _has_ee_markers(state_names,  _EE_STATE_MARKER_SUFFIXES)
+        has_ee_action = _has_ee_markers(action_names, _EE_ACTION_MARKER_SUFFIXES)
+        is_ee_dataset = has_ee_state and has_ee_action
+
+        if self.action_type in ("ee_abs", "ee_rel"):
+            if not is_ee_dataset:
+                raise DataIntegrityError(
+                    f"[validate_action_space] --action-type={self.action_type!r} requires an EE-space "
+                    f"dataset, but the dataset at {self.dataset_root!r} appears to be joint-space.\n"
+                    f"  observation.state names: {state_names}\n"
+                    f"  action names:            {action_names}\n"
+                    f"  Expected EE markers in state: {sorted(_EE_STATE_MARKER_SUFFIXES)}\n"
+                    f"  Expected EE markers in action: {sorted(_EE_ACTION_MARKER_SUFFIXES)}\n"
+                    "Hint: use --action-type=joint_abs for joint-space datasets."
+                )
+            # Also validate EE dimensions
+            feat = info.get("features", {})
+            state_shape = feat.get("observation.state", {}).get("shape", [])
+            action_shape = feat.get("action", {}).get("shape", [])
+            state_dim = state_shape[0] if state_shape else len(state_names)
+            action_dim = action_shape[0] if action_shape else len(action_names)
+            if state_dim % 8 != 0 or state_dim == 0:
+                raise DataIntegrityError(
+                    f"[validate_action_space] EE dataset has unexpected observation.state dim {state_dim} "
+                    "(expected positive multiple of 8)."
+                )
+            n_arms = state_dim // 8
+            if action_dim != 10 * n_arms:
+                raise DataIntegrityError(
+                    f"[validate_action_space] EE dataset action dim {action_dim} != "
+                    f"10 * {n_arms} arms = {10 * n_arms}."
+                )
+            log.info(
+                "[anvil_trainer] Validated action_type=%s with EE dataset (%d arm(s))",
+                self.action_type, n_arms,
+            )
+
+        elif self.action_type == "joint_abs":
+            if is_ee_dataset:
+                raise DataIntegrityError(
+                    f"[validate_action_space] --action-type=joint_abs but the dataset at "
+                    f"{self.dataset_root!r} appears to be EE-space.\n"
+                    f"  observation.state names: {state_names}\n"
+                    f"  action names:            {action_names}\n"
+                    "Hint: use --action-type=ee_abs or --action-type=ee_rel for EE datasets."
+                )
+            log.info("[anvil_trainer] Validated action_type=joint_abs with joint-space dataset.")
 
 
 # =============================================================================

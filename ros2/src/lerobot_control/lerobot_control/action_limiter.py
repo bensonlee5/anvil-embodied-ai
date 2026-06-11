@@ -23,7 +23,6 @@ class ActionLimiter:
         min_delta_threshold: float | None = None,
         model_joint_order: list[str] | None = None,
         controller_joint_order: list[str] | None = None,
-        delta_exclude_joints: list[str] | None = None,
         logger=None,
     ):
         """
@@ -37,7 +36,6 @@ class ActionLimiter:
                 friction when model deltas are too small to move the joint.
             model_joint_order: Order the ML model outputs actions
             controller_joint_order: Order the ROS2 controller expects
-            delta_exclude_joints: Joint names kept in absolute space (not delta-restored)
             logger: Optional ROS2 logger
         """
         self.max_delta = max_delta
@@ -51,15 +49,6 @@ class ActionLimiter:
 
         # Build reorder indices
         self.reorder_indices = self._build_reorder_indices()
-
-        # Resolve excluded joint names → indices in controller order (post-reorder space).
-        # Fall back to model order when controller order is not configured.
-        ref_order = self.controller_joint_order or self.model_joint_order
-        self._delta_exclude_indices: set[int] = {
-            ref_order.index(name)
-            for name in (delta_exclude_joints or [])
-            if name in ref_order
-        }
 
     def reset(self) -> None:
         """Reset deadband state (call between episodes or on model reload)."""
@@ -181,10 +170,7 @@ class ActionLimiter:
         # Deadband: suppress commands whose accumulated pending delta hasn't reached
         # min_delta_threshold yet. Each step's per-step increment is added to _pending_delta.
         # When a joint's pending crosses the threshold, publish last_published + pending
-        # and reset that joint's accumulator. This works for all action types:
-        #   delta_sequential: per-step increments are the individual delta_k values (cumsum)
-        #   delta_obs_t:      per-step increments are intra-chunk trajectory steps
-        #   absolute:         per-step increments are step-to-step target changes
+        # and reset that joint's accumulator.
         if self.min_delta_threshold is not None:
             if self._last_published is None:
                 self._last_published = action.copy()

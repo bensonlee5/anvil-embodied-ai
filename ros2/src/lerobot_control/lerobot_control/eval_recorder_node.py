@@ -89,9 +89,7 @@ class EvalRecorderNode(Node):
         self.declare_parameter("inference_drain_sec", 1.5)
         self.declare_parameter("silence_timeout_sec", 1.0)
         self.declare_parameter("silence_poll_sec", 0.05)
-        self.declare_parameter("use_delta_actions", False)
-        self.declare_parameter("action_type", "delta_obs_t")
-        self.declare_parameter("delta_exclude_joints", [""])
+        self.declare_parameter("action_type", "joint_abs")
         self.declare_parameter("dataset_fps", 30.0)
 
         gt_topics = self.get_parameter("gt_topics").get_parameter_value().string_array_value
@@ -114,29 +112,22 @@ class EvalRecorderNode(Node):
         silence_poll_sec = (
             self.get_parameter("silence_poll_sec").get_parameter_value().double_value
         )
-        self._use_delta_actions: bool = (
-            self.get_parameter("use_delta_actions").get_parameter_value().bool_value
-        )
         self._action_type: str = (
             self.get_parameter("action_type").get_parameter_value().string_value
         )
-        try:
-            _delta_exclude_raw: list[str] = list(
-                self.get_parameter("delta_exclude_joints").get_parameter_value().string_array_value
-            )
-        except rclpy.exceptions.ParameterUninitializedException:
-            # [] passed via CLI has no type info → ROS2 treats it as PARAMETER_NOT_SET
-            _delta_exclude_raw = []
-        self._delta_exclude_joints: list[str] = [j for j in _delta_exclude_raw if j]
+        self._is_ee: bool = self._action_type in ("ee_abs", "ee_rel")
         self._dataset_fps: float = (
             self.get_parameter("dataset_fps").get_parameter_value().double_value
         )
 
-        # Build full joint name list: [left_joint1, ..., right_joint1, ...]
-        self._joint_names: list[str] = []
-        for arm in self._arm_names:
-            for j in per_arm_joints:
-                self._joint_names.append(f"{arm}_{j}")
+        # Build full joint/dim name list
+        if self._is_ee:
+            # EE mode: 8 dims per arm [x,y,z,qx,qy,qz,qw,gripper]
+            _EE_DIM_NAMES = ["x", "y", "z", "qx", "qy", "qz", "qw", "gripper"]
+            self._joint_names = [f"{arm}_{d}" for arm in self._arm_names for d in _EE_DIM_NAMES]
+        else:
+            # Joint mode: per-arm joint names from controller_joint_order
+            self._joint_names = [f"{arm}_{j}" for arm in self._arm_names for j in per_arm_joints]
 
         self._output_dir.mkdir(parents=True, exist_ok=True)
         plots_dir = self._output_dir / "plots"
@@ -174,25 +165,48 @@ class EvalRecorderNode(Node):
             Bool, "/eval/eval_complete", self._on_eval_complete, _EVAL_CTRL_QOS
         )
 
-        # GT action subscribers
-        for i, topic in enumerate(gt_topics):
-            arm = self._arm_names[i] if i < len(self._arm_names) else f"arm_{i}"
-            self.create_subscription(
-                Float64MultiArray,
-                topic,
-                lambda msg, a=arm: self._on_gt_action(a, msg),
-                10,
-            )
+        # GT and predicted subscribers — message type depends on action_type
+        if self._is_ee:
+            # EE mode: subscribe to CommandedEEPose topics
+            try:
+                from anvil_msgs.msg import CommandedEEPose as _EEMsg
+            except ImportError as exc:
+                self.get_logger().error(
+                    "[eval-recorder] anvil_msgs not found — EE mode requires colcon build "
+                    "with anvil_msgs package. %s", exc
+                )
+                raise
 
-        # Predicted action subscribers
-        for i, topic in enumerate(pred_topics):
-            arm = self._arm_names[i] if i < len(self._arm_names) else f"arm_{i}"
-            self.create_subscription(
-                Float64MultiArray,
-                topic,
-                lambda msg, a=arm: self._on_pred_action(a, msg),
-                10,
-            )
+            for i, topic in enumerate(gt_topics):
+                arm = self._arm_names[i] if i < len(self._arm_names) else f"arm_{i}"
+                self.create_subscription(
+                    _EEMsg, topic,
+                    lambda msg, a=arm: self._on_gt_ee(a, msg), 10,
+                )
+            for i, topic in enumerate(pred_topics):
+                arm = self._arm_names[i] if i < len(self._arm_names) else f"arm_{i}"
+                self.create_subscription(
+                    _EEMsg, topic,
+                    lambda msg, a=arm: self._on_pred_ee(a, msg), 10,
+                )
+        else:
+            # Joint mode: subscribe to Float64MultiArray topics
+            for i, topic in enumerate(gt_topics):
+                arm = self._arm_names[i] if i < len(self._arm_names) else f"arm_{i}"
+                self.create_subscription(
+                    Float64MultiArray,
+                    topic,
+                    lambda msg, a=arm: self._on_gt_action(a, msg),
+                    10,
+                )
+            for i, topic in enumerate(pred_topics):
+                arm = self._arm_names[i] if i < len(self._arm_names) else f"arm_{i}"
+                self.create_subscription(
+                    Float64MultiArray,
+                    topic,
+                    lambda msg, a=arm: self._on_pred_action(a, msg),
+                    10,
+                )
 
         # Raw model output subscriber (optional — published by inference_monitor_node)
         self.create_subscription(
@@ -265,6 +279,47 @@ class EvalRecorderNode(Node):
                 f"[eval-recorder] First GT sample on arm '{arm}' (dim={len(msg.data)})"
             )
 
+    # ── EE callbacks (CommandedEEPose) ─────────────────────────────────────
+
+    @staticmethod
+    def _ee_pose_to_flat(msg) -> list[float]:
+        """Convert CommandedEEPose → [x, y, z, qx, qy, qz, qw, gripper]."""
+        p = msg.pose.position
+        o = msg.pose.orientation
+        return [p.x, p.y, p.z, o.x, o.y, o.z, o.w, float(msg.gripper)]
+
+    def _on_gt_ee(self, arm: str, msg) -> None:
+        first_seen = False
+        with self._lock:
+            if arm not in self._gt_seen:
+                self._gt_seen.add(arm)
+                first_seen = True
+            if not self._recording:
+                return
+            ts = self.get_clock().now().nanoseconds
+            self._gt_buf[arm].append((ts, self._ee_pose_to_flat(msg)))
+            self._last_gt_time = time.monotonic()
+        if first_seen:
+            self.get_logger().info(
+                f"[eval-recorder] First EE GT sample on arm '{arm}'"
+            )
+
+    def _on_pred_ee(self, arm: str, msg) -> None:
+        first_seen = False
+        with self._lock:
+            if arm not in self._pred_seen:
+                self._pred_seen.add(arm)
+                first_seen = True
+            if not self._recording:
+                return
+            ts = self.get_clock().now().nanoseconds
+            self._pred_buf[arm].append((ts, self._ee_pose_to_flat(msg)))
+            self._last_pred_time = time.monotonic()
+        if first_seen:
+            self.get_logger().info(
+                f"[eval-recorder] First EE pred sample on arm '{arm}'"
+            )
+
     def _on_pred_action(self, arm: str, msg: Float64MultiArray) -> None:
         first_seen = False
         with self._lock:
@@ -282,6 +337,11 @@ class EvalRecorderNode(Node):
             )
 
     def _on_raw_output(self, msg: Float64MultiArray) -> None:
+        # EE mode: inference_monitor publishes 10-dim rot6d raw_output, but the
+        # recorder's pred source is commanded_ee (absolute quaternion).  The two
+        # layouts are incompatible, so discard raw_output entirely in EE mode.
+        if self._is_ee:
+            return
         with self._lock:
             if not self._recording:
                 return
@@ -361,9 +421,18 @@ class EvalRecorderNode(Node):
                     predicted, ground_truth, ep_idx, split_label, raw_output=raw_output
                 )
                 self._all_metrics.append(metrics)
-                self.get_logger().info(
-                    f"[eval-recorder] Ep {ep_idx} MAE={metrics.mae:.4f}"
-                )
+                if self._is_ee and metrics.ee:
+                    arm = list(metrics.ee.position_error_m.keys())[0]
+                    self.get_logger().info(
+                        f"[eval-recorder] Ep {ep_idx} EE "
+                        f"pos={metrics.ee.position_error_m[arm]:.4f} m  "
+                        f"ori={np.degrees(metrics.ee.orientation_error_rad[arm]):.2f}°  "
+                        f"grip={metrics.ee.gripper_error_m[arm]:.4f} m"
+                    )
+                else:
+                    self.get_logger().info(
+                        f"[eval-recorder] Ep {ep_idx} MAE={metrics.mae:.4f}"
+                    )
         except Exception as e:
             import traceback
             self.get_logger().error(f"[eval-recorder] Ep {ep_idx} finalization error: {e}")
@@ -511,44 +580,6 @@ class EvalRecorderNode(Node):
 
         return np.array(aligned, dtype=np.float32)
 
-    def _compute_raw_ground_truth(
-        self,
-        predicted: np.ndarray,
-        ground_truth: np.ndarray,
-        raw_output: np.ndarray,
-    ) -> np.ndarray:
-        """Compute GT in model-output (delta) space from aligned arrays.
-
-        delta_obs_t:
-            obs_state = predicted - raw_output  (since predicted = raw_output + obs_state)
-            raw_gt    = ground_truth - obs_state = ground_truth - predicted + raw_output
-
-        delta_sequential:
-            raw_gt[t] = ground_truth[t] - ground_truth[t-1]
-            raw_gt[0] uses obs_state approximation: predicted[0] - raw_output[0]
-
-        For delta_exclude_joints: raw_gt[i] = ground_truth[i] (already absolute).
-        """
-        d = raw_output.shape[1]
-        joint_names_d = self._joint_names[:d]
-        exclude_set = {
-            joint_names_d.index(j) for j in self._delta_exclude_joints
-            if j in joint_names_d
-        }
-
-        raw_gt = ground_truth[:, :d].copy()
-        if self._action_type == "delta_sequential":
-            for i in range(d):
-                if i not in exclude_set:
-                    obs_state_0 = predicted[0, i] - raw_output[0, i]
-                    prev = np.concatenate([[obs_state_0], ground_truth[:-1, i]])
-                    raw_gt[:, i] = ground_truth[:, i] - prev
-        else:
-            for i in range(d):
-                if i not in exclude_set:
-                    raw_gt[:, i] = ground_truth[:, i] - predicted[:, i] + raw_output[:, i]
-        return raw_gt
-
     def _compute_and_save(
         self,
         predicted: np.ndarray,
@@ -557,50 +588,44 @@ class EvalRecorderNode(Node):
         split_label: str,
         raw_output: np.ndarray | None = None,
     ):
-        """Compute metrics and optionally save plot using anvil_eval."""
+        """Compute metrics and optionally save plot using anvil_eval.
+
+        Predicted and ground_truth are both in absolute space (joint positions or EE poses).
+        raw_output from /monitor/raw_output is passed only for joint_abs mode (it's already
+        discarded in EE mode via _on_raw_output).  For EE mode the pred source is
+        commanded_ee (absolute quaternion), recorded by _on_pred_ee.
+        """
         _ensure_anvil_eval_importable()
         from anvil_eval.metrics import compute_episode_metrics
 
         joint_names = self._joint_names[: predicted.shape[1]]
 
-        raw_gt: np.ndarray | None = None
+        # For joint_abs, prefer raw_output (finer pre-postprocess signal) when available.
+        # For EE, raw_output is always None (filtered by _on_raw_output).
         raw_trimmed: np.ndarray | None = None
-
-        # Evaluate in model-output space so delta and absolute models are compared fairly.
         if raw_output is not None and raw_output.shape[0] > 0:
-            t = predicted.shape[0]
-            d = predicted.shape[1]
+            t, d = predicted.shape
             raw_trimmed = raw_output[:t, :d]
-            if self._use_delta_actions:
-                raw_gt = self._compute_raw_ground_truth(predicted, ground_truth, raw_trimmed)
-            else:
-                raw_gt = ground_truth[:, :d]
-            pred_for_metrics = raw_trimmed
-            gt_for_metrics = raw_gt
-        else:
-            pred_for_metrics = predicted
-            gt_for_metrics = ground_truth
+
+        pred_for_metrics = raw_trimmed if raw_trimmed is not None else predicted
+        gt_for_metrics = ground_truth[:, : pred_for_metrics.shape[1]]
 
         metrics = compute_episode_metrics(
-            pred_for_metrics, gt_for_metrics, joint_names, ep_idx, split_label
+            pred_for_metrics, gt_for_metrics, joint_names[: pred_for_metrics.shape[1]],
+            ep_idx, split_label,
+            action_type=self._action_type,
         )
 
         # Plotting is optional — skip gracefully if matplotlib is unavailable
         try:
             from anvil_eval.plotting import plot_episode_joints
             plot_path = self._plots_dir / f"episode_{ep_idx:04d}_{split_label}.png"
-            obs_states_for_plot = (predicted - raw_trimmed) if raw_trimmed is not None else None
-            raw_gt_for_plot = (
-                raw_gt
-                if (raw_trimmed is not None and self._use_delta_actions)
-                else None
-            )
             plot_episode_joints(
                 predicted, ground_truth, joint_names, metrics, plot_path,
                 raw_output=raw_trimmed,
-                obs_states=obs_states_for_plot,
+                obs_states=None,
                 action_type=self._action_type,
-                raw_ground_truth=raw_gt_for_plot,
+                raw_ground_truth=None,
             )
         except ImportError:
             self.get_logger().warning(
@@ -628,11 +653,30 @@ class EvalRecorderNode(Node):
         )
 
         # Print summary to terminal
-        all_mae = [m.mae for m in self._all_metrics]
-        self.get_logger().info(
-            f"[eval-recorder] Summary: {len(self._all_metrics)} episodes, "
-            f"mean MAE={np.mean(all_mae):.4f} ± {np.std(all_mae):.4f}"
-        )
+        if self._is_ee:
+            from anvil_eval.metrics import compute_summary_metrics
+            summary = compute_summary_metrics(self._all_metrics)
+            for split_name, split_data in summary.items():
+                ee_data = split_data.get("ee", {})
+                for arm, arm_data in ee_data.items():
+                    pos_pass = arm_data.get("pass_position", False)
+                    ori_pass = arm_data.get("pass_orientation", False)
+                    pos_m    = arm_data.get("position_error_m_mean", float("nan"))
+                    ori_deg  = arm_data.get("orientation_error_deg_mean", float("nan"))
+                    grip_m   = arm_data.get("gripper_error_m_mean", float("nan"))
+                    status   = "PASS" if (pos_pass and ori_pass) else "FAIL"
+                    self.get_logger().info(
+                        f"[eval-recorder][EE {split_name}] {status} | arm={arm} | "
+                        f"pos={pos_m:.4f} m ({'✓' if pos_pass else '✗'}) | "
+                        f"ori={ori_deg:.2f}° ({'✓' if ori_pass else '✗'}) | "
+                        f"grip={grip_m:.4f} m"
+                    )
+        else:
+            all_mae = [m.mae for m in self._all_metrics]
+            self.get_logger().info(
+                f"[eval-recorder] Summary: {len(self._all_metrics)} episodes, "
+                f"mean MAE={np.mean(all_mae):.4f} ± {np.std(all_mae):.4f}"
+            )
         self.get_logger().info(f"[eval-recorder] Results saved to: {self._output_dir}")
 
 

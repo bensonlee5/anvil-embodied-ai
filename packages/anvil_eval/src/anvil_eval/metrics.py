@@ -58,7 +58,7 @@ class EpisodeMetrics:
     pred_smoothness_std: float
     gt_smoothness_mean: float
     gt_smoothness_std: float
-    # EE Cartesian metrics — populated only for ee_absolute / ee_delta action types
+    # EE Cartesian metrics — populated only for ee_abs / ee_rel action types
     ee: Optional[EEMetrics] = None
 
 
@@ -69,24 +69,24 @@ def compute_ee_metrics(
 ) -> EEMetrics:
     """Compute EE Cartesian metrics: position (m), orientation geodesic (rad), gripper (m).
 
-    Expects action layout per arm: [x, y, z, r0..r5, gripper] (10 dims).
+    Expects action layout per arm: [x, y, z, qx, qy, qz, qw, gripper] (8 dims, quaternion).
     Arms are inferred from action_names by the prefix before the first underscore.
 
     Args:
-        predicted:     (T, 10*n_arms) predicted actions
-        ground_truth:  (T, 10*n_arms) ground-truth actions
-        action_names:  list of 10*n_arms feature names, e.g. ["left_x", ..., "right_gripper"]
+        predicted:     (T, 8*n_arms) predicted actions in absolute quaternion layout
+        ground_truth:  (T, 8*n_arms) ground-truth actions in absolute quaternion layout
+        action_names:  list of 8*n_arms feature names, e.g. ["right_x", ..., "right_gripper"]
     """
-    from anvil_shared.rotation import rot6d_to_matrix
+    from anvil_shared.rotation import quats_to_matrices
 
-    n_arms = predicted.shape[1] // 10
-    # action_names must be either full-length (10*n_arms) or empty; partial lists
+    n_arms = predicted.shape[1] // 8
+    # action_names must be either full-length (8*n_arms) or empty; partial lists
     # can produce mixed label namespaces across episodes and corrupt aggregation.
-    names_ok = len(action_names) == 10 * n_arms
+    names_ok = len(action_names) == 8 * n_arms
     arm_labels = []
     for arm_idx in range(n_arms):
         if names_ok:
-            label = action_names[arm_idx * 10].rsplit("_", 1)[0]
+            label = action_names[arm_idx * 8].rsplit("_", 1)[0]
         else:
             label = f"arm{arm_idx}"
         arm_labels.append(label)
@@ -98,30 +98,27 @@ def compute_ee_metrics(
     ori_per_step:  dict[str, list[float]] = {}
 
     for arm_idx, label in enumerate(arm_labels):
-        a0 = arm_idx * 10
-        pred_xyz  = predicted[:, a0:a0+3]
+        a0 = arm_idx * 8
+        pred_xyz  = predicted[:, a0:a0+3]      # (T, 3)
         gt_xyz    = ground_truth[:, a0:a0+3]
-        pred_r6d  = predicted[:, a0+3:a0+9]
-        gt_r6d    = ground_truth[:, a0+3:a0+9]
-        pred_grip = predicted[:, a0+9]
-        gt_grip   = ground_truth[:, a0+9]
+        pred_quat = predicted[:, a0+3:a0+7]    # (T, 4) [qx, qy, qz, qw]
+        gt_quat   = ground_truth[:, a0+3:a0+7]
+        pred_grip = predicted[:, a0+7]
+        gt_grip   = ground_truth[:, a0+7]
 
         # Position error: per-frame Euclidean distance
         pos_err_steps = np.linalg.norm(pred_xyz - gt_xyz, axis=1)  # (T,)
         pos_error[label] = float(np.mean(pos_err_steps))
         pos_per_step[label] = pos_err_steps.tolist()
 
-        # Orientation error: geodesic angle arccos((trace(R_pred.T @ R_gt) - 1) / 2)
-        ori_err_steps = np.zeros(predicted.shape[0])
-        for t in range(predicted.shape[0]):
-            try:
-                R_pred = rot6d_to_matrix(pred_r6d[t])
-                R_gt   = rot6d_to_matrix(gt_r6d[t])
-                trace  = np.clip((np.trace(R_pred.T @ R_gt) - 1.0) / 2.0, -1.0, 1.0)
-                ori_err_steps[t] = float(np.arccos(trace))
-            except ValueError:
-                # rot6d_to_matrix raises ValueError for degenerate inputs
-                ori_err_steps[t] = 0.0
+        # Orientation error: geodesic angle via vectorised rotation matrices
+        # quats_to_matrices accepts (T, 4) → (T, 3, 3); normalises internally
+        R_pred = quats_to_matrices(pred_quat)                     # (T, 3, 3)
+        R_gt   = quats_to_matrices(gt_quat)                       # (T, 3, 3)
+        # rel[t] = R_pred[t].T @ R_gt[t]  →  batched via matmul on leading dim
+        rel    = R_pred.transpose(0, 2, 1) @ R_gt                 # (T, 3, 3)
+        trace  = rel[:, 0, 0] + rel[:, 1, 1] + rel[:, 2, 2]      # (T,)
+        ori_err_steps = np.arccos(np.clip((trace - 1.0) / 2.0, -1.0, 1.0))  # (T,)
         ori_error[label] = float(np.mean(ori_err_steps))
         ori_per_step[label] = ori_err_steps.tolist()
 
@@ -142,7 +139,7 @@ def compute_episode_metrics(
     joint_names: list[str],
     episode_idx: int,
     split_label: str,
-    action_type: str = "absolute",
+    action_type: str = "joint_abs",
 ) -> EpisodeMetrics:
     """Compute all metrics for a single episode.
 
@@ -193,9 +190,29 @@ def compute_episode_metrics(
     else:
         pred_smooth_mean = pred_smooth_std = gt_smooth_mean = gt_smooth_std = 0.0
 
-    ee_metrics: Optional[EEMetrics] = None
-    if action_type in ("ee_absolute", "ee_delta") and predicted.shape[1] % 10 == 0:
+    # EE mode: generic metrics (mse/mae/…) mix metres + quaternion + gripper and are
+    # meaningless.  Return NaN/empty generics and populate ee only.
+    if action_type in ("ee_abs", "ee_rel") and predicted.shape[1] % 8 == 0:
         ee_metrics = compute_ee_metrics(predicted, ground_truth, joint_names)
+        return EpisodeMetrics(
+            episode_idx=episode_idx,
+            split_label=split_label,
+            num_frames=predicted.shape[0],
+            mse=float("nan"),
+            mae=float("nan"),
+            rmse=float("nan"),
+            max_abs_error=float("nan"),
+            max_abs_error_joint="",
+            per_joint_mse={},
+            per_joint_mae={},
+            per_joint_rmse={},
+            cosine_similarity=float("nan"),
+            pred_smoothness_mean=float("nan"),
+            pred_smoothness_std=float("nan"),
+            gt_smoothness_mean=float("nan"),
+            gt_smoothness_std=float("nan"),
+            ee=ee_metrics,
+        )
 
     return EpisodeMetrics(
         episode_idx=episode_idx,
@@ -214,7 +231,7 @@ def compute_episode_metrics(
         pred_smoothness_std=pred_smooth_std,
         gt_smoothness_mean=gt_smooth_mean,
         gt_smoothness_std=gt_smooth_std,
-        ee=ee_metrics,
+        ee=None,
     )
 
 

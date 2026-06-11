@@ -7,11 +7,8 @@ Usage:
 
 The script auto-detects action_type and joint_names from metadata comment lines
 written by inference_monitor_node at the top of the CSV:
-    # action_type: delta_obs_t
+    # action_type: joint_abs
     # joint_names: right_joint1,right_joint2,...
-
-Old CSVs with `# use_delta_actions: true` are handled in backward-compatible mode
-(treated as delta_obs_t).
 """
 
 import argparse
@@ -24,7 +21,7 @@ import numpy as np
 
 def _parse_metadata(csv_path: Path) -> tuple[str, list[str]]:
     """Read leading comment lines to extract action_type and joint_names."""
-    action_type = "absolute"
+    action_type = "joint_abs"
     joint_names: list[str] = []
     with open(csv_path) as f:
         for line in f:
@@ -33,10 +30,6 @@ def _parse_metadata(csv_path: Path) -> tuple[str, list[str]]:
             line = line[1:].strip()
             if line.startswith("action_type:"):
                 action_type = line.split(":", 1)[1].strip()
-            elif line.startswith("use_delta_actions:"):
-                # Legacy metadata: use_delta_actions: true → delta_obs_t
-                if line.split(":", 1)[1].strip().lower() == "true" and action_type == "absolute":
-                    action_type = "delta_obs_t"
             elif line.startswith("joint_names:"):
                 raw = line.split(":", 1)[1].strip()
                 joint_names = [n.strip() for n in raw.split(",") if n.strip()]

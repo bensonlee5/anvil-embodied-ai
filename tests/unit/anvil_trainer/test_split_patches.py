@@ -103,7 +103,7 @@ class TestPatchAlwaysInstalled:
         cfg = TrainingConfig(
             split_ratio=[8.0, 1.0, 1.0],
             dataset_root=DATASET_ROOT,
-            action_type="delta_obs_t",
+            action_type="ee_rel",  # EERelTransform is enabled for ee_rel
         )
         runner = TransformRunner(cfg)
         assert len(runner.active_transforms) > 0

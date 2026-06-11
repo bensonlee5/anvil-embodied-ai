@@ -315,12 +315,25 @@ def _detect_arms_from_conversion_config(
     log.info("[anvil-eval-ros] conversion_config: %s", config_path)
     cfg = yaml.safe_load(config_path.read_text())
     action_topics: dict = cfg.get("action_topics", {})
-    if not action_topics:
-        return None
 
-    # Return arm names in topic-definition order
-    arm_names = [info.get("arm") for info in action_topics.values() if info.get("arm")]
-    return arm_names if arm_names else None
+    if action_topics:
+        # Joint mode: some configs embed arm name as a sub-field "arm"; others (CMD format)
+        # use the dict key itself as the arm name (action_topics: {right: {topic: ...}}).
+        arm_names = [info.get("arm") for info in action_topics.values() if info.get("arm")]
+        if arm_names:
+            return arm_names
+        # Fallback: arm name is the key (CMD-style conversion config)
+        arm_keys = list(action_topics.keys())
+        if arm_keys:
+            return arm_keys
+
+    # EE mode: action_topics is {} — arm names are observation_topics keys
+    obs_topics: dict = cfg.get("observation_topics", {})
+    arm_names_obs = list(obs_topics.keys())  # e.g. ["right"]
+    return arm_names_obs if arm_names_obs else None
+
+
+_EE_DIMS_PER_ARM = 10  # xyz(3) + rot6d(6) + gripper(1)
 
 
 def generate_inference_config(
@@ -330,6 +343,7 @@ def generate_inference_config(
     mcap_root: Path | None = None,
     mcap_root_arg: Path | None = None,
     dataset_dir: Path | None = None,
+    action_type: str = "joint_abs",
 ) -> tuple[Path, dict]:
     """Generate a model-aware inference YAML and return (path, arm_info).
 
@@ -338,32 +352,50 @@ def generate_inference_config(
 
     Arm detection priority:
       1. conversion_config.yaml (most accurate — matches training data exactly)
-      2. action_dim / joints_per_arm count (fallback, assumes left-first order)
+      2. action_dim / dims_per_arm count (fallback, assumes left-first order)
+
+    For EE action types (ee_abs, ee_rel), dims_per_arm=10 and command topics use
+    /commanded_ee_{arm} instead of the joint forward_position_controller topics.
     """
+    is_ee = action_type in ("ee_abs", "ee_rel")
+
     try:
         import yaml  # PyYAML — available wherever ROS2 tools are installed
     except ImportError:
         log.warning("[anvil-eval-ros] PyYAML not available — using base inference_eval.yaml")
-        return base_yaml_path, _default_arm_info()
+        return base_yaml_path, _default_arm_info(is_ee=is_ee)
 
     action_dim = _read_action_dim(checkpoint_path)
     if action_dim is None:
         log.warning("[anvil-eval-ros] config.json not found — using base inference_eval.yaml")
-        return base_yaml_path, _default_arm_info()
+        return base_yaml_path, _default_arm_info(is_ee=is_ee)
 
     base_cfg = yaml.safe_load(base_yaml_path.read_text())
-    joints_per_arm = len(base_cfg.get("joint_names", {}).get("model_joint_order", []))
-    if joints_per_arm == 0:
-        log.warning("[anvil-eval-ros] model_joint_order empty — using base inference_eval.yaml")
-        return base_yaml_path, _default_arm_info()
 
-    n_arms = action_dim // joints_per_arm
+    if is_ee:
+        dims_per_arm = _EE_DIMS_PER_ARM
+    else:
+        dims_per_arm = len(base_cfg.get("joint_names", {}).get("model_joint_order", []))
+        if dims_per_arm == 0:
+            log.warning("[anvil-eval-ros] model_joint_order empty — using base inference_eval.yaml")
+            return base_yaml_path, _default_arm_info(is_ee=False)
+
+    # Validate alignment: non-integer ratio often indicates a wrong action_type.
+    if action_dim % dims_per_arm != 0:
+        log.warning(
+            "[anvil-eval-ros] action_dim=%d is not divisible by dims_per_arm=%d "
+            "(is_ee=%s) — action_type '%s' may be incorrect for this checkpoint. "
+            "Check anvil_config.json or pass --action-type explicitly.",
+            action_dim, dims_per_arm, is_ee, action_type,
+        )
+
+    n_arms = action_dim // dims_per_arm
     if n_arms < 1:
         log.warning(
-            "[anvil-eval-ros] action_dim=%d < joints_per_arm=%d — using base config",
-            action_dim, joints_per_arm,
+            "[anvil-eval-ros] action_dim=%d < dims_per_arm=%d — using base config",
+            action_dim, dims_per_arm,
         )
-        return base_yaml_path, _default_arm_info()
+        return base_yaml_path, _default_arm_info(is_ee=is_ee)
 
     # Determine arm names: prefer conversion_config.yaml (exact training mapping)
     arm_names_ordered: list[str] | None = None
@@ -377,16 +409,28 @@ def generate_inference_config(
             )
 
     if not arm_names_ordered:
-        # Fallback: assume left-first for n_arms arms
-        fallback_order = ["left", "right"]
+        # EE models default to right arm; joint models assume left-first ordering.
+        fallback_order = ["right"] if is_ee else ["left", "right"]
         arm_names_ordered = fallback_order[:n_arms]
         log.warning(
             "[anvil-eval-ros] conversion_config.yaml not found — assuming arm order: %s",
             arm_names_ordered,
         )
 
-    # Trim to n_arms in case conversion_config has more arms than the model
     arm_names_ordered = arm_names_ordered[:n_arms]
+
+    # For EE mode, read observation_topics from conversion_config to get the actual
+    # MCAP GT topic per arm (e.g. /ee_pose_right), since the player replays raw MCAP topics.
+    ee_obs_topic_by_arm: dict[str, str] = {}
+    if is_ee:
+        try:
+            import yaml as _yaml
+            conv_cfg_path = _find_conversion_config(mcap_root, mcap_root_arg, dataset_dir)
+            if conv_cfg_path is not None:
+                _conv = _yaml.safe_load(conv_cfg_path.read_text())
+                ee_obs_topic_by_arm = _conv.get("observation_topics", {})
+        except Exception:
+            pass
 
     # Build arms section
     new_arms: dict = {}
@@ -400,48 +444,66 @@ def generate_inference_config(
             log.warning("[anvil-eval-ros] Unknown arm name '%s', skipping", arm_name)
             continue
         ros_prefix, _ = meta
-        new_arms[arm_name] = {
-            "ros_prefix": ros_prefix,
-            "command_topic": f"/eval/{ros_prefix}_forward_position_controller/commands",
-            "action_start": i * joints_per_arm,
-            "action_end": (i + 1) * joints_per_arm,
-        }
-        gt_topics.append(f"/{ros_prefix}_forward_position_controller/commands")
-        pred_topics.append(f"/eval/{ros_prefix}_forward_position_controller/commands")
+
+        if is_ee:
+            gt_topic = ee_obs_topic_by_arm.get(arm_name, f"/ee_pose_{arm_name}")
+            new_arms[arm_name] = {
+                "ros_prefix": ros_prefix,
+                "ee_command_topic": f"/eval/commanded_ee_{arm_name}",
+                # ee_obs_topic: topic the inference node subscribes to for EE state.
+                # Must match what the MCAP player publishes (the original observation topic).
+                "ee_obs_topic": gt_topic,
+                "action_start": i * dims_per_arm,
+                "action_end": (i + 1) * dims_per_arm,
+            }
+            # GT comes from the MCAP observation topic (e.g. /ee_pose_right),
+            # NOT /commanded_ee_right which doesn't exist in the MCAP.
+            gt_topics.append(gt_topic)
+            pred_topics.append(f"/eval/commanded_ee_{arm_name}")
+        else:
+            new_arms[arm_name] = {
+                "ros_prefix": ros_prefix,
+                "command_topic": f"/eval/{ros_prefix}_forward_position_controller/commands",
+                "action_start": i * dims_per_arm,
+                "action_end": (i + 1) * dims_per_arm,
+            }
+            gt_topics.append(f"/{ros_prefix}_forward_position_controller/commands")
+            pred_topics.append(f"/eval/{ros_prefix}_forward_position_controller/commands")
         arm_names.append(arm_name)
 
     base_cfg["arms"] = new_arms
 
-    # Trim arm_mapping so state vector dimension matches action_dim.
-    # multi_process.py builds observation.state by iterating arm_mapping keys,
-    # so arm_mapping must only contain the arms actually used by this model.
-    # arm_mapping keys are short keys (e.g. "l", "r"); values are arm names.
-    orig_arm_mapping: dict = base_cfg.get("joint_names", {}).get("arm_mapping", {})
-    filtered_arm_mapping = {k: v for k, v in orig_arm_mapping.items() if v in set(arm_names)}
-    # If conversion_config gave us a specific arm order, rebuild arm_mapping in that order
-    # so sorted(arm_mapping.keys()) in multi_process.py matches action slice order.
-    ordered_arm_mapping: dict = {}
-    for arm_name in arm_names:
-        meta = _ARM_META.get(arm_name)
-        if meta:
-            _, arm_key = meta
-            if arm_key in filtered_arm_mapping:
-                ordered_arm_mapping[arm_key] = filtered_arm_mapping[arm_key]
-    base_cfg.setdefault("joint_names", {})["arm_mapping"] = ordered_arm_mapping or filtered_arm_mapping
+    if not is_ee:
+        orig_arm_mapping: dict = base_cfg.get("joint_names", {}).get("arm_mapping", {})
+        filtered_arm_mapping = {k: v for k, v in orig_arm_mapping.items() if v in set(arm_names)}
+        ordered_arm_mapping: dict = {}
+        for arm_name in arm_names:
+            meta = _ARM_META.get(arm_name)
+            if meta:
+                _, arm_key = meta
+                if arm_key in filtered_arm_mapping:
+                    ordered_arm_mapping[arm_key] = filtered_arm_mapping[arm_key]
+        base_cfg.setdefault("joint_names", {})["arm_mapping"] = ordered_arm_mapping or filtered_arm_mapping
 
     config_path = output_dir / "inference_eval_generated.yaml"
     config_path.write_text(yaml.dump(base_cfg, default_flow_style=False, allow_unicode=True))
 
     log.info(
-        "[anvil-eval-ros] Generated inference config: %d arm(s), action_dim=%d → %s",
-        n_arms, action_dim, config_path,
+        "[anvil-eval-ros] Generated inference config: %d arm(s), action_dim=%d, is_ee=%s → %s",
+        n_arms, action_dim, is_ee, config_path,
     )
 
     return config_path, {"gt_topics": gt_topics, "pred_topics": pred_topics, "arm_names": arm_names}
 
 
-def _default_arm_info() -> dict:
-    """Dual-arm fallback matching the static inference_eval.yaml."""
+def _default_arm_info(is_ee: bool = False) -> dict:
+    """Single right-arm fallback for EE, dual-arm joint fallback otherwise."""
+    if is_ee:
+        return {
+            "gt_topics": ["/ee_pose_right"],   # MCAP observation topic
+            "pred_topics": ["/eval/commanded_ee_right"],
+            "arm_names": ["right"],
+        }
     return {
         "gt_topics": [
             "/follower_l_forward_position_controller/commands",
@@ -523,7 +585,7 @@ def main() -> None:
         log.error("[anvil-eval-ros] MCAP root not found: %s", mcap_root)
         sys.exit(1)
 
-    # 0. Load anvil_config.json for delta action settings
+    # 0. Load anvil_config.json for action type settings
     anvil_cfg_path = checkpoint_path / "pretrained_model" / "anvil_config.json"
     anvil_cfg: dict = {}
     if anvil_cfg_path.exists():
@@ -532,13 +594,14 @@ def main() -> None:
             log.info("[anvil-eval-ros] Loaded anvil_config.json")
         except Exception as e:
             log.warning("[anvil-eval-ros] Failed to read anvil_config.json: %s", e)
+    else:
+        log.warning(
+            "[anvil-eval-ros] anvil_config.json not found at %s — assuming action_type=joint_abs. "
+            "If this is an EE model, pass --action-type ee_abs or ee_rel explicitly.",
+            anvil_cfg_path,
+        )
 
-    use_delta_actions: bool = anvil_cfg.get("use_delta_actions", False)
-    _action_type_raw: str = anvil_cfg.get("action_type", "absolute")
-    if _action_type_raw == "absolute" and use_delta_actions:
-        _action_type_raw = "delta_obs_t"
-    action_type: str = _action_type_raw
-    delta_exclude_joints: list[str] = anvil_cfg.get("delta_exclude_joints") or []
+    action_type: str = anvil_cfg.get("action_type", "joint_abs")
 
     # Read dataset fps (so eval-recorder can downsample 60fps MCAP GT to match)
     dataset_fps = _read_dataset_fps(mcap_root, mcap_root_arg)
@@ -670,6 +733,7 @@ def main() -> None:
         mcap_root=mcap_root,
         mcap_root_arg=mcap_root_arg,
         dataset_dir=dataset_dir,
+        action_type=action_type,
     )
 
     # 6. Build docker compose command
@@ -702,12 +766,10 @@ def main() -> None:
             if synthesize_info
             else {}
         ),
-        # Delta action settings (from anvil_config.json in checkpoint)
-        "EVAL_USE_DELTA_ACTIONS": "true" if use_delta_actions else "false",
+        # Action type (from anvil_config.json in checkpoint)
         "EVAL_ACTION_TYPE": action_type,
-        "EVAL_DELTA_EXCLUDE_JOINTS": _ros2_list(delta_exclude_joints) if delta_exclude_joints else "[]",
         # dataset fps for GT downsampling (from meta/info.json)
-        "EVAL_DATASET_FPS": str(dataset_fps),
+        "EVAL_DATASET_FPS": str(float(dataset_fps)),
         # Inference monitor
         "MONITOR_ENABLE": "true" if args.monitor else "false",
         "MONITOR_OUTPUT_DIR": str(output_dir / "monitor"),

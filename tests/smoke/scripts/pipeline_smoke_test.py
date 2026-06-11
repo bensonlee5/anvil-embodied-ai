@@ -1,31 +1,38 @@
 #!/usr/bin/env python3
 """End-to-end CLI smoke test for the anvil training / eval stack.
 
-Four scenarios are tested against the fixture at data/raw/test-session (5 stub MCAPs,
-single right arm):
+Four scenarios across two fixture sessions:
 
-  AFO              — action_from_observation=true,  action_type=absolute
-  CMD              — action_from_observation=false, action_type=absolute
-  CMD_DELTA_OBS_T       — CMD dataset + --action-type=delta_obs_t
-  CMD_DELTA_SEQUENTIAL  — CMD dataset + --action-type=delta_sequential
+Joint-space (tests/smoke/fixtures/test-session, 5 stub MCAPs, single right arm):
+  joint_abs_afo — action_from_observation=true,  action_type=joint_abs
+  joint_abs     — action_from_observation=false, action_type=joint_abs
 
-delta scenarios reuse the step-1 CMD dataset and only differ in training
-(steps 2–4).  Step 1 is always a no-op (cached) for delta variants.
+EE Cartesian (tests/smoke/fixtures/ee-session, 5 stub MCAPs, single right arm):
+  ee_abs — action_type=ee_abs  (EE absolute rot6d)
+  ee_rel — action_type=ee_rel  (EE SE(3) relative; shares converted dataset with ee_abs)
+
+EE space is inherently AFO — /ee_pose_right is both observation and action source.
+ee_rel step 1 shows "cached" when the shared EE dataset already exists from ee_abs.
 
 Each scenario runs all 4 steps: mcap-convert → anvil-trainer → anvil-eval → anvil-eval-ros
 
 Usage:
-  uv run python tests/smoke/scripts/pipeline_smoke_test.py                             # all scenarios, all 4 steps
-  uv run python tests/smoke/scripts/pipeline_smoke_test.py --scenario afo              # AFO only
-  uv run python tests/smoke/scripts/pipeline_smoke_test.py --scenario afo,cmd          # subset
-  uv run python tests/smoke/scripts/pipeline_smoke_test.py --select 1,2               # steps 1+2 for all scenarios
-  uv run python tests/smoke/scripts/pipeline_smoke_test.py --force                    # wipe + rerun
-  uv run python tests/smoke/scripts/pipeline_smoke_test.py --no-docker                # step 4 skips Docker
-  uv run python tests/smoke/scripts/pipeline_smoke_test.py --keep-going               # don't stop on failure
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py                               # all scenarios, all 4 steps
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --scenario joint_abs_afo      # AFO only
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --scenario joint_abs,joint_abs_afo  # joint only
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --scenario ee_abs,ee_rel      # EE only
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --select 1,2                 # steps 1+2 for all scenarios
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --force                      # wipe + rerun
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --no-docker                  # step 4 skips Docker
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --keep-going                 # don't stop on failure
 
 Each step reads its inputs from stable artifact paths produced by earlier steps,
 so you can rerun a subset after fixing a later stage without redoing the whole
 pipeline.
+
+EE fixture generation:
+  If tests/smoke/fixtures/ee-session/ is missing, run:
+    uv run python tests/smoke/fixtures/scripts/generate_ee_fixtures.py
 """
 from __future__ import annotations
 
@@ -61,7 +68,8 @@ SMOKE_ROOT = Path(__file__).resolve().parents[1]   # tests/smoke/
 FIXTURES = SMOKE_ROOT / "fixtures"
 OUTPUTS = SMOKE_ROOT / "outputs"
 
-MCAP_ROOT = FIXTURES / "test-session"
+MCAP_ROOT    = FIXTURES / "test-session"
+EE_MCAP_ROOT = FIXTURES / "ee-session"
 
 
 # ── Scenario definition ──────────────────────────────────────────────────────
@@ -76,7 +84,9 @@ class Scenario:
     eval_out: Path
     eval_ros_out: Path
     convert_config: Path
-    action_type: str = "absolute"  # absolute | delta_obs_t | delta_sequential
+    action_type: str = "joint_abs"     # joint_abs | ee_abs | ee_rel
+    # Override the inference base config for step 4 (None = joint default)
+    inference_config: Path | None = None
 
     @property
     def checkpoint(self) -> Path:
@@ -89,51 +99,58 @@ class Scenario:
 # mcap-convert appends the input directory name to the output path, so the dataset
 # ends up at <output_parent>/<mcap_root_name>/.  Use scenario-specific parent dirs
 # under outputs/ to keep artifacts separate.
-# Delta scenarios share the SAME dataset as their base (afo/cmd) — step 1 is a no-op.
-_MCAP_NAME = MCAP_ROOT.name  # "test-session"
+# ee_abs and ee_rel point to the SAME dataset_dir — step 1 for ee_rel shows
+# "cached" when ee_abs has already converted, and re-converts if forced.
+_MCAP_NAME    = MCAP_ROOT.name     # "test-session"
+_EE_MCAP_NAME = EE_MCAP_ROOT.name  # "ee-session"
+
+_EE_INFERENCE_CFG = FIXTURES / "configs" / "inference-eval-smoke-test-ee.yaml"
 
 SCENARIOS: dict[str, Scenario] = {
-    "afo": Scenario(
-        key="afo",
-        label="AFO absolute",
+    "joint_abs_afo": Scenario(
+        key="joint_abs_afo",
+        label="joint_abs AFO",
         mcap_root=MCAP_ROOT,
-        dataset_dir=OUTPUTS / "datasets" / "afo" / _MCAP_NAME,
-        train_out=OUTPUTS / "model_zoo" / "afo" / "smoke",
-        eval_out=OUTPUTS / "eval_results" / "afo" / "raw",
-        eval_ros_out=OUTPUTS / "eval_results" / "afo" / "ros",
+        dataset_dir=OUTPUTS / "datasets" / "joint_abs_afo" / _MCAP_NAME,
+        train_out=OUTPUTS / "model_zoo" / "joint_abs_afo" / "smoke",
+        eval_out=OUTPUTS / "eval_results" / "joint_abs_afo" / "raw",
+        eval_ros_out=OUTPUTS / "eval_results" / "joint_abs_afo" / "ros",
         convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-afo.yaml",
     ),
-    "cmd": Scenario(
-        key="cmd",
-        label="CMD absolute",
+    "joint_abs": Scenario(
+        key="joint_abs",
+        label="joint_abs CMD",
         mcap_root=MCAP_ROOT,
-        dataset_dir=OUTPUTS / "datasets" / "cmd" / _MCAP_NAME,
-        train_out=OUTPUTS / "model_zoo" / "cmd" / "smoke",
-        eval_out=OUTPUTS / "eval_results" / "cmd" / "raw",
-        eval_ros_out=OUTPUTS / "eval_results" / "cmd" / "ros",
+        dataset_dir=OUTPUTS / "datasets" / "joint_abs" / _MCAP_NAME,
+        train_out=OUTPUTS / "model_zoo" / "joint_abs" / "smoke",
+        eval_out=OUTPUTS / "eval_results" / "joint_abs" / "raw",
+        eval_ros_out=OUTPUTS / "eval_results" / "joint_abs" / "ros",
         convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-cmd.yaml",
     ),
-    "cmd_delta_obs_t": Scenario(
-        key="cmd_delta_obs_t",
-        label="CMD delta_obs_t",
-        mcap_root=MCAP_ROOT,
-        dataset_dir=OUTPUTS / "datasets" / "cmd" / _MCAP_NAME,  # shared with cmd
-        train_out=OUTPUTS / "model_zoo" / "cmd_delta_obs_t" / "smoke",
-        eval_out=OUTPUTS / "eval_results" / "cmd_delta_obs_t" / "raw",
-        eval_ros_out=OUTPUTS / "eval_results" / "cmd_delta_obs_t" / "ros",
-        convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-cmd.yaml",
-        action_type="delta_obs_t",
+    "ee_abs": Scenario(
+        key="ee_abs",
+        label="ee_abs",
+        mcap_root=EE_MCAP_ROOT,
+        dataset_dir=OUTPUTS / "datasets" / "ee" / _EE_MCAP_NAME,
+        train_out=OUTPUTS / "model_zoo" / "ee_abs" / "smoke",
+        eval_out=OUTPUTS / "eval_results" / "ee_abs" / "raw",
+        eval_ros_out=OUTPUTS / "eval_results" / "ee_abs" / "ros",
+        convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-ee.yaml",
+        action_type="ee_abs",
+        inference_config=_EE_INFERENCE_CFG,
     ),
-    "cmd_delta_sequential": Scenario(
-        key="cmd_delta_sequential",
-        label="CMD delta_sequential",
-        mcap_root=MCAP_ROOT,
-        dataset_dir=OUTPUTS / "datasets" / "cmd" / _MCAP_NAME,  # shared with cmd
-        train_out=OUTPUTS / "model_zoo" / "cmd_delta_sequential" / "smoke",
-        eval_out=OUTPUTS / "eval_results" / "cmd_delta_sequential" / "raw",
-        eval_ros_out=OUTPUTS / "eval_results" / "cmd_delta_sequential" / "ros",
-        convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-cmd.yaml",
-        action_type="delta_sequential",
+    "ee_rel": Scenario(
+        key="ee_rel",
+        label="ee_rel",
+        mcap_root=EE_MCAP_ROOT,
+        # Same dataset as ee_abs — step 1 is "cached" when ee_abs already converted.
+        dataset_dir=OUTPUTS / "datasets" / "ee" / _EE_MCAP_NAME,
+        train_out=OUTPUTS / "model_zoo" / "ee_rel" / "smoke",
+        eval_out=OUTPUTS / "eval_results" / "ee_rel" / "raw",
+        eval_ros_out=OUTPUTS / "eval_results" / "ee_rel" / "ros",
+        convert_config=FIXTURES / "configs" / "mcap-converter-smoke-test-ee.yaml",
+        action_type="ee_rel",
+        inference_config=_EE_INFERENCE_CFG,
     ),
 }
 
@@ -155,6 +172,26 @@ def _run(cmd: list[str], env_extra: dict | None = None) -> int:
     print(f"  $ {' '.join(cmd)}", flush=True)
     proc = subprocess.run(cmd, cwd=REPO, env=env)
     return proc.returncode
+
+
+def _save_docker_logs(output_dir: Path) -> None:
+    """Dump logs from eval Docker containers into output_dir/docker_logs/ for post-mortem."""
+    containers = [
+        "lerobot-eval-inference",
+        "lerobot-eval-player",
+        "lerobot-eval-recorder",
+        "lerobot-eval-monitor",
+    ]
+    log_dir = output_dir / "docker_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    for name in containers:
+        result = subprocess.run(
+            ["docker", "logs", "--timestamps", name],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0 or result.stdout or result.stderr:
+            combined = result.stdout + result.stderr
+            (log_dir / f"{name}.log").write_text(combined)
 
 
 def _rmtree(path: Path) -> None:
@@ -229,7 +266,7 @@ def run_step_train(sc: Scenario, force: bool, steps_override: int) -> StepResult
         f"--output_dir={sc.train_out}",
         "--job_name=smoke",
     ]
-    if sc.action_type != "absolute":
+    if sc.action_type != "joint_abs":
         train_cmd.append(f"--action-type={sc.action_type}")
     rc = _run(train_cmd, env_extra={"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
     dt = time.monotonic() - t0
@@ -291,13 +328,17 @@ def run_step_eval_ros(sc: Scenario, force: bool, steps_override: int,
         return StepResult(ok=True, duration_s=0.0, artifact=expected, notes="cached")
 
     monitor_dir = sc.eval_ros_out / "monitor"
+    base_cfg = (
+        sc.inference_config
+        if sc.inference_config is not None
+        else FIXTURES / "configs" / "inference-eval-smoke-test.yaml"
+    )
     cmd = [
         "uv", "run", "anvil-eval-ros",
         "--checkpoint", str(ckpt_dir),
         "--mcap-root", str(sc.mcap_root),
         "--dataset-dir", str(sc.dataset_dir),
-        "--base-inference-config",
-        str(FIXTURES / "configs" / "inference-eval-smoke-test.yaml"),
+        "--base-inference-config", str(base_cfg),
         "--num-eps", "1",
         "--output-dir", str(sc.eval_ros_out),
     ]
@@ -319,6 +360,10 @@ def run_step_eval_ros(sc: Scenario, force: bool, steps_override: int,
     t0 = time.monotonic()
     rc = _run(cmd)
     dt = time.monotonic() - t0
+
+    # Capture Docker container logs for post-mortem inspection
+    if with_docker:
+        _save_docker_logs(sc.eval_ros_out)
 
     if rc != 0:
         return StepResult(ok=False, duration_s=dt, artifact=expected, notes=f"exit {rc}")

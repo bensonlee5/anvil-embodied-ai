@@ -37,8 +37,7 @@ from anvil_trainer.patches import TransformRunner, patched_lerobot
 # Backward-compat re-exports: symbols that previously lived in this module.
 # Existing tests and user code may import them from `anvil_trainer.train`.
 from anvil_trainer.transforms import (  # noqa: E402, F401
-    DeltaActionTransform,
-    EEDeltaTransform,
+    EERelTransform,
     ExcludeObservationTransform,
     TaskOverrideTransform,
     Transform,
@@ -77,6 +76,10 @@ def train(config: TrainingConfig | None = None) -> None:
 
     # Warn about unknown --exclude-observation keys
     config.warn_unknown_exclude_keys()
+
+    # Validate that the dataset action space matches the chosen action_type.
+    # Must run before validate_action_space imports DataIntegrityError from transforms.
+    config.validate_action_space()
 
     # Resolve final note (auto-preserve / replace / append during resume)
     resolved_note = _resolve_note(config)
@@ -141,19 +144,24 @@ anvil-trainer — LeRobot training with Anvil customizations
 
 Examples:
 
-  # Train ACT (basic)
-  anvil-trainer --dataset.root=data/datasets/my-dataset \\
+  # Train ACT on joint-space dataset (default)
+  anvil-trainer --dataset.root=data/datasets/my-joint-dataset \\
     --policy.type=act --job_name=grabbing-w1
+
+  # Train ACT on EE-space dataset (absolute rot6d)
+  anvil-trainer --dataset.root=data/datasets/my-ee-dataset \\
+    --policy.type=act --job_name=grabbing-ee-abs \\
+    --action-type=ee_abs
+
+  # Train ACT on EE-space dataset (SE(3) relative)
+  anvil-trainer --dataset.root=data/datasets/my-ee-dataset \\
+    --policy.type=act --job_name=grabbing-ee-rel \\
+    --action-type=ee_rel
 
   # Train SmolVLA with task description
   anvil-trainer --dataset.root=data/datasets/my-dataset \\
     --policy.type=smolvla --job_name=grabbing-w1 \\
     --task-description="Grab the gray doll and put it in the bucket"
-
-  # Train with delta actions and camera subset
-  anvil-trainer --dataset.root=data/datasets/my-dataset \\
-    --policy.type=act --job_name=grabbing-w1 \\
-    --camera-filter=chest,waist --use-delta-actions
 
   # Resume a stopped run (from latest checkpoint)
   anvil-trainer --resume=model_zoo/my-dataset/grabbing-w1
@@ -165,10 +173,14 @@ Examples:
 
 Anvil-specific flags (stripped before passing to LeRobot):
 
-  --use-delta-actions
-      Convert actions to delta form (action - observation.state).
-      Persisted to anvil_config.json in each checkpoint so inference
-      can read it automatically.
+  --action-type=TYPE
+      Action representation. One of:
+        joint_abs  — joint absolute positions (default)
+        ee_abs     — EE Cartesian rot6d, absolute (requires EE-space dataset)
+        ee_rel     — EE Cartesian SE(3) relative, delta xyz + relative rotation
+                     (requires EE-space dataset)
+      Validated against the dataset's info.json at startup.
+      Persisted to anvil_config.json in each checkpoint for inference.
 
   --resume=PATH
       Resume a previously stopped training job.
@@ -181,10 +193,6 @@ Anvil-specific flags (stripped before passing to LeRobot):
   --task-description=TEXT
       Task prompt for SmolVLA. Overrides LEROBOT_TASK_OVERRIDE env var.
       Example: --task-description="Grab the gray doll and put it in the bucket"
-
-  --camera-filter=CAM1,CAM2,...
-      Train using only the specified cameras. Overrides LEROBOT_CAMERA_FILTER.
-      Example: --camera-filter=chest,waist
 
   --note=TEXT
       Free-text note attached to this run.

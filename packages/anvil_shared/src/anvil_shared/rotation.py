@@ -113,3 +113,129 @@ def rot6d_to_matrix(r6d) -> np.ndarray:
     b2 = b2 / n2
     b3 = np.cross(b1, b2)
     return np.stack([b1, b2, b3], axis=-1)
+
+
+# =============================================================================
+# Batch rotation utilities (arbitrary leading dimensions)
+# =============================================================================
+
+
+def quats_to_matrices(quats) -> np.ndarray:
+    """Convert (..., 4) quaternions ``[x, y, z, w]`` to (..., 3, 3) rotation matrices.
+
+    Inputs are normalised internally.  Supports arbitrary leading batch dimensions.
+    """
+    q = np.asarray(quats, dtype=float)
+    if q.shape[-1] != 4:
+        raise ValueError(f"quats_to_matrices: last dim must be 4, got {q.shape}")
+    n = np.linalg.norm(q, axis=-1, keepdims=True)
+    q = q / np.where(n > 0, n, 1.0)
+    qx, qy, qz, qw = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
+    R = np.empty(q.shape[:-1] + (3, 3), dtype=float)
+    R[..., 0, 0] = 1 - 2 * (qy * qy + qz * qz)
+    R[..., 0, 1] = 2 * (qx * qy - qz * qw)
+    R[..., 0, 2] = 2 * (qx * qz + qy * qw)
+    R[..., 1, 0] = 2 * (qx * qy + qz * qw)
+    R[..., 1, 1] = 1 - 2 * (qx * qx + qz * qz)
+    R[..., 1, 2] = 2 * (qy * qz - qx * qw)
+    R[..., 2, 0] = 2 * (qx * qz - qy * qw)
+    R[..., 2, 1] = 2 * (qy * qz + qx * qw)
+    R[..., 2, 2] = 1 - 2 * (qx * qx + qy * qy)
+    return R
+
+
+def matrices_to_quats(Rs) -> np.ndarray:
+    """Convert (..., 3, 3) rotation matrices to (..., 4) quaternions ``[x, y, z, w]``.
+
+    Uses a vectorised Shepperd's method (branch-free via ``np.where``).
+    Supports arbitrary leading batch dimensions.
+    """
+    Rs = np.asarray(Rs, dtype=float)
+    if Rs.shape[-2:] != (3, 3):
+        raise ValueError(f"matrices_to_quats: last two dims must be (3,3), got {Rs.shape}")
+
+    trace = Rs[..., 0, 0] + Rs[..., 1, 1] + Rs[..., 2, 2]
+
+    # Branch 1: trace > 0  (large qw)
+    s1 = np.sqrt(np.maximum(trace + 1.0, 0.0)) * 2  # 4 * qw
+    d1 = np.where(np.abs(s1) > 1e-10, s1, 1.0)
+    qw1 = 0.25 * s1
+    qx1 = (Rs[..., 2, 1] - Rs[..., 1, 2]) / d1
+    qy1 = (Rs[..., 0, 2] - Rs[..., 2, 0]) / d1
+    qz1 = (Rs[..., 1, 0] - Rs[..., 0, 1]) / d1
+
+    # Branch 2: R[0,0] dominant  (large qx)
+    s2 = np.sqrt(np.maximum(1.0 + Rs[..., 0, 0] - Rs[..., 1, 1] - Rs[..., 2, 2], 0.0)) * 2
+    d2 = np.where(np.abs(s2) > 1e-10, s2, 1.0)
+    qw2 = (Rs[..., 2, 1] - Rs[..., 1, 2]) / d2
+    qx2 = 0.25 * s2
+    qy2 = (Rs[..., 0, 1] + Rs[..., 1, 0]) / d2
+    qz2 = (Rs[..., 0, 2] + Rs[..., 2, 0]) / d2
+
+    # Branch 3: R[1,1] dominant  (large qy)
+    s3 = np.sqrt(np.maximum(1.0 + Rs[..., 1, 1] - Rs[..., 0, 0] - Rs[..., 2, 2], 0.0)) * 2
+    d3 = np.where(np.abs(s3) > 1e-10, s3, 1.0)
+    qw3 = (Rs[..., 0, 2] - Rs[..., 2, 0]) / d3
+    qx3 = (Rs[..., 0, 1] + Rs[..., 1, 0]) / d3
+    qy3 = 0.25 * s3
+    qz3 = (Rs[..., 1, 2] + Rs[..., 2, 1]) / d3
+
+    # Branch 4: R[2,2] dominant  (large qz)
+    s4 = np.sqrt(np.maximum(1.0 + Rs[..., 2, 2] - Rs[..., 0, 0] - Rs[..., 1, 1], 0.0)) * 2
+    d4 = np.where(np.abs(s4) > 1e-10, s4, 1.0)
+    qw4 = (Rs[..., 1, 0] - Rs[..., 0, 1]) / d4
+    qx4 = (Rs[..., 0, 2] + Rs[..., 2, 0]) / d4
+    qy4 = (Rs[..., 1, 2] + Rs[..., 2, 1]) / d4
+    qz4 = 0.25 * s4
+
+    # Select branch per sample
+    b1 = trace > 0
+    b2 = ~b1 & (Rs[..., 0, 0] > Rs[..., 1, 1]) & (Rs[..., 0, 0] > Rs[..., 2, 2])
+    b3 = ~b1 & ~b2 & (Rs[..., 1, 1] > Rs[..., 2, 2])
+    # b4: everything else
+
+    qw = np.where(b1, qw1, np.where(b2, qw2, np.where(b3, qw3, qw4)))
+    qx = np.where(b1, qx1, np.where(b2, qx2, np.where(b3, qx3, qx4)))
+    qy = np.where(b1, qy1, np.where(b2, qy2, np.where(b3, qy3, qy4)))
+    qz = np.where(b1, qz1, np.where(b2, qz2, np.where(b3, qz3, qz4)))
+
+    return np.stack([qx, qy, qz, qw], axis=-1)
+
+
+def matrices_to_rot6d(Rs) -> np.ndarray:
+    """Flatten the first two columns of (..., 3, 3) rotation matrices into (..., 6) rot6d.
+
+    Batch counterpart of :func:`matrix_to_rot6d`.  Supports arbitrary leading dims.
+    """
+    Rs = np.asarray(Rs, dtype=float)
+    if Rs.shape[-2:] != (3, 3):
+        raise ValueError(f"matrices_to_rot6d: last two dims must be (3,3), got {Rs.shape}")
+    # First two columns: Rs[..., :, :2] → (..., 3, 2)
+    # Transpose last two dims → (..., 2, 3), then reshape → (..., 6)
+    col01 = Rs[..., :, :2]  # (..., 3, 2)
+    return col01.swapaxes(-2, -1).reshape(Rs.shape[:-2] + (6,)).astype(float)
+
+
+def rot6ds_to_matrices(r6ds) -> np.ndarray:
+    """Reconstruct (..., 3, 3) rotation matrices from (..., 6) rot6d vectors via Gram-Schmidt.
+
+    Batch counterpart of :func:`rot6d_to_matrix`.  Degenerate inputs (near-zero
+    columns) are handled gracefully — columns are clamped to a small norm rather
+    than raising, to avoid masking bugs in downstream code.
+    """
+    v = np.asarray(r6ds, dtype=float)
+    if v.shape[-1] != 6:
+        raise ValueError(f"rot6ds_to_matrices: last dim must be 6, got {v.shape}")
+    a1 = v[..., :3]   # (..., 3)
+    a2 = v[..., 3:6]  # (..., 3)
+
+    n1 = np.linalg.norm(a1, axis=-1, keepdims=True)  # (..., 1)
+    b1 = a1 / np.where(n1 > 1e-10, n1, 1e-10)
+
+    dot = (b1 * a2).sum(axis=-1, keepdims=True)  # (..., 1)
+    b2_raw = a2 - dot * b1
+    n2 = np.linalg.norm(b2_raw, axis=-1, keepdims=True)
+    b2 = b2_raw / np.where(n2 > 1e-10, n2, 1e-10)
+
+    b3 = np.cross(b1, b2)  # (..., 3)
+    return np.stack([b1, b2, b3], axis=-1)  # (..., 3, 3)

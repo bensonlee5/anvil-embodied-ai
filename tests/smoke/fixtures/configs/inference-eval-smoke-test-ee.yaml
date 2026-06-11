@@ -1,0 +1,50 @@
+# =============================================================================
+# Smoke-test inference config — EE Cartesian, SINGLE ARM (right), 3 cameras
+# =============================================================================
+# Used by pipeline_smoke_test.py step 4 (anvil-eval-ros) for ee_abs and ee_rel
+# scenarios.  Matches the ee-session fixture topology: right arm only, no wrist_l.
+#
+# generate_inference_config detects action_type=ee_abs/ee_rel and uses dims_per_arm=10
+# with /commanded_ee_<arm> topics instead of joint forward_position_controller topics.
+# model_joint_order: [] is intentional — EE mode does not use joint names.
+
+model:
+  task_description: null
+
+inference_tuning:
+
+  act:
+    n_action_steps: null
+    temporal_ensemble_coeff: null
+
+  diffusion:
+    n_action_steps: null
+    num_inference_steps: 10
+
+  rtc:
+    inference_delay: 10
+    queue_trigger_threshold: 50
+    execution_horizon: 12
+    max_guidance_weight: 10.0
+    prefix_attention_schedule: EXP
+
+# EE mode: no joint_state_topic or joint_names needed.
+# model_joint_order: [] tells generate_inference_config to use EE dims_per_arm=10.
+joint_names:
+  model_joint_order: []
+  arm_mapping:
+    r: right
+
+arms:
+  right:
+    ros_prefix: "follower_r"
+    ee_command_topic: "/eval/commanded_ee_right"
+    ee_obs_topic: "/ee_pose_right"
+    action_start: 0
+    action_end: 10
+
+# Fixture MCAPs have 3 cameras only (no wrist_l)
+camera_mapping:
+  "/cam_waist/image_raw/compressed": "waist"
+  "/cam_wrist_r/image_raw/compressed": "wrist_r"
+  "/cam_chest/image_raw/compressed": "chest"

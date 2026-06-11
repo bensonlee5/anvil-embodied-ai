@@ -187,13 +187,21 @@ def main() -> None:
         frame_indices = eval_dataset.get_episode_frames(ep_idx)
         result = evaluator.evaluate_episode(eval_dataset.dataset, frame_indices, ep_idx, split_label)
         
-        # Compute metrics in model-output space (raw_output vs raw_ground_truth) so that
-        # delta and absolute models are evaluated on what the model actually predicts,
-        # not on the restored absolute trajectory.
-        _pred_for_metrics = result.raw_output if result.raw_output is not None else result.predicted
-        _gt_for_metrics = result.raw_ground_truth if result.raw_ground_truth is not None else result.ground_truth
+        # EE mode: evaluate in absolute quaternion space (consistent with live recorder).
+        # Convert absolute rot6d (result.predicted/ground_truth) to 8-dim quaternion layout
+        # so compute_ee_metrics receives [x,y,z,qx,qy,qz,qw,gripper] per arm.
+        # Non-EE: evaluate in model-output (raw) space as before.
+        if evaluator.is_ee:
+            from anvil_shared.ee_transform import ee_rot6d_to_quat_layout, ee_quat_layout_names
+            _pred_for_metrics  = ee_rot6d_to_quat_layout(result.predicted)
+            _gt_for_metrics    = ee_rot6d_to_quat_layout(result.ground_truth)
+            _names_for_metrics = ee_quat_layout_names(result.joint_names)
+        else:
+            _pred_for_metrics  = result.raw_output if result.raw_output is not None else result.predicted
+            _gt_for_metrics    = result.raw_ground_truth if result.raw_ground_truth is not None else result.ground_truth
+            _names_for_metrics = result.joint_names
         metrics = compute_episode_metrics(
-            _pred_for_metrics, _gt_for_metrics, result.joint_names, ep_idx, split_label,
+            _pred_for_metrics, _gt_for_metrics, _names_for_metrics, ep_idx, split_label,
             action_type=evaluator.action_type,
         )
         all_metrics.append(metrics)

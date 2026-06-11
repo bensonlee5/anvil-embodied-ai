@@ -34,7 +34,7 @@ from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray
 
 from .action_limiter import ActionLimiter
-from .delta_restore import resolve_action_type, restore_delta_chunk
+from .ee_runtime import ee_poses_from_chunk, ee_rel_restore_chunk, resolve_action_type
 from .metrics_tracker import MetricsTracker
 from .model_loader import ModelLoader, set_deterministic_mode
 
@@ -84,21 +84,15 @@ class LeRobotInferenceNode(Node):
         if not self.echo_topic_only:
             self._setup_model()
 
-            self.action_limiter = ActionLimiter(
-                max_delta=self.max_position_delta,
-                min_delta_threshold=self.min_position_delta,
-                model_joint_order=self.joint_names_config.get("model_joint_order", []),
-                controller_joint_order=self.joint_names_config.get("controller_joint_order", []),
-                logger=self.get_logger(),
-            )
-
-            # Resolve delta exclude indices in model joint order (used by chunk restore)
-            _model_order = self.joint_names_config.get("model_joint_order", [])
-            self._delta_exclude_indices = [
-                _model_order.index(name)
-                for name in self.delta_exclude_joints
-                if name in _model_order
-            ]
+            # action_limiter is used for joint_abs mode only
+            if not self.is_ee:
+                self.action_limiter = ActionLimiter(
+                    max_delta=self.max_position_delta,
+                    min_delta_threshold=self.min_position_delta,
+                    model_joint_order=self.joint_names_config.get("model_joint_order", []),
+                    controller_joint_order=self.joint_names_config.get("controller_joint_order", []),
+                    logger=self.get_logger(),
+                )
 
             self._setup_publishers()
 
@@ -209,12 +203,8 @@ class LeRobotInferenceNode(Node):
 
         # action_type from anvil_config.json — must match training
         self.action_type: str = resolve_action_type(meta)
-        self.use_delta_actions: bool = self.action_type in ("delta_obs_t", "delta_sequential")
-        self.delta_exclude_joints: list[str] = meta.get("delta_exclude_joints", [])
-
-        # Resolve delta exclude joint indices (in model output order)
-        # Will be finalized after joint_names_config is loaded.
-        self._delta_exclude_indices: list[int] = []
+        self.is_ee: bool = self.action_type in ("ee_abs", "ee_rel")
+        self.is_ee_rel: bool = self.action_type == "ee_rel"
 
         # task_description: anvil_config.json first, YAML overrides if explicitly set
         self.task_description = meta.get("task_description", "")
@@ -293,9 +283,7 @@ class LeRobotInferenceNode(Node):
         anvil_path = checkpoint / "anvil_config.json"
         if anvil_path.exists():
             anvil = json.loads(anvil_path.read_text())
-            meta["action_type"] = anvil.get("action_type", "absolute")
-            meta["use_delta_actions"] = anvil.get("use_delta_actions", False)
-            meta["delta_exclude_joints"] = anvil.get("delta_exclude_joints", [])
+            meta["action_type"] = anvil.get("action_type", "joint_abs")
             if "task_description" in anvil:
                 meta["task_description"] = anvil["task_description"]
         return meta
@@ -380,8 +368,6 @@ class LeRobotInferenceNode(Node):
             logger.info(f"Model:      {self.model_path}")
             logger.info(f"Type:       {self.model_type or 'unknown'}")
             logger.info(f"Action type: {self.action_type}")
-            if self.use_delta_actions and self.delta_exclude_joints:
-                logger.info(f"Delta excl: {self.delta_exclude_joints}")
             if self.model_type in {"smolvla", "pi0", "pi05"}:
                 logger.info(f"Task:       '{self.task_description}'")
         logger.info(f"Device:     {self.device}")
@@ -449,15 +435,36 @@ class LeRobotInferenceNode(Node):
             logger.info("└─────────────────────────────────────────────────────────┘")
 
     def _setup_publishers(self) -> None:
-        """Setup action publishers."""
+        """Setup action publishers.
+
+        EE mode (ee_abs / ee_rel): one ``CommandedEEPose`` publisher per arm,
+        topic from ``arm_config["ee_command_topic"]`` (defaults to
+        ``/commanded_ee_{arm_name}``).
+
+        Joint mode (joint_abs): one ``Float64MultiArray`` publisher per arm,
+        topic from ``arm_config["command_topic"]`` (defaults to
+        ``/{arm_name}_forward_position_controller/commands``).
+        """
         self.arm_publishers: dict[str, rclpy.publisher.Publisher] = {}
-        for arm_name, arm_config in self.arms_config.items():
-            cmd_topic = arm_config.get(
-                "command_topic",
-                f"/{arm_name}_forward_position_controller/commands",
-            )
-            self.arm_publishers[arm_name] = self.create_publisher(Float64MultiArray, cmd_topic, 10)
-            self.get_logger().info(f"Publishing to: {cmd_topic}")
+
+        if self.is_ee:
+            from anvil_msgs.msg import CommandedEEPose
+            for arm_name, arm_config in self.arms_config.items():
+                ee_topic = arm_config.get("ee_command_topic", f"/commanded_ee_{arm_name}")
+                self.arm_publishers[arm_name] = self.create_publisher(
+                    CommandedEEPose, ee_topic, 10
+                )
+                self.get_logger().info(f"Publishing EE commands to: {ee_topic}")
+        else:
+            for arm_name, arm_config in self.arms_config.items():
+                cmd_topic = arm_config.get(
+                    "command_topic",
+                    f"/{arm_name}_forward_position_controller/commands",
+                )
+                self.arm_publishers[arm_name] = self.create_publisher(
+                    Float64MultiArray, cmd_topic, 10
+                )
+                self.get_logger().info(f"Publishing to: {cmd_topic}")
 
         if self._monitor_enable:
             self._monitor_obs_pub = self.create_publisher(Float64MultiArray, "/monitor/obs_state", 10)
@@ -601,8 +608,10 @@ class LeRobotInferenceNode(Node):
                 # When the queue is empty, select_action will run the model and fill
                 # it with n_action_steps new predictions, all computed relative to
                 # the current state.  We capture that state as the delta reference.
+                # Only ee_rel needs chunk-level restore; ee_abs/joint_abs do not.
+                _needs_restore = self.is_ee_rel
                 _is_new_chunk = (
-                    self.use_delta_actions
+                    _needs_restore
                     and hasattr(self.model, "_queues")
                     and len(self.model._queues.get("action", [])) == 0
                 )
@@ -624,8 +633,8 @@ class LeRobotInferenceNode(Node):
                 with torch.inference_mode():
                     action = self.model.select_action(observation)
                     # Collect remaining normalized queue items BEFORE postprocessing so
-                    # the whole chunk can be denormalized together for delta restore.
-                    if _is_new_chunk and self.use_delta_actions and hasattr(self.model, "_queues"):
+                    # the whole chunk can be denormalized together for ee_rel restore.
+                    if _is_new_chunk and _needs_restore and hasattr(self.model, "_queues"):
                         _rest_norm = [a.detach().clone() for a in self.model._queues.get("action", [])]
                     else:
                         _rest_norm = None
@@ -653,24 +662,25 @@ class LeRobotInferenceNode(Node):
                         f"[DEBUG] action (post-postproc): [{', '.join(f'{v:.4f}' for v in action)}]"
                     )
 
-                # Chunk-level delta restore via shadow queue.
+                # Chunk-level ee_rel restore via shadow queue.
                 # The model's internal queue stores normalized tensors; we denormalize
-                # the full chunk together, restore delta → absolute, then serve absolute
+                # the full chunk together, restore rel → absolute, then serve absolute
                 # values from a shadow queue so we never re-enter normalized space.
-                if self.use_delta_actions:
+                # ee_abs and joint_abs require no restore — model output is already absolute.
+                if self.is_ee_rel:
                     if _is_new_chunk and self._delta_ref_state is not None:
                         if _rest_norm is not None:
                             _rest_denorm = [self._denorm_queue_action(a) for a in _rest_norm]
                             _chunk = np.stack([action] + _rest_denorm) if _rest_denorm else action[np.newaxis]
                         else:
                             _chunk = action[np.newaxis]
-                        _abs = restore_delta_chunk(_chunk, self._delta_ref_state, self.action_type, self._delta_exclude_indices)
+                        _abs = ee_rel_restore_chunk(_chunk, self._delta_ref_state)
                         self._abs_shadow_queue = deque(_abs[1:])
                         action = _abs[0]
                     elif self._abs_shadow_queue:
                         action = self._abs_shadow_queue.popleft()
                     elif not hasattr(self.model, "_queues") and self._delta_ref_state is not None:
-                        action = restore_delta_chunk(action[np.newaxis], self._delta_ref_state, self.action_type, self._delta_exclude_indices)[0]
+                        action = ee_rel_restore_chunk(action[np.newaxis], self._delta_ref_state)[0]
 
                 self._classic_action_deque.append(action)
                 self.metrics.record_inference()
@@ -739,7 +749,22 @@ class LeRobotInferenceNode(Node):
         return data
 
     def _publish_action(self, action: np.ndarray) -> None:
-        """Publish action to arm controllers."""
+        """Publish action to arm controllers.
+
+        Routes to EE or joint publishing path based on ``self.action_type``.
+        """
+        if self.is_ee:
+            self._publish_ee_action(action)
+        else:
+            self._publish_joint_action(action)
+        # Debug: track smoothness
+        if self._smooth_tracker is not None:
+            self._smooth_tracker.record(action)
+        self.metrics.record_action_output()
+        self._has_published = True
+
+    def _publish_joint_action(self, action: np.ndarray) -> None:
+        """Publish joint absolute actions as Float64MultiArray (joint_abs mode)."""
         current_positions = self.strategy.get_current_joint_positions()
         joint_order = self.joint_names_config.get(
             "controller_joint_order",
@@ -765,7 +790,7 @@ class LeRobotInferenceNode(Node):
                     ]
                 )
 
-            # Delta restore is done upstream in _obs_update (chunk-level).
+            # ee_rel restore is done upstream in _obs_update (chunk-level).
             # Actions arriving here are already absolute — just apply safety limits.
             arm_action = self.action_limiter.process(arm_action, arm_current)
 
@@ -790,11 +815,82 @@ class LeRobotInferenceNode(Node):
                 control_cmd=np.concatenate(monitor_cmd_parts),
             )
 
-        # Debug: track smoothness
-        if self._smooth_tracker is not None:
-            self._smooth_tracker.record(action)
-        self.metrics.record_action_output()
-        self._has_published = True
+    def _publish_ee_action(self, action: np.ndarray) -> None:
+        """Publish EE actions as CommandedEEPose messages (ee_abs / ee_rel mode).
+
+        ``action`` is already in absolute rot6d space when it arrives here
+        (ee_rel restore happens upstream in _obs_update).
+
+        For each arm:
+          - Slices ``action[action_start:action_end]`` (10 dims per arm)
+          - Converts rot6d → quaternion via ``ee_poses_from_chunk``
+          - Builds a ``CommandedEEPose`` and publishes to ``ee_command_topic``
+
+        Gripper is defensively clamped to [-0.003, 0.05] m (same range as
+        the robot's own clamp) to guard against normalisation overshoot.
+        """
+        from anvil_msgs.msg import CommandedEEPose
+        from geometry_msgs.msg import Point, Pose, Quaternion
+        from std_msgs.msg import Header
+
+        now = self.get_clock().now().to_msg()
+        frame_id = self.config.get("frame_id", "world")
+
+        _GRIPPER_MIN = -0.003
+        _GRIPPER_MAX = 0.05
+
+        monitor_cmd_parts: list[np.ndarray] = []
+        arm_list = list(self.arms_config.items())
+
+        for arm_idx, (arm_name, arm_config) in enumerate(arm_list):
+            start_idx = arm_config.get("action_start", 0)
+            end_idx = arm_config.get("action_end", start_idx + 10)
+
+            arm_action_abs = action[start_idx:end_idx]  # (10,) absolute rot6d
+
+            # Convert single-step action to pose dict
+            poses = ee_poses_from_chunk(arm_action_abs[np.newaxis, :], n_arms=1)
+            pose_dict = poses[0][0]  # arm_index 0 within the single-arm slice
+
+            pos = pose_dict["pos"]
+            quat_xyzw = pose_dict["quat_xyzw"]
+            gripper = float(np.clip(pose_dict["gripper"], _GRIPPER_MIN, _GRIPPER_MAX))
+
+            if self._debug:
+                self.get_logger().info(
+                    f"[DEBUG] EE cmd [{arm_name}]: "
+                    f"pos=[{pos[0]:.4f},{pos[1]:.4f},{pos[2]:.4f}] "
+                    f"quat=[{quat_xyzw[0]:.4f},{quat_xyzw[1]:.4f},"
+                    f"{quat_xyzw[2]:.4f},{quat_xyzw[3]:.4f}] "
+                    f"gripper={gripper:.4f}"
+                )
+
+            msg = CommandedEEPose()
+            msg.header = Header()
+            msg.header.stamp = now
+            msg.header.frame_id = frame_id
+            msg.pose = Pose()
+            msg.pose.position = Point(x=float(pos[0]), y=float(pos[1]), z=float(pos[2]))
+            msg.pose.orientation = Quaternion(
+                x=float(quat_xyzw[0]),
+                y=float(quat_xyzw[1]),
+                z=float(quat_xyzw[2]),
+                w=float(quat_xyzw[3]),
+            )
+            msg.gripper = gripper
+
+            if arm_name in self.arm_publishers:
+                self.arm_publishers[arm_name].publish(msg)
+
+            if self._monitor_enable:
+                monitor_cmd_parts.append(arm_action_abs)
+
+        if self._monitor_enable and monitor_cmd_parts:
+            self._publish_monitor(
+                obs_state=np.zeros_like(action),
+                raw_output=action,
+                control_cmd=np.concatenate(monitor_cmd_parts),
+            )
 
     def _publish_monitor(
         self,
@@ -955,8 +1051,16 @@ class LeRobotInferenceNode(Node):
         return self.metrics.get_stats()
 
     def _publish_hold_position(self) -> None:
-        """Publish current joint positions to hold the robot in place on shutdown."""
+        """Publish current joint positions to hold the robot in place on shutdown.
+
+        Skipped in EE mode (ee_abs / ee_rel) — the robot controller (anvil-workcell)
+        retains the last commanded pose autonomously.  Sending a zero Float64MultiArray
+        would be interpreted as joint commands, which is wrong for EE mode.
+        """
         if not hasattr(self, "arm_publishers"):
+            return
+        if self.is_ee:
+            self.get_logger().info("Shutdown: EE mode — hold-position skipped (robot retains last pose)")
             return
         current = self.strategy.get_current_joint_positions()
         if not current:

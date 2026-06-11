@@ -6,7 +6,7 @@
         - ``apply_dataset_patches`` — patches ``LeRobotDataset.__getitem__``.
         - ``apply_val_loss_patch`` — patches ``make_dataset`` (split creation),
           captures the preprocessor from ``make_pre_post_processors``, and
-          injects delta action stats into the returned ``train_dataset``.
+          injects EE rel action stats into the returned ``train_dataset``.
         - ``apply_checkpoint_patch`` — patches ``save_checkpoint`` to compute
           test loss and write ``anvil_config.json`` / ``split_info.json`` next
           to each checkpoint.
@@ -34,8 +34,7 @@ from anvil_shared.splits import compute_split_episodes, load_split_info, save_sp
 from anvil_trainer.config import TrainingConfig
 from anvil_trainer.transforms import (
     DataIntegrityError,
-    DeltaActionTransform,
-    EEDeltaTransform,
+    EERelTransform,
     ExcludeObservationTransform,
     TaskOverrideTransform,
     Transform,
@@ -59,8 +58,7 @@ class TransformRunner:
     """
 
     # Registry of available transforms (add new transforms here).
-    # Instantiated fresh per TransformRunner so stateful transforms (e.g. DeltaActionTransform
-    # which caches joint indices) do not share state across runs.
+    # Instantiated fresh per TransformRunner so stateful transforms do not share state across runs.
     TRANSFORMS: list[Transform] = []  # populated in __init__
 
     def __init__(self, config: TrainingConfig):
@@ -68,8 +66,7 @@ class TransformRunner:
         transforms: list[Transform] = [
             ExcludeObservationTransform(),
             TaskOverrideTransform(),
-            DeltaActionTransform(),
-            EEDeltaTransform(),
+            EERelTransform(),
         ]
         self.active_transforms = [t for t in transforms if t.is_enabled(config)]
         self._val_dataloader = None   # set by apply_val_loss_patch when make_dataset is called
@@ -140,117 +137,89 @@ class TransformRunner:
             return f"excluding: {', '.join(self.config.exclude_observation)}"
         elif isinstance(transform, TaskOverrideTransform):
             return f"'{self.config.task_override}'"
-        elif isinstance(transform, DeltaActionTransform):
-            return "action = action - observation.state"
+        elif isinstance(transform, EERelTransform):
+            return "SE(3) relative: delta_xyz + R_state.T @ R_action"
         return "enabled"
 
-    def _compute_delta_action_stats(self, full_dataset: Any) -> dict | None:
-        """Compute delta action stats when DeltaActionTransform is active.
+    def _compute_ee_rel_stats(self, full_dataset: Any, cfg: Any) -> dict | None:
+        """Compute EE relative action stats for ``ee_rel`` training.
 
-        LeRobot reads ``dataset.meta.stats`` after ``make_dataset()`` returns
-        and uses those stats to build the normalizer.  Because
-        ``DeltaActionTransform`` runs at ``__getitem__`` time (after stats are
-        read), a vanilla setup normalises delta actions with *absolute* action
-        statistics — producing a large constant offset in normalised space
-        (e.g. −2.66 σ for joint j4) that causes early overfitting.
+        Stats must be computed from the SAME distribution as the actual training
+        targets.  The training target at horizon step k is::
 
-        This method computes delta action stats from the HF dataset arrays
-        (vectorised, fast — ~5 MB for 69K frames) and returns the dict.  It
-        also patches ``full_dataset.meta.stats["action"]`` in place so that
-        the early-return path (``n_train < 1`` case) inherits the correct
-        stats.
+            delta_xyz[k]   = action_xyz[t+k]  - state_xyz[t]
+            delta_rot6d[k] = matrices_to_rot6d(R_state[t].T @ R_action[t+k])
+            gripper[k]     = action_gripper[t+k]   (absolute, excluded from delta)
 
-        When ``config.delta_stats_n_steps > 1`` the stats are computed over
-        multi-step deltas ``action[t+k] - state[t]`` for k = 0 … n_steps,
-        sampled only within episode boundaries.  This makes the normalisation
-        range reflect the full displacement distribution seen inside an action
-        chunk, preventing loss imbalance in ACT-style chunk prediction and
-        clip-sample truncation in Diffusion.
+        for k = 0 … horizon-1 (all steps the diffusion model predicts over).
 
-        Args:
-            full_dataset: LeRobotDataset spanning all episodes.
+        The horizon ``n_steps`` is read from ``cfg.policy.action_delta_indices``
+        (the same indices LeRobot uses to window the action feature).
 
-        Returns:
-            Patched action stats dict, or ``None`` when DeltaActionTransform
-            is inactive or the computation fails (logged as a warning).
+        Returns the patched stats dict, or ``None`` on failure.
         """
-        delta_transform = next(
-            (t for t in self.active_transforms if isinstance(t, DeltaActionTransform)),
-            None,
-        )
-        if delta_transform is None:
+        if not self.config.is_ee_rel:
             return None
 
-        import numpy as np  # numpy is not top-level; keep import local
+        import numpy as np
         try:
+            from anvil_shared.ee_transform import ee_rel_forward, n_arms_from_dims
+
             hf = full_dataset.hf_dataset
-            actions_np = np.array(hf["action"], dtype=np.float64)
-            states_np = np.array(hf["observation.state"], dtype=np.float64)
+            actions_np = np.array(hf["action"], dtype=np.float64)       # (N, 10*n_arms)
+            states_np = np.array(hf["observation.state"], dtype=np.float64)  # (N, 8*n_arms)
             episode_idx_np = np.array(hf["episode_index"], dtype=np.int64).ravel()
-            # Use most recent obs step if states are stacked (n_obs_steps > 1)
+
             if states_np.ndim == 3:
-                states_np = states_np[:, -1, :]
-            d_action = actions_np.shape[-1]
-            d_state = states_np.shape[-1]
+                states_np = states_np[:, -1, :]  # multi-step obs → most recent step
 
-            # _resolve_exclude_indices triggers _build_mappings which validates names
-            exclude_indices = delta_transform._resolve_exclude_indices(self.config)
-            action_to_state_map = delta_transform._action_to_state_map
-            exclude_set = set(exclude_indices)
+            n_arms = n_arms_from_dims(states_np.shape[-1], actions_np.shape[-1])
 
-            n_steps = max(1, getattr(self.config, "delta_stats_n_steps", 1))
+            # Derive horizon from policy config
+            action_delta_indices = getattr(cfg.policy, "action_delta_indices", None)
+            n_steps = len(action_delta_indices) if action_delta_indices else 1
+            N = len(actions_np)
 
-            def _compute_deltas_for_k(k: int) -> np.ndarray:
-                """Return delta array for look-ahead k, respecting episode boundaries."""
+            def _ee_rel_for_k(k: int) -> np.ndarray:
+                """Return SE(3) relative array for look-ahead k, episode-bounded."""
                 if k == 0:
                     act = actions_np
                     sta = states_np
-                    mask = np.ones(len(act), dtype=bool)
+                    mask = np.ones(N, dtype=bool)
                 else:
                     act = actions_np[k:]
                     sta = states_np[:-k]
                     mask = episode_idx_np[k:] == episode_idx_np[:-k]
 
-                if action_to_state_map is not None:
-                    d = act.copy()
-                    for a_idx, s_idx in enumerate(action_to_state_map):
-                        if a_idx not in exclude_set:
-                            d[:, a_idx] = act[:, a_idx] - sta[:, s_idx]
-                elif d_action == d_state:
-                    d = act - sta
-                    # Restore excluded joints to absolute values
-                    for idx in exclude_indices:
-                        if idx < d_action:
-                            d[:, idx] = act[:, idx]
-                else:
-                    raise DataIntegrityError(
-                        f"[delta_stats] action has {d_action} joints but observation.state has "
-                        f"{d_state} joints and no info.json is available for name-based mapping."
-                    )
+                # ee_rel_forward handles per-sample states (sta shape N×8*n)
+                d = ee_rel_forward(act, sta)
                 return d[mask]
 
             all_deltas = np.concatenate(
-                [_compute_deltas_for_k(k) for k in range(n_steps)], axis=0
-            )
+                [_ee_rel_for_k(k) for k in range(n_steps)], axis=0
+            )  # (N_valid_pairs, 10*n_arms)
 
             orig = full_dataset.meta.stats.get("action", {})
-            orig_mean = np.array(orig.get("mean", all_deltas.mean(axis=0)))
-            orig_std = np.array(orig.get("std", all_deltas.std(axis=0)))
-            orig_min = np.array(orig.get("min", all_deltas.min(axis=0)))
-            orig_max = np.array(orig.get("max", all_deltas.max(axis=0)))
 
             delta_mean = all_deltas.mean(axis=0)
-            delta_std = np.where(all_deltas.std(axis=0) < 1e-6, 1e-6, all_deltas.std(axis=0))
+            delta_std = np.where(
+                all_deltas.std(axis=0) < 1e-6, 1e-6, all_deltas.std(axis=0)
+            )
             delta_min = all_deltas.min(axis=0)
             delta_max = all_deltas.max(axis=0)
 
-            # Restore excluded joints to their original absolute stats
-            for idx in exclude_indices:
-                if idx < d_action:
-                    delta_mean[idx] = orig_mean[idx]
-                    delta_std[idx] = orig_std[idx]
-                    delta_min[idx] = orig_min[idx]
-                    delta_max[idx] = orig_max[idx]
+            # Gripper is absolute — restore its original stats so normalization
+            # uses the real gripper range, not the near-zero delta range.
+            orig_arr = lambda key, fallback: np.array(orig.get(key, fallback))
+            for arm in range(n_arms):
+                grip_idx = arm * 10 + 9
+                for arr, key in [
+                    (delta_mean, "mean"), (delta_std, "std"),
+                    (delta_min, "min"), (delta_max, "max"),
+                ]:
+                    orig_vals = orig_arr(key, arr)
+                    if grip_idx < len(orig_vals):
+                        arr[grip_idx] = orig_vals[grip_idx]
 
             patched_stats = {
                 "mean": delta_mean.tolist(),
@@ -259,150 +228,9 @@ class TransformRunner:
                 "max": delta_max.tolist(),
                 "count": orig.get("count", len(all_deltas)),
             }
-            # Patch full_dataset in place so the early-return path is covered
-            full_dataset.meta.stats["action"] = patched_stats
-
-            log.info(
-                "[delta_stats] Computed delta action stats over %d samples "
-                "(n_steps=%d, %d frames, %d joints, %d kept absolute: %s). "
-                "j4 abs_mean=%.3f → delta_mean=%.4f, abs_std=%.3f → delta_std=%.4f",
-                len(all_deltas), n_steps, len(actions_np), d_action,
-                len(exclude_indices), self.config.delta_exclude_joints or [],
-                orig_mean[4] if len(orig_mean) > 4 else float("nan"),
-                delta_mean[4] if len(delta_mean) > 4 else float("nan"),
-                orig_std[4] if len(orig_std) > 4 else float("nan"),
-                delta_std[4] if len(delta_std) > 4 else float("nan"),
-            )
-            return patched_stats
-        except DataIntegrityError:
-            raise
-        except Exception as e:
-            log.warning(
-                "[delta_stats] Failed to compute delta action stats: %s — "
-                "falling back to absolute stats (training may be suboptimal)", e
-            )
-            return None
-
-    def _compute_ee_delta_stats(self, full_dataset: Any, cfg: Any) -> dict | None:
-        """Compute EE delta action stats for ``ee_delta`` training.
-
-        Stats must be computed from the SAME distribution as the actual training
-        targets.  The training target at horizon step k is::
-
-            delta_xyz[k]   = action_xyz[t+k]  - state_xyz[t]
-            delta_rot6d[k] = matrix_to_rot6d(R_state[t].T @ R_action[t+k])
-            gripper[k]     = action_gripper[t+k]   (absolute, excluded from delta)
-
-        for k = 0 … horizon-1 (all steps the diffusion model predicts over).
-        Computing stats from k=0 only would under-represent the larger deltas at
-        k=H-1, causing normalization to map those targets outside the valid range
-        and triggering clip_sample truncation in Diffusion Policy.
-
-        The horizon ``n_steps`` is read from ``cfg.policy.action_delta_indices``
-        (the same indices LeRobot uses to window the action feature), so stats
-        automatically stay in sync with the policy config.
-
-        Normalization recommendation (by model family):
-            Diffusion Policy  — use MIN_MAX for ACTION.  clip_sample hard-clamps
-                                model outputs to [-1, +1] in normalised space.
-                                MIN_MAX guarantees every training target maps to
-                                exactly [-1, +1] → clip_sample never fires.
-                                MEAN_STD would clip ~32% of targets at ±1σ.
-            ACT / VLA         — MIN_MAX or MEAN_STD both acceptable.  No
-                                clip_sample, so MEAN_STD is numerically cleaner
-                                for zero-centred delta distributions.
-
-        This method patches both ``min``/``max`` (for MIN_MAX) and
-        ``mean``/``std`` (for MEAN_STD) so the correct fields are populated
-        regardless of which normalization the policy config selects.
-
-        Returns the patched stats dict, or ``None`` on failure.
-        """
-        if not self.config.is_ee_delta:
-            return None
-
-        import numpy as np
-        try:
-            from anvil_shared.rotation import matrix_to_rot6d, quat_to_matrix, rot6d_to_matrix
-
-            hf = full_dataset.hf_dataset
-            actions_np     = np.array(hf["action"],            dtype=np.float64)  # (N, 10*n_arms)
-            states_np      = np.array(hf["observation.state"], dtype=np.float64)  # (N, 8*n_arms)
-            episode_idx_np = np.array(hf["episode_index"],     dtype=np.int64).ravel()
-
-            if states_np.ndim == 3:
-                states_np = states_np[:, -1, :]   # multi-step obs → most recent step
-
-            n_arms = states_np.shape[-1] // 8
-            if n_arms == 0 or states_np.shape[-1] % 8 != 0:
-                raise DataIntegrityError(
-                    f"[ee_delta_stats] observation.state dim {states_np.shape[-1]} is not 8*n_arms"
-                )
-
-            # Derive horizon from policy config — same indices LeRobot uses to
-            # window the action feature.  Falls back to 1 (k=0 only) when the
-            # policy has no action_delta_indices (should not happen in practice).
-            action_delta_indices = getattr(cfg.policy, "action_delta_indices", None)
-            n_steps = len(action_delta_indices) if action_delta_indices else 1
-            N = len(actions_np)
-
-            def _ee_delta_for_k(k: int) -> np.ndarray:
-                """Return SE(3) delta array for look-ahead k, episode-bounded."""
-                if k == 0:
-                    act  = actions_np
-                    sta  = states_np
-                    mask = np.ones(N, dtype=bool)
-                else:
-                    act  = actions_np[k:]
-                    sta  = states_np[:-k]
-                    mask = episode_idx_np[k:] == episode_idx_np[:-k]
-
-                d = act.copy()
-                for arm in range(n_arms):
-                    s0, a0 = arm * 8, arm * 10
-                    # xyz delta — elementwise subtract
-                    d[:, a0:a0+3] = act[:, a0:a0+3] - sta[:, s0:s0+3]
-                    # SO(3) delta — R_state.T @ R_action, re-encoded as rot6d
-                    for i in range(len(act)):
-                        R_state  = quat_to_matrix(sta[i, s0+3:s0+7])
-                        R_action = rot6d_to_matrix(act[i, a0+3:a0+9])
-                        d[i, a0+3:a0+9] = matrix_to_rot6d(R_state.T @ R_action)
-                    d[:, a0+9] = act[:, a0+9]  # gripper: keep absolute (not delta-ized)
-                return d[mask]
-
-            all_deltas = np.concatenate(
-                [_ee_delta_for_k(k) for k in range(n_steps)], axis=0
-            )  # shape: (N_valid_pairs, 10*n_arms)
-
-            orig = full_dataset.meta.stats.get("action", {})
-            orig_arr = lambda key, fallback: np.array(orig.get(key, fallback))
-
-            delta_mean = all_deltas.mean(axis=0)
-            delta_std  = np.where(all_deltas.std(axis=0) < 1e-6, 1e-6,
-                                  all_deltas.std(axis=0))
-            delta_min  = all_deltas.min(axis=0)
-            delta_max  = all_deltas.max(axis=0)
-
-            # Gripper is absolute — restore its original stats so normalization
-            # uses the real gripper range, not the near-zero delta range.
-            for arm in range(n_arms):
-                grip_idx = arm * 10 + 9
-                for arr, key in [(delta_mean, "mean"), (delta_std, "std"),
-                                 (delta_min,  "min"),  (delta_max, "max")]:
-                    orig_vals = orig_arr(key, arr)
-                    if grip_idx < len(orig_vals):
-                        arr[grip_idx] = orig_vals[grip_idx]
-
-            patched_stats = {
-                "mean":  delta_mean.tolist(),
-                "std":   delta_std.tolist(),
-                "min":   delta_min.tolist(),
-                "max":   delta_max.tolist(),
-                "count": orig.get("count", len(all_deltas)),
-            }
             full_dataset.meta.stats["action"] = patched_stats
             log.info(
-                "[ee_delta_stats] Computed SO(3) delta stats over %d samples "
+                "[ee_rel_stats] Computed SO(3) relative stats over %d samples "
                 "(n_steps=%d, %d source frames, %d arm(s))",
                 len(all_deltas), n_steps, N, n_arms,
             )
@@ -410,7 +238,7 @@ class TransformRunner:
         except DataIntegrityError:
             raise
         except Exception as e:
-            log.warning("[ee_delta_stats] Failed: %s — falling back to absolute stats", e)
+            log.warning("[ee_rel_stats] Failed: %s — falling back to absolute stats", e)
             return None
 
     def apply_metadata_patches(self) -> None:
@@ -495,13 +323,12 @@ class TransformRunner:
             total_ep = full_dataset.num_episodes
 
             # Compute action stats:
-            #   - joint delta modes  → _compute_delta_action_stats (elementwise subtract)
-            #   - ee_delta           → _compute_ee_delta_stats (SO(3) relative)
-            #   - absolute / ee_absolute → no patching needed (stats from dataset as-is)
-            if val_state.config.is_ee_delta:
-                _patched_action_stats = val_state._compute_ee_delta_stats(full_dataset, cfg)
+            #   - ee_rel → _compute_ee_rel_stats (SO(3) relative)
+            #   - joint_abs / ee_abs → no patching needed (stats from dataset as-is)
+            if val_state.config.is_ee_rel:
+                _patched_action_stats = val_state._compute_ee_rel_stats(full_dataset, cfg)
             else:
-                _patched_action_stats = val_state._compute_delta_action_stats(full_dataset)
+                _patched_action_stats = None
 
             # Check if split_info.json already exists in last checkpoint (for resume)
             split_info_path = Path(cfg.output_dir) / "checkpoints" / "last" / "pretrained_model" / "split_info.json"
@@ -532,7 +359,6 @@ class TransformRunner:
 
                 if len(train_ep) < 1:
                     log.warning("[split] Not enough episodes (%d) for split %s, using all for training", total_ep, s)
-                    # full_dataset already has patched action stats if _patched_action_stats is set
                     return full_dataset
                 log.info("[split] Generated random splits")
 
@@ -580,12 +406,11 @@ class TransformRunner:
             # frame indices; val/test dataloaders use relative indices and must NOT
             # be remapped.
             train_dataset._anvil_uses_abs_sampler = True
-            # Inject delta action stats so lerobot's normalizer uses the correct
-            # distribution.  train_dataset is a fresh LeRobotDataset instance that
-            # re-reads stats.json, so we must patch it explicitly here.
+            # Inject EE rel action stats so lerobot's normalizer uses the correct
+            # distribution.
             if _patched_action_stats is not None:
                 train_dataset.meta.stats["action"] = _patched_action_stats
-                log.info("[delta_stats] Patched train_dataset.meta.stats['action'] with delta stats")
+                log.info("[ee_rel_stats] Patched train_dataset.meta.stats['action']")
             log.info("[split] train=%d ep (randomly selected)", len(train_ep))
             return train_dataset
 
@@ -619,15 +444,9 @@ class TransformRunner:
 
         anvil_cfg_base: dict = {
             "action_type": self.config.action_type,
-            # Backward compat: old inference nodes read use_delta_actions
-            "use_delta_actions": self.config.use_delta_actions,
-            "delta_sequential": self.config.delta_sequential,
-            # EE Cartesian fields
             "is_ee": self.config.is_ee,
-            "is_ee_delta": self.config.is_ee_delta,
+            "is_ee_rel": self.config.is_ee_rel,
         }
-        if self.config.delta_exclude_joints:
-            anvil_cfg_base["delta_exclude_joints"] = self.config.delta_exclude_joints
         if self.config.task_override:
             anvil_cfg_base["task_description"] = self.config.task_override
         if self.config.note:
