@@ -107,29 +107,42 @@ Pick the config that matches your recording setup:
 | `openarm_single_quest.yaml` | Quest VR | Single (right) | Command topics |
 | `openarm_single_quest_afo.yaml` | Quest VR | Single (right) | Observation lookahead |
 
+**action_from_observation** — used by `openarm_single_quest_afo.yaml` when `/follower_*/commands` was not recorded. Instead of reading from command topics, the converter derives actions from the follower's own joint positions shifted N frames forward in time. Enable in your conversion config YAML:
+
+```yaml
+action_from_observation: true
+action_from_observation_n: 10 # action[t] = observation.state[t + n] (default n=10, ≈333ms at 30fps)
+```
+
+**CLI Command:**
+
 ```bash
 uv run mcap-convert \
   --input-dir data/raw/my-sessions \
-  --config configs/mcap_converter/target-config.yaml
+  --config configs/mcap_converter/target-config.yaml \
+  --output-dir data/datasets \
+  # Optional: override output path (bypasses auto-naming)
+  # --output-path data/datasets/my-custom-name
+  --fps 30
 ```
 
-Output is always saved to `<output-dir>/<input-dir-name>/` (default: `data/datasets/my-sessions/`).
+**`--output-dir`** sets the base output directory for converted datasets. Output is always saved to `<output-dir>/<input-dir-name>/` (default: `data/datasets/my-sessions/`).
 
-**`action_from_observation`** — use when `/follower_*/commands` was not recorded. Shifts observation forward by N frames:
-
-```
-action[t] = observation.state[t + N]   (default N=10, ≈333ms at 30fps)
-```
+**`--output-path`** bypasses auto-naming entirely — the dataset lands exactly where you point it. Use it to override the output path. (`data/datasets/my-custom-name/`)
 
 **Common flags:**
 
-| Flag | Description |
-|------|-------------|
-| `--resume` | Skip already-converted episodes — safe to re-run after interruption |
-| `--max-episodes N` | Convert only the first N episodes |
-| `--fps N` | Override output FPS (auto-detected by default) |
-| `--vcodec` | `h264` (default) · `hevc` · `libsvtav1` |
-| `--robot-type` | `anvil_openarm` (default) · `anvil_yam` |
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--input-dir PATH` | _(required)_ | Directory containing MCAP session folders |
+| `--config PATH` | _(required)_ | Conversion config YAML (see table above) |
+| `--output-dir PATH` | `data/datasets` | Base output directory — dataset lands at `<output-dir>/<input-dir-name>/` |
+| `--output-path PATH` | — | Full output path override — use this exact directory instead of auto-naming |
+| `--resume` | — | Skip already-converted episodes — safe to re-run after interruption |
+| `--max-episodes N` | all | Convert only the first N episodes |
+| `--fps N` | auto | Override output FPS (auto-detected by default) |
+| `--vcodec` | `h264` | `h264` · `hevc` · `libsvtav1` |
+| `--robot-type` | `anvil_openarm` | `anvil_openarm` · `anvil_yam` |
 
 Then validate:
 
