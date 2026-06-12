@@ -96,13 +96,13 @@ class Scenario:
         return self.train_out / "checkpoints" / f"{steps:06d}"
 
 
-# mcap-convert appends the input directory name to the output path, so the dataset
-# ends up at <output_parent>/<mcap_root_name>/.  Use scenario-specific parent dirs
-# under outputs/ to keep artifacts separate.
+# mcap-convert appends "<input-dir-name>-<data_space>" to the output path, so the
+# dataset ends up at <output_parent>/<mcap_root_name>-joint/ or -ee/.
+# Use scenario-specific parent dirs under outputs/ to keep artifacts separate.
 # ee_abs and ee_rel point to the SAME dataset_dir — step 1 for ee_rel shows
 # "cached" when ee_abs has already converted, and re-converts if forced.
-_MCAP_NAME    = MCAP_ROOT.name     # "test-session"
-_EE_MCAP_NAME = EE_MCAP_ROOT.name  # "ee-session"
+_MCAP_NAME    = f"{MCAP_ROOT.name}-joint"     # "test-session-joint"
+_EE_MCAP_NAME = f"{EE_MCAP_ROOT.name}-ee"    # "ee-session-ee"
 
 _EE_INFERENCE_CFG = FIXTURES / "configs" / "inference-eval-smoke-test-ee.yaml"
 

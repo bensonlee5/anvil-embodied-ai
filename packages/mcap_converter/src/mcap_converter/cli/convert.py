@@ -653,9 +653,26 @@ examples:
     )
     args = parser.parse_args(args)
 
-    # Resolve output path: <output-dir>/<input-dir-name>/
+    # Load configuration early — needed to determine data_space suffix for output dir
+    if args.config:
+        config = ConfigLoader.from_yaml(args.config)
+        log(f"Loaded config from: [dim]{args.config}[/dim]")
+    else:
+        config = ConfigLoader.get_default()
+        log("Using default configuration")
+
+    # Validate config eagerly — better error messages than cryptic extraction failures
+    try:
+        validate_config(config)
+    except ConfigurationError as exc:
+        console.print(f"\n[bold red]Configuration error:[/bold red] {exc}\n")
+        exit(1)
+
+    # Resolve output path: <output-dir>/<input-dir-name>-<data_space>/
+    # Suffix (-joint / -ee) makes it clear which action space was used when both
+    # conversions are run side-by-side from the same raw sessions directory.
     input_name = Path(args.input_dir.rstrip("/")).name
-    args.output_dir = str(Path(args.output_dir.rstrip("/")) / input_name)
+    args.output_dir = str(Path(args.output_dir.rstrip("/")) / f"{input_name}-{config.data_space}")
 
     # Handle HuggingFace username
     if args.hf_user:
@@ -671,22 +688,6 @@ examples:
     # Construct repo_id
     dataset_name = args.hf_repo if args.hf_repo else Path(args.output_dir).name
     repo_id = f"{hf_username}/{dataset_name}"
-
-    # Load configuration
-    if args.config:
-        config = ConfigLoader.from_yaml(args.config)
-        log(f"Loaded config from: [dim]{args.config}[/dim]")
-    else:
-        config = ConfigLoader.get_default()
-        log("Using default configuration")
-
-    # Validate config eagerly — better error messages than cryptic extraction failures
-    try:
-        validate_config(config)
-    except ConfigurationError as exc:
-        console.print(f"\n[bold red]Configuration error:[/bold red] {exc}\n")
-        exit(1)
-
 
     # Collect MCAP files once (reused for fps detection and conversion)
     all_mcap_files = collect_mcap_files(args.input_dir)
