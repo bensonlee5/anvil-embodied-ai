@@ -4,7 +4,11 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]  # …/anvil-embodied-ai
+try:
+    _REPO_ROOT: Path | None = Path(__file__).resolve().parents[4]  # …/anvil-embodied-ai
+except IndexError:
+    # Shallow mount path (e.g. Docker: /workspace/anvil_shared_src/anvil_shared/)
+    _REPO_ROOT = None
 
 
 def git_provenance() -> dict[str, str]:
