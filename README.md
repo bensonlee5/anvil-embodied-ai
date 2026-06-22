@@ -103,7 +103,7 @@ Convert MCAP recordings into LeRobot v3.0 datasets. Pick the config that matches
 
 ### 2. Model Training ([doc](docs/training.md))
 
-Train ACT, Diffusion, SmolVLA, Pi0, or Pi0.5 policies. Checkpoints saved to `model_zoo/<dataset>/<job_name>/`.
+Train ACT, Diffusion, SmolVLA, Pi0, or Pi0.5 policies. Checkpoints saved to `model_zoo/<space>-space/<dataset>/<job_name>/` (`ee-space/` or `joint-space/` based on `--action-type`).
 
 | Config | Data space | Teleop mode | Arms | `observation.state` | `action` |
 |--------|-----------|-------------|------|---------------------|---------|
@@ -117,11 +117,13 @@ Train ACT, Diffusion, SmolVLA, Pi0, or Pi0.5 policies. Checkpoints saved to `mod
 
 ```bash
 # EE Cartesian bimanual (recommended for EE-space diffusion policy)
+# Output: data/datasets/ee-space/my-sessions/
 uv run mcap-convert \
   --input-dir data/raw/my-sessions \
   --config configs/mcap_converter/openarm_ee_bimanual.yaml
 
-# Joint space (existing behavior)
+# Joint space
+# Output: data/datasets/joint-space/my-sessions/
 uv run mcap-convert \
   --input-dir data/raw/my-sessions \
   --config configs/mcap_converter/openarm_joint_bimanual.yaml
@@ -192,7 +194,7 @@ Expected: 5 checks all showing `[OK]`.
 | Pi0 | `pi0` | Flow-matching VLA; PaliGemma-3B backbone |
 | Pi0.5 | `pi05` | Larger Pi0 variant (~4B params); higher VRAM |
 
-Checkpoints are saved to `model_zoo/<dataset>/<job_name>/`. Run `anvil-trainer --help` for the full flag reference.
+Checkpoints are saved to `model_zoo/<space>-space/<dataset>/<job_name>/` (`ee-space/` for EE action types, `joint-space/` for joint). Run `anvil-trainer --help` for the full flag reference.
 
 ---
 
@@ -467,19 +469,25 @@ Only pass `--resume` — all other settings are restored from the checkpoint's `
 
 ```
 model_zoo/
-└── <dataset>/
-    └── <job_name>/
-        ├── checkpoints/
-        │   ├── last -> 100000/          # symlink to latest checkpoint
-        │   ├── 010000/
-        │   │   └── pretrained_model/
-        │   │       ├── config.json              # LeRobot policy config
-        │   │       ├── anvil_config.json        # action_type, note, task_description
-        │   │       ├── split_info.json          # train/val/test episode lists
-        │   │       ├── policy_preprocessor.json # normalizer + resize config
-        │   │       └── policy_postprocessor.json
-        │   └── 100000/
-        └── wandb/
+├── ee-space/               # EE action types (ee_abs, ee_rel)
+│   └── <dataset>/
+│       └── <job_name>/
+│           ├── checkpoints/
+│           │   ├── last -> 100000/          # symlink to latest checkpoint
+│           │   ├── 010000/
+│           │   │   └── pretrained_model/
+│           │   │       ├── config.json              # LeRobot policy config
+│           │   │       ├── anvil_config.json        # action_type, note, task_description
+│           │   │       ├── split_info.json          # train/val/test episode lists
+│           │   │       ├── policy_preprocessor.json # normalizer + resize config
+│           │   │       └── policy_postprocessor.json
+│           │   └── 100000/
+│           └── wandb/
+└── joint-space/            # Joint action type (joint_abs)
+    └── <dataset>/
+        └── <job_name>/
+            └── checkpoints/
+                └── ...
 ```
 
 ---

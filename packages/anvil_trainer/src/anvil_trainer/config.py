@@ -268,7 +268,11 @@ class TrainingConfig:
                     except Exception:
                         pass
         else:
-            # Resolve output_dir for NEW job: model_zoo/{dataset_name}/{run_name}
+            # Resolve output_dir for NEW job:
+            #   model_zoo/{data_space}-space/{dataset_name}/{run_name}
+            # ee_abs/ee_rel → ee-space/; joint_abs → joint-space/
+            data_space = "ee" if action_type in ("ee_abs", "ee_rel") else "joint"
+
             # Extract job_name if provided (passed through to lerobot as-is)
             job_name = None
             for arg in sys.argv:
@@ -285,7 +289,7 @@ class TrainingConfig:
                     output_dir = arg.split("=", 1)[1]
                     break
             if output_dir is None:
-                output_dir = f"model_zoo/{dataset_name}/{run_name}"
+                output_dir = f"model_zoo/{data_space}-space/{dataset_name}/{run_name}"
                 sys.argv.append(f"--output_dir={output_dir}")
 
             # Auto-inject job_name if not provided (used as wandb run name)
@@ -353,6 +357,10 @@ class TrainingConfig:
                 if policy_type == "diffusion":
                     if not any(a.startswith("--policy.use_group_norm=") for a in sys.argv):
                         sys.argv.append("--policy.use_group_norm=false")
+
+        # Disable wandb artifact upload by default for all runs (new + resume)
+        if not any(arg.startswith("--wandb.disable_artifact") for arg in sys.argv):
+            sys.argv.append("--wandb.disable_artifact=true")
 
         return cls(
             exclude_observs=exclude_observs,

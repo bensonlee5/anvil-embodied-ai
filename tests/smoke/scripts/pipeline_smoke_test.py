@@ -96,13 +96,13 @@ class Scenario:
         return self.train_out / "checkpoints" / f"{steps:06d}"
 
 
-# mcap-convert appends "<input-dir-name>-<data_space>" to the output path, so the
-# dataset ends up at <output_parent>/<mcap_root_name>-joint/ or -ee/.
+# mcap-convert appends "<data_space>-space/<input-dir-name>" to the output path,
+# so the dataset ends up at <output_base>/joint-space/<name>/ or ee-space/<name>/.
 # Use scenario-specific parent dirs under outputs/ to keep artifacts separate.
 # ee_abs and ee_rel point to the SAME dataset_dir — step 1 for ee_rel shows
 # "cached" when ee_abs has already converted, and re-converts if forced.
-_MCAP_NAME    = f"{MCAP_ROOT.name}-joint"     # "test-session-joint"
-_EE_MCAP_NAME = f"{EE_MCAP_ROOT.name}-ee"    # "ee-session-ee"
+_MCAP_NAME    = MCAP_ROOT.name    # "test-session"
+_EE_MCAP_NAME = EE_MCAP_ROOT.name  # "ee-session"
 
 _EE_INFERENCE_CFG = FIXTURES / "configs" / "inference-eval-smoke-test-ee.yaml"
 
@@ -111,7 +111,7 @@ SCENARIOS: dict[str, Scenario] = {
         key="joint_abs_afo",
         label="joint_abs AFO",
         mcap_root=MCAP_ROOT,
-        dataset_dir=OUTPUTS / "datasets" / "joint_abs_afo" / _MCAP_NAME,
+        dataset_dir=OUTPUTS / "datasets" / "joint_abs_afo" / "joint-space" / _MCAP_NAME,
         train_out=OUTPUTS / "model_zoo" / "joint_abs_afo" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "joint_abs_afo" / "raw",
         eval_ros_out=OUTPUTS / "eval_results" / "joint_abs_afo" / "ros",
@@ -121,7 +121,7 @@ SCENARIOS: dict[str, Scenario] = {
         key="joint_abs",
         label="joint_abs CMD",
         mcap_root=MCAP_ROOT,
-        dataset_dir=OUTPUTS / "datasets" / "joint_abs" / _MCAP_NAME,
+        dataset_dir=OUTPUTS / "datasets" / "joint_abs" / "joint-space" / _MCAP_NAME,
         train_out=OUTPUTS / "model_zoo" / "joint_abs" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "joint_abs" / "raw",
         eval_ros_out=OUTPUTS / "eval_results" / "joint_abs" / "ros",
@@ -131,7 +131,7 @@ SCENARIOS: dict[str, Scenario] = {
         key="ee_abs",
         label="ee_abs",
         mcap_root=EE_MCAP_ROOT,
-        dataset_dir=OUTPUTS / "datasets" / "ee" / _EE_MCAP_NAME,
+        dataset_dir=OUTPUTS / "datasets" / "ee" / "ee-space" / _EE_MCAP_NAME,
         train_out=OUTPUTS / "model_zoo" / "ee_abs" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "ee_abs" / "raw",
         eval_ros_out=OUTPUTS / "eval_results" / "ee_abs" / "ros",
@@ -144,7 +144,7 @@ SCENARIOS: dict[str, Scenario] = {
         label="ee_rel",
         mcap_root=EE_MCAP_ROOT,
         # Same dataset as ee_abs — step 1 is "cached" when ee_abs already converted.
-        dataset_dir=OUTPUTS / "datasets" / "ee" / _EE_MCAP_NAME,
+        dataset_dir=OUTPUTS / "datasets" / "ee" / "ee-space" / _EE_MCAP_NAME,
         train_out=OUTPUTS / "model_zoo" / "ee_rel" / "smoke",
         eval_out=OUTPUTS / "eval_results" / "ee_rel" / "raw",
         eval_ros_out=OUTPUTS / "eval_results" / "ee_rel" / "ros",
@@ -225,10 +225,12 @@ def run_step_convert(sc: Scenario, force: bool) -> StepResult:
         return StepResult(ok=True, duration_s=0.0, artifact=sc.dataset_dir, notes="cached")
 
     t0 = time.monotonic()
+    # mcap-convert appends <data_space>-space/<input-name>/ to the given -o dir,
+    # so we pass dataset_dir.parent.parent (the base above the space-subdir).
     rc = _run([
         "uv", "run", "mcap-convert",
         "-i", str(sc.mcap_root),
-        "-o", str(sc.dataset_dir.parent),
+        "-o", str(sc.dataset_dir.parent.parent),
         "--config", str(sc.convert_config),
         "--robot-type", "anvil_openarm",
     ])

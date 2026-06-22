@@ -17,9 +17,11 @@ uv sync --all-packages
 
 ```bash
 uv run anvil-eval-ros \
-    --checkpoint model_zoo/<dataset>/<job>/checkpoints/<step> \
+    --checkpoint model_zoo/<space>-space/<dataset>/<job>/checkpoints/<step> \
     --mcap-root data/raw/<dataset>
 ```
+
+Where `<space>` is `ee` or `joint` depending on the action type used during training.
 
 See the root [README — ROS2 MCAP Replay section](../../README.md#ros2-mcap-replay-anvil-eval-ros)
 for the full flag reference and Docker prerequisites.

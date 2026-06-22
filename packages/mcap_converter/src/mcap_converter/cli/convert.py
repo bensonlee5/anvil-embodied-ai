@@ -701,14 +701,17 @@ examples:
         console.print(f"\n[bold red]Configuration error:[/bold red] {exc}\n")
         exit(1)
 
-    # Resolve output path: --output-path wins; otherwise <output-dir>/<input-dir-name>-<data_space>/
-    # Suffix (-joint / -ee) makes it clear which action space was used when both
-    # conversions are run side-by-side from the same raw sessions directory.
+    # Resolve output path: --output-path wins; otherwise
+    # <output-dir>/<data_space>-space/<input-dir-name>/
+    # The <data_space>-space/ subdir (ee-space/ or joint-space/) splits EE and
+    # joint datasets cleanly when both are converted from the same raw sessions.
     input_name = Path(args.input_dir.rstrip("/")).name
     if args.output_path:
         args.output_dir = args.output_path.rstrip("/")
     else:
-        args.output_dir = str(Path(args.output_dir.rstrip("/")) / f"{input_name}-{config.data_space}")
+        args.output_dir = str(
+            Path(args.output_dir.rstrip("/")) / f"{config.data_space}-space" / input_name
+        )
 
     # Handle HuggingFace username
     if args.hf_user:
