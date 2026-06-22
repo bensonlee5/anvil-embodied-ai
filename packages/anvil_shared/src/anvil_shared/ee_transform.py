@@ -15,8 +15,9 @@ Bimanual: state (16,), action (20,) — left arm first, right arm second.
 Public API
 ----------
 n_arms_from_dims(state_dim, action_dim)      → int
-ee_rel_forward(action_abs, state)            → np.ndarray   abs → rel (training)
-ee_rel_inverse(action_rel, state)            → np.ndarray   rel → abs (inference/eval)
+ee_rel_forward(action_abs, state)            → np.ndarray   abs → rel action (training)
+ee_rel_inverse(action_rel, state)            → np.ndarray   rel → abs action (inference/eval)
+ee_obs_rel_forward(obs_abs, anchor)          → np.ndarray   abs obs (8n) → rel obs (10n)
 ee_action_to_poses(action_abs, n_arms)       → list[dict]   for CommandedEEPose
 ee_rot6d_to_quat_layout(actions_10)         → np.ndarray   (T,10n) rot6d → (T,8n) quat
 ee_quat_layout_names(rot6d_names)            → list[str]    feature name conversion
@@ -67,13 +68,14 @@ def ee_rel_forward(
     action_abs: np.ndarray,
     state: np.ndarray,
 ) -> np.ndarray:
-    """Convert absolute EE actions to SE(3)-relative representation.
+    """Convert absolute EE actions to full SE(3)-relative representation.
 
     This is the forward transform applied at training time (and used for
-    computing stats and GT in evaluation).
+    computing stats and GT in evaluation).  Matches UMI 'relative' mode:
+    ``T_rel = inv(T_state) @ T_action``, so translation is in **body frame**.
 
     Per arm:
-        delta_xyz   = act_xyz - state_xyz
+        body_delta  = R_state.T @ (act_xyz - state_xyz)   (body-frame translation)
         delta_rot6d = matrices_to_rot6d(R_state.T @ R_action)
         gripper     = act_gripper  (kept absolute)
 
@@ -111,23 +113,23 @@ def ee_rel_forward(
 
         state_xyz = state[..., s0:s0 + 3]    # (3,) or (..., 3)
         state_quat = state[..., s0 + 3:s0 + 7]  # (4,) or (..., 4)
-
-        # xyz: simple broadcast subtraction
-        result[..., a0:a0 + 3] = action_abs[..., a0:a0 + 3] - state_xyz
+        world_delta = action_abs[..., a0:a0 + 3] - state_xyz  # (..., 3)
 
         # rot6d: R_rel = R_state.T @ R_action — vectorised over time/batch dims
         act_r6d = action_abs[..., a0 + 3:a0 + 9]  # (..., 6)
         Rs_action = rot6ds_to_matrices(act_r6d)      # (..., 3, 3)
 
         if per_sample_state:
-            # Per-sample states: quats_to_matrices handles batch dims
             Rs_state = quats_to_matrices(state_quat)          # (..., 3, 3)
             Rs_state_T = Rs_state.swapaxes(-2, -1)            # (..., 3, 3)
             Rs_rel = Rs_state_T @ Rs_action                   # (..., 3, 3)
+            # Body-frame translation: R_state.T @ world_delta per sample
+            result[..., a0:a0 + 3] = np.einsum('...ij,...j->...i', Rs_state_T, world_delta)
         else:
-            # Single reference state: R_state is (3, 3), broadcasts over batch
             R_state = quat_to_matrix(state_quat)              # (3, 3)
             Rs_rel = R_state.T @ Rs_action                    # (3,3) @ (...,3,3) → (...,3,3)
+            # Body-frame translation: world_delta @ R_state = R_state.T applied (row-vector)
+            result[..., a0:a0 + 3] = world_delta @ R_state
 
         result[..., a0 + 3:a0 + 9] = matrices_to_rot6d(Rs_rel)  # (..., 6)
         # gripper unchanged (already copied via .copy())
@@ -181,9 +183,7 @@ def ee_rel_inverse(
 
         state_xyz = state[..., s0:s0 + 3]
         state_quat = state[..., s0 + 3:s0 + 7]
-
-        # xyz: abs = state + delta
-        result[..., a0:a0 + 3] = state_xyz + action_rel[..., a0:a0 + 3]
+        body_delta = action_rel[..., a0:a0 + 3]      # body-frame translation
 
         # rot6d: R_abs = R_state @ R_rel
         rel_r6d = action_rel[..., a0 + 3:a0 + 9]  # (..., 6)
@@ -192,12 +192,79 @@ def ee_rel_inverse(
         if per_sample_state:
             Rs_state = quats_to_matrices(state_quat)  # (..., 3, 3)
             Rs_abs = Rs_state @ Rs_rel                # (..., 3, 3)
+            # abs_xyz = R_state @ body_delta + state_xyz (body→world rotation)
+            result[..., a0:a0 + 3] = np.einsum('...ij,...j->...i', Rs_state, body_delta) + state_xyz
         else:
             R_state = quat_to_matrix(state_quat)      # (3, 3)
             Rs_abs = R_state @ Rs_rel                 # (3,3) @ (...,3,3) → (...,3,3)
+            # body_delta @ R_state.T → world_delta (row-vector convention)
+            result[..., a0:a0 + 3] = body_delta @ R_state.T + state_xyz
 
         result[..., a0 + 3:a0 + 9] = matrices_to_rot6d(Rs_abs)
         # gripper unchanged
+
+    return result
+
+
+def ee_obs_rel_forward(obs_abs: np.ndarray, anchor: np.ndarray) -> np.ndarray:
+    """Convert absolute EE observations to SE(3)-relative, rot6d layout.
+
+    Matches UMI's obs relativisation: ``T_rel = inv(T_anchor) @ T_obs``.
+    Input obs use quaternion layout (8 dims/arm), output uses rot6d (10 dims/arm).
+
+    Per arm:
+        body_delta  = R_anchor.T @ (obs_xyz - anchor_xyz)
+        rel_rot6d   = matrices_to_rot6d(R_anchor.T @ R_obs)
+        gripper     = obs_gripper  (kept absolute)
+
+    Parameters
+    ----------
+    obs_abs:
+        Absolute EE observations in quaternion layout.
+        Shape ``(..., 8 * n_arms)``.
+    anchor:
+        Reference EE state (quaternion layout) to relativise against.
+        Either ``(8 * n_arms,)`` — single anchor (broadcast) or
+        ``(..., 8 * n_arms)`` — per-sample anchor (same leading dims as obs_abs).
+
+    Returns
+    -------
+    np.ndarray
+        Relative observations in rot6d layout, shape ``(..., 10 * n_arms)``.
+    """
+    obs_abs = np.asarray(obs_abs, dtype=np.float64)
+    anchor = np.asarray(anchor, dtype=np.float64)
+
+    n_arms = anchor.shape[-1] // EE_STATE_DIM_PER_ARM
+    out_shape = obs_abs.shape[:-1] + (n_arms * EE_ACTION_DIM_PER_ARM,)
+    result = np.empty(out_shape, dtype=np.float64)
+    per_sample_anchor = anchor.ndim > 1
+
+    for arm in range(n_arms):
+        s0 = arm * EE_STATE_DIM_PER_ARM
+        a0 = arm * EE_ACTION_DIM_PER_ARM
+
+        obs_xyz = obs_abs[..., s0:s0 + 3]
+        obs_quat = obs_abs[..., s0 + 3:s0 + 7]
+        obs_grip = obs_abs[..., s0 + 7:s0 + 8]
+        anchor_xyz = anchor[..., s0:s0 + 3]
+        anchor_quat = anchor[..., s0 + 3:s0 + 7]
+
+        Rs_obs = quats_to_matrices(obs_quat)          # (..., 3, 3)
+        world_delta = obs_xyz - anchor_xyz
+
+        if per_sample_anchor:
+            Rs_anchor = quats_to_matrices(anchor_quat)        # (..., 3, 3)
+            Rs_anchor_T = Rs_anchor.swapaxes(-2, -1)
+            Rs_rel = Rs_anchor_T @ Rs_obs
+            result[..., a0:a0 + 3] = np.einsum('...ij,...j->...i', Rs_anchor_T, world_delta)
+        else:
+            R_anchor = quat_to_matrix(anchor_quat)            # (3, 3)
+            Rs_rel = R_anchor.T @ Rs_obs                      # (..., 3, 3)
+            result[..., a0:a0 + 3] = world_delta @ R_anchor   # row-vector: R_anchor.T applied
+
+        result[..., a0 + 3:a0 + 9] = matrices_to_rot6d(Rs_rel)
+        result[..., a0 + 9:a0 + 10] = obs_grip
 
     return result
 

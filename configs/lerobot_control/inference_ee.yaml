@@ -1,0 +1,140 @@
+# =============================================================================
+# LeRobot Inference Configuration — EE Cartesian Space (Bimanual, Production)
+# =============================================================================
+# Use this config when running inference with an EE-space checkpoint
+# (anvil_config.json has action_type: ee_abs or ee_rel).
+#
+# How EE mode is activated:
+#   1. The inference node reads action_type from the checkpoint's anvil_config.json
+#      automatically — there is NO launch flag for EE mode.
+#   2. The strategy detects EE mode by the PRESENCE of ee_command_topic in each
+#      arm block (multi_process.py:98). Without it, the strategy falls back to
+#      subscribing /joint_states — feeding wrong observations to an EE model
+#      silently. Always use this config (not inference_default.yaml) for EE checkpoints.
+#
+# Dimensions (bimanual):
+#   observation.state : 16 dims  (left 8 + right 8: [x, y, z, qx, qy, qz, qw, gripper])
+#   action            : 20 dims  (left 10 + right 10: [x, y, z, r0..r5, gripper] rot6d)
+#
+# Prerequisites (anvil-workcell side, NOT in this repo):
+#   - /ee_pose_left, /ee_pose_right must be published by the robot stack
+#   - /commanded_ee_left, /commanded_ee_right must be subscribed by the IK controller
+#   Verify with: ./scripts/run_inference.sh --echo-topic-only up --build
+#
+# Usage:
+#   export CONFIG_FILE=$(pwd)/configs/lerobot_control/inference_ee.yaml
+#   export MODEL_PATH=$(pwd)/model_zoo/<your-ee-task>/checkpoints/last
+#   ./scripts/run_inference.sh --monitor up --build
+
+# -----------------------------------------------------------------------------
+# Model
+# -----------------------------------------------------------------------------
+model:
+  # VLA task prompt — required for SmolVLA / Pi0 / Pi0.5, ignored for ACT / Diffusion.
+  # Set to the task the model was trained/finetuned for.
+  task_description: null
+
+# -----------------------------------------------------------------------------
+# Inference Tuning (per model type)
+# -----------------------------------------------------------------------------
+# Override checkpoint defaults. null = use the value the model was trained with.
+# Only the section matching your model type is used; others are ignored.
+
+inference_tuning:
+
+  # ACT — lightweight transformer, single forward pass per chunk
+  act:
+    n_action_steps: null
+    temporal_ensemble_coeff: null
+
+  # Diffusion — iterative denoising (UNet)
+  diffusion:
+    n_action_steps: 12
+    # Set 10 for real-time (78ms vs 711ms for full 100 steps)
+    num_inference_steps: 10
+
+  # RTC — VLA models only (pi0, pi0.5, smolvla), always enabled
+  rtc:
+    inference_delay: 10
+    queue_trigger_threshold: 50
+    execution_horizon: 12
+    max_guidance_weight: 10.0
+    prefix_attention_schedule: EXP
+
+# -----------------------------------------------------------------------------
+# EE Joint Names Configuration
+# -----------------------------------------------------------------------------
+# model_joint_order: [] — intentionally empty in EE mode.
+# The inference node and strategy use EE dimensions (10 per arm) instead of
+# joint names. joint_state_topic and controller_joint_order are not used.
+
+joint_names:
+  model_joint_order: []   # empty = EE mode (dims_per_arm=10)
+  arm_mapping:
+    l: left
+    r: right
+
+# -----------------------------------------------------------------------------
+# Arm Configuration (EE mode)
+# -----------------------------------------------------------------------------
+# ee_command_topic : CommandedEEPose published to the robot IK controller.
+#                   REQUIRED — its presence switches the strategy into EE
+#                   observation mode (multi_process.py:98).
+# ee_obs_topic     : CommandedEEPose from the robot stack (EE feedback pose).
+#                   Provides observation.state (8 dims/arm).
+# action_start/end : slices of the model's 20-dim EE action vector.
+#
+# Bimanual layout (must match training dataset):
+#   left  → action dims 0–9
+#   right → action dims 10–19
+
+arms:
+  left:
+    ros_prefix: "follower_l"
+    ee_command_topic: "/commanded_ee_left"
+    ee_obs_topic: "/ee_pose_left"
+    action_start: 0
+    action_end: 10
+    gripper_factor: 0.9   # <1 squeezes toward closed (more grip force); 1.0 = no change
+    gripper_min: -0.003   # hardware closed limit (m) — also the clamp lower bound
+    gripper_max: 0.05     # hardware open limit (m)  — also the clamp upper bound
+  right:
+    ros_prefix: "follower_r"
+    ee_command_topic: "/commanded_ee_right"
+    ee_obs_topic: "/ee_pose_right"
+    action_start: 10
+    action_end: 20
+    gripper_factor: 0.9   # <1 squeezes toward closed (more grip force); 1.0 = no change
+    gripper_min: -0.003   # hardware closed limit (m)
+    gripper_max: 0.05     # hardware open limit (m)
+
+# Optional: coordinate frame for CommandedEEPose headers. Default: "world"
+# frame_id: "world"
+
+# -----------------------------------------------------------------------------
+# Camera Mapping
+# -----------------------------------------------------------------------------
+# ROS topic -> ML model camera name (must match training config exactly)
+
+camera_mapping:
+  "/cam_waist/image_raw/compressed": "waist"
+  "/cam_wrist_r/image_raw/compressed": "wrist_r"
+  "/cam_chest/image_raw/compressed": "chest"
+  "/cam_wrist_l/image_raw/compressed": "wrist_l"
+
+# -----------------------------------------------------------------------------
+# Safety Parameters
+# -----------------------------------------------------------------------------
+# max_position_delta / min_position_delta are joint-space guards and are
+# NOT applied in EE mode (action_limiter is skipped when is_ee=True).
+#
+# Gripper post-processing (per-arm, in the arms block above):
+#   gripper_factor  : scale applied after shifting origin to the closed end.
+#                     < 1.0 → squeezes toward closed (more grip force).
+#                     > 1.0 → biases toward open.  Default: 1.0 (no change).
+#   gripper_min     : hardware closed limit in metres; output clamped here.
+#                     Default: -0.003 m (matches robot's own clamp).
+#   gripper_max     : hardware open limit in metres; output clamped here.
+#                     Default: 0.05 m (matches robot's own clamp).
+# Formula: squeezed = (pred - gripper_min) * gripper_factor + gripper_min
+#          cmd      = clip(squeezed, gripper_min, gripper_max)

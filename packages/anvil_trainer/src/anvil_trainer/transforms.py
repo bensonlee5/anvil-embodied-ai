@@ -167,19 +167,14 @@ class TaskOverrideTransform(Transform):
 
 
 class EERelTransform(Transform):
-    """Convert absolute EE actions to SE(3)-relative representation.
+    """Convert absolute EE obs and actions to SE(3)-relative representation.
 
-    For each arm slice (10 dims: [xyz(3), rot6d(6), gripper(1)]) relative to
-    the current observation state (8 dims per arm: [xyz(3), quat_xyzw(4), gripper(1)]):
+    Both observation.state and action are anchored to the SAME current EE pose
+    (last obs step), matching UMI's verified 'relative' mode:
+        T_rel = inv(T_anchor) @ T_pose  (full SE(3), translation in body frame)
 
-        delta_xyz   = action_xyz - state_xyz
-        delta_rot6d = matrices_to_rot6d(R_state.T @ R_action)   SO(3) relative rotation
-        gripper     = action_gripper  (kept absolute)
-
-    The number of arms is auto-detected from observation.state dim: n_arms = dim // 8.
-
-    The shared ``ee_transform.ee_rel_forward`` function performs the actual computation
-    (vectorised over the horizon dimension, no per-frame Python loop).
+    obs: 8 dims/arm (quat layout) → 10 dims/arm (rot6d layout), relative to anchor
+    action: 10 dims/arm (rot6d layout), unchanged dim, relative to anchor
     """
 
     def __init__(self):
@@ -194,44 +189,84 @@ class EERelTransform(Transform):
 
     def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
         import torch
-        from anvil_shared.ee_transform import ee_rel_forward, n_arms_from_dims
+        from anvil_shared.ee_transform import ee_obs_rel_forward, ee_rel_forward, n_arms_from_dims
 
         if "action" not in item or "observation.state" not in item:
             return item
 
-        action = item["action"]             # (..., 10*n_arms)
-        state = item["observation.state"]   # (..., 8*n_arms)
+        action = item["action"]                   # (horizon, 10*n_arms) or (10*n_arms,)
+        obs_full = item["observation.state"]       # (T, 8*n_arms) or (8*n_arms,)
 
-        # Multi-step obs: use most recent step as the delta reference
-        if state.dim() > 1:
-            state = state[-1]  # (8*n_arms,)
+        # Anchor = most recent obs step (8*n_arms,)
+        if obs_full.dim() > 1:
+            anchor_tensor = obs_full[-1]
+        else:
+            anchor_tensor = obs_full
 
-        state_np = state.detach().cpu().numpy().astype("float64")
+        anchor_np = anchor_tensor.detach().cpu().numpy().astype("float64")
+        obs_np = obs_full.detach().cpu().numpy().astype("float64")
         action_np = action.detach().cpu().numpy().astype("float64")
 
-        # Validate dimensions (raises DataIntegrityError on mismatch)
+        # Validate action/state dims
         try:
-            n_arms = n_arms_from_dims(state_np.shape[-1], action_np.shape[-1])
+            n_arms = n_arms_from_dims(anchor_np.shape[-1], action_np.shape[-1])
         except ValueError as exc:
             raise DataIntegrityError(str(exc)) from exc
 
-        # Flatten single-step to (1, D) so ee_rel_forward always sees 2-D input
+        # Transform obs: (T, 8*n) → (T, 10*n) relative to anchor
+        obs_rel_np = ee_obs_rel_forward(obs_np, anchor_np)
+
+        # Transform action: (horizon, 10*n) relative to anchor
         single = action_np.ndim == 1
         if single:
             action_np = action_np[None, :]
-
-        delta_np = ee_rel_forward(action_np, state_np)
-
+        delta_np = ee_rel_forward(action_np, anchor_np)
         if single:
             delta_np = delta_np[0]
 
+        item["observation.state"] = torch.tensor(obs_rel_np, dtype=torch.float32)
         item["action"] = torch.tensor(delta_np, dtype=action.dtype)
 
         if self._first_apply:
             log.info(
-                "[ee_rel] active — %d arm(s), action (abs rot6d) → SE(3) relative",
+                "[ee_rel] active — %d arm(s), obs (8n abs) → (10n rel), action (abs rot6d) → SE(3) relative",
                 n_arms,
             )
             self._first_apply = False
 
         return item
+
+    def patch_metadata(self, config: TrainingConfig, runner: Any = None) -> None:
+        """Patch lerobot's dataset_to_policy_features to report 10-dim obs shape.
+
+        observation.state changes from 8*n_arms (quat layout) to 10*n_arms (rot6d
+        relative layout) after this transform. The policy must be initialised with
+        the correct input dimension.
+        """
+        if not config.is_ee_rel:
+            return
+
+        import lerobot.datasets.feature_utils as _feat_utils
+        import lerobot.policies.factory as _factory
+        from lerobot.datasets.feature_utils import dataset_to_policy_features as _original
+
+        def _patched(features: dict) -> dict:
+            modified = {}
+            for key, feat in features.items():
+                if key == "observation.state":
+                    shape = feat.get("shape", ())
+                    if len(shape) == 1 and shape[0] % 8 == 0:
+                        modified[key] = {**feat, "shape": (shape[0] // 8 * 10,)}
+                    else:
+                        modified[key] = feat
+                else:
+                    modified[key] = feat
+            return _original(modified)
+
+        if runner is not None:
+            runner._patch(_feat_utils, "dataset_to_policy_features", _patched)
+            runner._patch(_factory, "dataset_to_policy_features", _patched)
+        else:
+            _feat_utils.dataset_to_policy_features = _patched
+            _factory.dataset_to_policy_features = _patched
+        log.info("[ee_rel] patched dataset_to_policy_features: obs.state 8n→10n/arm")

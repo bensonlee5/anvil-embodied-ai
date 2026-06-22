@@ -84,6 +84,14 @@ class LeRobotInferenceNode(Node):
         if not self.echo_topic_only:
             self._setup_model()
 
+            # ee_rel: raw absolute obs history for re-relativizing the full obs window
+            if self.is_ee_rel and not self._is_vla:
+                self._ee_n_obs_steps: int = getattr(self.model, "n_obs_steps", 2)
+                self._ee_raw_obs_buf: deque = deque(maxlen=self._ee_n_obs_steps)
+            else:
+                self._ee_n_obs_steps = 1
+                self._ee_raw_obs_buf = deque(maxlen=1)
+
             # action_limiter is used for joint_abs mode only
             if not self.is_ee:
                 self.action_limiter = ActionLimiter(
@@ -604,6 +612,30 @@ class LeRobotInferenceNode(Node):
                 # capture the joint-state baseline when a new chunk is generated.
                 _raw_obs = observation
 
+                # ee_rel: maintain raw abs obs history and re-relativize the full
+                # window every step (anchor = current EE).  Must happen before
+                # preprocessor so normalized obs.state is the relative version.
+                _ee_obs_window_rel = None
+                if self.is_ee_rel and "observation.state" in _raw_obs:
+                    _s_raw = _raw_obs["observation.state"]
+                    if hasattr(_s_raw, "numpy"):
+                        _s_np = (_s_raw.squeeze(0).numpy() if _s_raw.dim() > 1 else _s_raw.numpy())
+                    elif hasattr(_s_raw, "cpu"):
+                        _s_np = _s_raw.cpu().numpy()
+                    else:
+                        _s_np = np.asarray(_s_raw)
+                    _s_np = _s_np.flatten().astype(np.float64)
+                    self._ee_raw_obs_buf.append(_s_np)
+
+                    if len(self._ee_raw_obs_buf) == self._ee_n_obs_steps:
+                        observation, _ee_obs_window_rel = self._apply_ee_rel_obs(observation)
+                    else:
+                        # Warm-up: relativize current to itself → identity (correct 10-dim shape)
+                        from anvil_shared.ee_transform import ee_obs_rel_forward as _eorf
+                        _rel_id = _eorf(_s_np[np.newaxis], _s_np)[0]
+                        observation = dict(observation)
+                        observation["observation.state"] = torch.tensor(_rel_id, dtype=torch.float32)
+
                 # Detect whether a new action chunk is about to be generated.
                 # When the queue is empty, select_action will run the model and fill
                 # it with n_action_steps new predictions, all computed relative to
@@ -619,6 +651,12 @@ class LeRobotInferenceNode(Node):
                 if self.preprocessor:
                     observation = self.preprocessor(dict(observation))
                 observation = self._move_to_device(observation)
+
+                # ee_rel: pre-fill model's obs queue with normalized historical
+                # relative obs (anchored to current EE).  Must run after preprocessor
+                # (queue stores normalized tensors) and before select_action.
+                if self.is_ee_rel and _ee_obs_window_rel is not None and self._ee_n_obs_steps > 1:
+                    self._prefill_ee_rel_queue(_ee_obs_window_rel)
 
                 # [DEBUG] Point 1: obs.state after preprocessor (check normalization)
                 if self._debug and _is_new_chunk and "observation.state" in observation:
@@ -723,6 +761,49 @@ class LeRobotInferenceNode(Node):
             self.get_logger().error(f"Publish error: {e}")
             self.get_logger().error(traceback.format_exc())
 
+    def _apply_ee_rel_obs(self, observation: dict) -> tuple:
+        """Convert absolute obs.state (8-dim/arm, quat) to relative (10-dim/arm, rot6d).
+
+        Uses the full buffer window anchored to the current EE pose (last buffer entry).
+        Returns (modified_observation_dict, obs_window_rel_np) where obs_window_rel_np
+        is (n_obs_steps, 10*n_arms) — used later to pre-fill the model's obs queue.
+        """
+        from anvil_shared.ee_transform import ee_obs_rel_forward
+        anchor = self._ee_raw_obs_buf[-1]                          # (8*n_arms,) absolute
+        obs_window_np = np.stack(self._ee_raw_obs_buf)             # (n_obs_steps, 8*n_arms)
+        obs_rel_np = ee_obs_rel_forward(obs_window_np, anchor)     # (n_obs_steps, 10*n_arms)
+        observation = dict(observation)  # shallow copy — don't mutate caller's dict
+        # Current step relative to itself → identity; goes through normal preprocessor path
+        observation["observation.state"] = torch.tensor(obs_rel_np[-1], dtype=torch.float32)
+        return observation, obs_rel_np
+
+    def _prefill_ee_rel_queue(self, obs_window_rel_np: np.ndarray) -> None:
+        """Pre-fill the model's internal obs queue with historical normalized relative obs.
+
+        This ensures the full obs window [t-(n-1), ..., t-1] is correctly relativized
+        to the current anchor before select_action pushes the identity step t.
+        """
+        if not (hasattr(self.model, "_queues") and "observation.state" in self.model._queues):
+            return
+
+        queue = self.model._queues["observation.state"]
+        queue.clear()
+
+        try:
+            model_device = next(iter(self.model.parameters())).device
+        except StopIteration:
+            model_device = torch.device(self.device)
+
+        for i in range(len(obs_window_rel_np) - 1):
+            obs_t = torch.tensor(obs_window_rel_np[i], dtype=torch.float32)
+            if self.preprocessor:
+                try:
+                    norm = self.preprocessor({"observation.state": obs_t.unsqueeze(0)})
+                    obs_t = norm["observation.state"].squeeze(0)
+                except Exception:
+                    pass  # fall back to unnormalized
+            queue.append(obs_t.to(model_device))
+
     def _reset_delta_state(self) -> None:
         """Reset delta-restore state; call this whenever the model is reloaded."""
         self._delta_ref_state = None
@@ -826,8 +907,12 @@ class LeRobotInferenceNode(Node):
           - Converts rot6d → quaternion via ``ee_poses_from_chunk``
           - Builds a ``CommandedEEPose`` and publishes to ``ee_command_topic``
 
-        Gripper is defensively clamped to [-0.003, 0.05] m (same range as
-        the robot's own clamp) to guard against normalisation overshoot.
+        Gripper post-processing: the raw model prediction is shifted so the
+        closed end becomes the origin, scaled by ``gripper_factor`` (default
+        1.0; set <1 to squeeze toward closed for more grip force), shifted
+        back, then clamped to [gripper_min, gripper_max] (defaults
+        [-0.003, 0.05] m — same as the robot's own hardware clamp).
+        All three parameters are readable per-arm from the inference config.
         """
         from anvil_msgs.msg import CommandedEEPose
         from geometry_msgs.msg import Point, Pose, Quaternion
@@ -836,15 +921,19 @@ class LeRobotInferenceNode(Node):
         now = self.get_clock().now().to_msg()
         frame_id = self.config.get("frame_id", "world")
 
-        _GRIPPER_MIN = -0.003
-        _GRIPPER_MAX = 0.05
-
         monitor_cmd_parts: list[np.ndarray] = []
         arm_list = list(self.arms_config.items())
 
         for arm_idx, (arm_name, arm_config) in enumerate(arm_list):
             start_idx = arm_config.get("action_start", 0)
             end_idx = arm_config.get("action_end", start_idx + 10)
+
+            # Per-arm gripper parameters — configurable in inference_ee.yaml arm block.
+            g_min = arm_config.get("gripper_min", -0.003)   # hardware closed limit (m)
+            g_max = arm_config.get("gripper_max", 0.05)     # hardware open limit (m)
+            # gripper_factor < 1.0 squeezes toward closed (more grip force).
+            # Formula: shift origin to closed end → scale → shift back → clamp.
+            g_factor = arm_config.get("gripper_factor", 1.0)
 
             arm_action_abs = action[start_idx:end_idx]  # (10,) absolute rot6d
 
@@ -854,7 +943,11 @@ class LeRobotInferenceNode(Node):
 
             pos = pose_dict["pos"]
             quat_xyzw = pose_dict["quat_xyzw"]
-            gripper = float(np.clip(pose_dict["gripper"], _GRIPPER_MIN, _GRIPPER_MAX))
+            raw_grip = pose_dict["gripper"]
+            # Shift origin to closed end → scale → shift back → clamp.
+            # factor < 1 → closer to closed (more grip force); 1.0 → no change.
+            squeezed = (raw_grip - g_min) * g_factor + g_min
+            gripper = float(np.clip(squeezed, g_min, g_max))
 
             if self._debug:
                 self.get_logger().info(
@@ -862,7 +955,7 @@ class LeRobotInferenceNode(Node):
                     f"pos=[{pos[0]:.4f},{pos[1]:.4f},{pos[2]:.4f}] "
                     f"quat=[{quat_xyzw[0]:.4f},{quat_xyzw[1]:.4f},"
                     f"{quat_xyzw[2]:.4f},{quat_xyzw[3]:.4f}] "
-                    f"gripper={gripper:.4f}"
+                    f"gripper={gripper:.4f} (raw={raw_grip:.4f} factor={g_factor:.2f})"
                 )
 
             msg = CommandedEEPose()
