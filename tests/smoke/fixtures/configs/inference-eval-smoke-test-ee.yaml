@@ -44,7 +44,10 @@ arms:
     action_end: 10
 
 # Fixture MCAPs have 3 cameras only (no wrist_l)
-camera_mapping:
-  "/cam_waist/image_raw/compressed": "waist"
-  "/cam_wrist_r/image_raw/compressed": "wrist_r"
-  "/cam_chest/image_raw/compressed": "chest"
+# Use cameras.mapping (not top-level camera_mapping) — inference_node reads
+# config.get("cameras", {}).get("mapping", {}); see inference_default.yaml.
+cameras:
+  mapping:
+    "/cam_waist/image_raw/compressed": "waist"
+    "/cam_wrist_r/image_raw/compressed": "wrist_r"
+    "/cam_chest/image_raw/compressed": "chest"

@@ -344,9 +344,9 @@ class TransformRunner:
             full_dataset.meta.stats["observation.state"] = obs_patched_stats
 
             log.info(
-                "[ee_rel_stats] action: %d samples (n_steps=%d); obs: %d samples "
+                "[ee_rel_stats] action: %d samples (n_delta_steps=%d); obs: %d samples "
                 "(n_obs_steps=%d); %d arm(s)",
-                len(all_deltas), n_steps, len(all_obs_rel), n_obs_steps, n_arms,
+                len(all_deltas), len(action_delta_indices), len(all_obs_rel), n_obs_steps, n_arms,
             )
             return {"action": action_patched_stats, "observation.state": obs_patched_stats}
         except DataIntegrityError:
