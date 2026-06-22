@@ -51,7 +51,7 @@ uv run anvil-trainer \
 | Pi0 | `pi0` | Flow-matching VLA; PaliGemma-3B backbone; requires `--extra pi` |
 | Pi0.5 | `pi05` | Larger Pi0 variant (~4B params); higher VRAM; requires `--extra pi` |
 
-Checkpoints are saved to `model_zoo/<dataset>/<job_name>/`. Run `uv run anvil-trainer --help` for the full flag reference.
+Checkpoints are saved to `model_zoo/<space>-space/<dataset>/<job_name>/` (`ee-space/` for `ee_abs`/`ee_rel`, `joint-space/` for `joint_abs`). Run `uv run anvil-trainer --help` for the full flag reference.
 
 ---
 
@@ -81,7 +81,7 @@ These are LeRobot's own flags that `anvil-trainer` sets automatically so you don
 | `--policy.push_to_hub` | `false` | Prevents accidental HF Hub uploads |
 | `--eval_freq` | `0` | Disables gym eval (no sim env for MCAP datasets) |
 | `--wandb.project` | `<dataset folder name>` | Groups all runs for the same task together |
-| `--output_dir` | `model_zoo/<dataset>/<job_name>` | Nested under dataset name |
+| `--output_dir` | `model_zoo/<space>-space/<dataset>/<job_name>` | `<space>` = `ee` for `ee_abs`/`ee_rel`, `joint` for `joint_abs` |
 | `--policy.vision_backbone` + `--policy.pretrained_backbone_weights` | `resnet18` + ImageNet weights | Injected from `--backbone` (ACT/Diffusion only) |
 | `--policy.use_group_norm` | `false` | Injected for Diffusion when using a pretrained backbone |
 
@@ -89,31 +89,26 @@ These are LeRobot's own flags that `anvil-trainer` sets automatically so you don
 
 ### Action Type
 
-Controls how actions are encoded. The chosen mode is persisted to `anvil_config.json` in each checkpoint — inference applies the inverse automatically, no manual YAML change needed.
+Controls the action space. The chosen type is persisted to `anvil_config.json` in the checkpoint — inference reads it automatically, no manual config change needed.
 
-| `--action-type` | Formula | When to use |
-|---|---|---|
-| `absolute` (default) | Raw joint positions | Simplest; works well for ACT and Diffusion |
-| `delta_obs_t` | `Δ[k] = action[t+k] − obs_state[t]` | Tasks with repeated returns to similar poses; all steps share the same obs reference |
-| `delta_sequential` | `Δ[0] = action[0] − obs_state[t]`; `Δ[k] = action[k] − action[k−1]` | Encodes velocity; smoother trajectories since consecutive deltas are small |
+| `--action-type` | Space | `observation.state` | `action` | When to use |
+|---|---|---|---|---|
+| `joint_abs` (default) | Joint | `(N,)` joint positions | `(N,)` joint positions | Joint-space policies (ACT, Diffusion) |
+| `ee_abs` | EE Cartesian | `(8×n_arms,)` xyz+quat+gripper | `(10×n_arms,)` xyz+rot6d+gripper | EE absolute; simplest EE mode |
+| `ee_rel` | EE Cartesian | `(10×n_arms,)` xyz+rot6d relative to current frame | `(10×n_arms,)` xyz+rot6d relative to current frame | EE SE(3)-relative (UMI-style); more robust to workspace position shift |
 
 ```bash
-# delta_obs_t shorthand (legacy)
-uv run anvil-trainer ... --use-delta-actions
+# Joint absolute (default)
+uv run anvil-trainer ... --action-type=joint_abs
 
-# delta_obs_t (explicit)
-uv run anvil-trainer ... --action-type=delta_obs_t
+# EE Cartesian absolute
+uv run anvil-trainer ... --action-type=ee_abs
 
-# delta_sequential
-uv run anvil-trainer ... --action-type=delta_sequential
+# EE Cartesian SE(3)-relative
+uv run anvil-trainer ... --action-type=ee_rel
 ```
 
-Additional delta flags:
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--delta-exclude-joints=J1,J2` | — | Keep these joints absolute (e.g. `finger_joint1` for grippers) |
-| `--delta-stats-n-steps=N` | `1` | Look-ahead steps for delta normalizer stats. Increase to cover multi-step displacement range |
+> Use EE configs with `--action-type=ee_abs` or `--action-type=ee_rel`. Joint configs must use `--action-type=joint_abs`.
 
 ---
 
@@ -430,25 +425,31 @@ After augmentation you can omit `--policy.normalization_mapping` and use the def
 
 ### Structure
 
-Checkpoints are written to `model_zoo/<dataset>/<job_name>/`:
+Checkpoints are written to `model_zoo/<space>-space/<dataset>/<job_name>/`:
 
 ```
 model_zoo/
-└── <dataset>/
-    └── <job_name>/
-        ├── checkpoints/
-        │   ├── last -> 100000/          # symlink to latest checkpoint
-        │   ├── 010000/
-        │   │   └── pretrained_model/
-        │   │       ├── config.json              # LeRobot policy config
-        │   │       ├── model.safetensors        # Model weights
-        │   │       ├── anvil_config.json        # action_type, task_description, code_commit
-        │   │       ├── split_info.json          # train/val/test episode lists
-        │   │       ├── policy_preprocessor.json # normalizer + resize config
-        │   │       └── policy_postprocessor.json
-        │   └── 100000/
-        ├── train_config.json            # full training config (for resume)
-        └── wandb/
+├── ee-space/               # ee_abs / ee_rel action types
+│   └── <dataset>/
+│       └── <job_name>/
+│           ├── checkpoints/
+│           │   ├── last -> 100000/          # symlink to latest checkpoint
+│           │   ├── 010000/
+│           │   │   └── pretrained_model/
+│           │   │       ├── config.json              # LeRobot policy config
+│           │   │       ├── model.safetensors        # Model weights
+│           │   │       ├── anvil_config.json        # action_type, task_description, code_commit
+│           │   │       ├── split_info.json          # train/val/test episode lists
+│           │   │       ├── policy_preprocessor.json # normalizer + resize config
+│           │   │       └── policy_postprocessor.json
+│           │   └── 100000/
+│           ├── train_config.json            # full training config (for resume)
+│           └── wandb/
+└── joint-space/            # joint_abs action type
+    └── <dataset>/
+        └── <job_name>/
+            └── checkpoints/
+                └── ...
 ```
 
 ---

@@ -10,12 +10,37 @@ Convert MCAP recordings into LeRobot v3.0 datasets.
 
 Pick the config that matches your recording setup:
 
-| Config | Teleop mode | Arms | Action source |
-|--------|-------------|------|---------------|
-| `openarm_bimanual.yaml` | Leader-follower | Bimanual | Leader joint positions |
-| `openarm_bimanual_quest.yaml` | Quest VR | Bimanual | Command topics |
-| `openarm_single_quest.yaml` | Quest VR | Single (right) | Command topics |
-| `openarm_single_quest_afo.yaml` | Quest VR | Single (right) | Observation lookahead |
+### Joint-space configs
+
+Output lands in `<output-dir>/joint-space/<input-dir-name>/`.
+
+| Config | Teleop mode | Arms | `observation.state` | `action` |
+|--------|-------------|------|---------------------|---------|
+| `openarm_bimanual.yaml` | Leader-follower | Bimanual | `(16,)` joint positions | Leader joint positions |
+| `openarm_bimanual_quest.yaml` | Quest VR | Bimanual | `(16,)` joint positions | Command topics |
+| `openarm_joint_bimanual.yaml` | Quest VR | Bimanual | `(16,)` joint positions | Command topics |
+| `openarm_single_quest.yaml` | Quest VR | Single (right) | `(8,)` joint positions | Command topics |
+| `openarm_single_quest_afo.yaml` | Quest VR | Single (right) | `(8,)` joint positions | Observation lookahead |
+
+### EE Cartesian configs
+
+Output lands in `<output-dir>/ee-space/<input-dir-name>/`.
+
+| Config | Teleop mode | Arms | `observation.state` | `action` |
+|--------|-------------|------|---------------------|---------|
+| `openarm_ee_bimanual.yaml` | Quest VR | Bimanual | `(16,)` xyz+quat+gripper ×2 | `(20,)` xyz+rot6d+gripper ×2 |
+| `openarm_ee_left.yaml` | Quest VR | Left only | `(8,)` xyz+quat+gripper | `(10,)` xyz+rot6d+gripper |
+
+**EE Cartesian format:**
+
+```
+observation.state per arm (8 dims): [x, y, z, qx, qy, qz, qw, gripper]
+action         per arm (10 dims): [x, y, z, r0, r1, r2, r3, r4, r5, gripper]
+```
+
+The action uses [6D rotation representation](https://arxiv.org/abs/1812.07035) for regression stability. EE mode is always act-from-obs — `action[t] = ee_pose[t]` in the converter; the future prediction window is applied by LeRobot's `delta_timestamps` at train time.
+
+---
 
 **action_from_observation** — used by `openarm_single_quest_afo.yaml` when `/follower_*/commands` was not recorded. Instead of reading from command topics, the converter derives actions from the follower's own joint positions shifted N frames forward in time. Enable in your conversion config YAML:
 
@@ -25,14 +50,21 @@ action_from_observation_n: 10 # action[t] = observation.state[t + n] (default n=
 ```
 
 ```bash
+# Joint space — output: data/datasets/joint-space/my-sessions/
 uv run mcap-convert \
   --input-dir data/raw/my-sessions \
   --config configs/mcap_converter/openarm_bimanual_quest.yaml \
   --output-dir data/datasets \
   --fps 30
+
+# EE Cartesian — output: data/datasets/ee-space/my-sessions/
+uv run mcap-convert \
+  --input-dir data/raw/my-sessions \
+  --config configs/mcap_converter/openarm_ee_bimanual.yaml \
+  --output-dir data/datasets
 ```
 
-**`--output-dir`** sets the base output directory. Output is always saved to `<output-dir>/<input-dir-name>/`.
+**`--output-dir`** sets the base output directory. Output is saved to `<output-dir>/<space>-space/<input-dir-name>/` where `<space>` is `ee` or `joint` based on the config.
 
 **`--output-path`** bypasses auto-naming entirely — the dataset lands exactly where you point it.
 
