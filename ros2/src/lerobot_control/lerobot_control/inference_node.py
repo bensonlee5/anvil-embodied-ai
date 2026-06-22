@@ -634,7 +634,7 @@ class LeRobotInferenceNode(Node):
                         from anvil_shared.ee_transform import ee_obs_rel_forward as _eorf
                         _rel_id = _eorf(_s_np[np.newaxis], _s_np)[0]
                         observation = dict(observation)
-                        observation["observation.state"] = torch.tensor(_rel_id, dtype=torch.float32)
+                        observation["observation.state"] = torch.tensor(_rel_id, dtype=torch.float32).unsqueeze(0)
 
                 # Detect whether a new action chunk is about to be generated.
                 # When the queue is empty, select_action will run the model and fill
@@ -773,8 +773,8 @@ class LeRobotInferenceNode(Node):
         obs_window_np = np.stack(self._ee_raw_obs_buf)             # (n_obs_steps, 8*n_arms)
         obs_rel_np = ee_obs_rel_forward(obs_window_np, anchor)     # (n_obs_steps, 10*n_arms)
         observation = dict(observation)  # shallow copy — don't mutate caller's dict
-        # Current step relative to itself → identity; goes through normal preprocessor path
-        observation["observation.state"] = torch.tensor(obs_rel_np[-1], dtype=torch.float32)
+        # Current step relative to itself → identity; preserve (1, 10n) batch dim from topic
+        observation["observation.state"] = torch.tensor(obs_rel_np[-1], dtype=torch.float32).unsqueeze(0)
         return observation, obs_rel_np
 
     def _prefill_ee_rel_queue(self, obs_window_rel_np: np.ndarray) -> None:
