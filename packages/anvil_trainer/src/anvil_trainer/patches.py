@@ -297,6 +297,16 @@ class TransformRunner:
                     if grip_idx < len(orig_vals):
                         arr[grip_idx] = orig_vals[grip_idx]
 
+            # rot6d identity trick: force min=-1/max=1 for rot6d dims (index 3-8 per arm).
+            # With MIN_MAX normalization, 2*(x-(-1))/(1-(-1))-1 = x, so rot6d passes through
+            # unchanged — matching UMI's rot6d→identity design.  pos (0-2) and gripper (9)
+            # retain their real distribution and get range-normalised to [-1,1] as intended.
+            for arm in range(n_arms):
+                for r in range(3, 9):
+                    idx = arm * EE_ACTION_DIM_PER_ARM + r
+                    delta_min[idx] = -1.0
+                    delta_max[idx] = 1.0
+
             action_patched_stats = {
                 "mean": delta_mean.tolist(),
                 "std": delta_std.tolist(),
@@ -311,7 +321,8 @@ class TransformRunner:
             # ------------------------------------------------------------------ #
             # Identity step: obs[t] relative to obs[t] — always zeros + identity rot6d
             # Prior steps: obs[t-j] relative to obs[t]  (j = 1..n_obs_steps-1)
-            # We include both distributions and compute MEAN_STD over all.
+            # We compute mean/std/min/max over all; rot6d dims are then forced to
+            # min=-1/max=1 so they pass through unchanged under MIN_MAX normalization.
             n_obs_steps = getattr(cfg.policy, "n_obs_steps", 2)
 
             obs_rel_samples = []
@@ -333,6 +344,13 @@ class TransformRunner:
             obs_std = np.where(all_obs_rel.std(axis=0) < 1e-6, 1e-6, all_obs_rel.std(axis=0))
             obs_min = all_obs_rel.min(axis=0)
             obs_max = all_obs_rel.max(axis=0)
+
+            # rot6d identity trick (same as action): force min=-1/max=1 for rot6d dims.
+            for arm in range(n_arms):
+                for r in range(3, 9):
+                    idx = arm * EE_ACTION_DIM_PER_ARM + r
+                    obs_min[idx] = -1.0
+                    obs_max[idx] = 1.0
 
             obs_patched_stats = {
                 "mean": obs_mean.tolist(),
