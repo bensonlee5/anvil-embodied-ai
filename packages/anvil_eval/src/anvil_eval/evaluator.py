@@ -94,7 +94,7 @@ class EpisodeEvaluator:
         _ensure_model_loader_importable()
         _ensure_anvil_shared()
         from lerobot_control.model_loader import reset_model_state
-        from anvil_shared.ee_transform import ee_rel_forward, ee_rel_inverse
+        from anvil_shared.ee_transform import ee_obs_rel_forward, ee_rel_forward, ee_rel_inverse
 
         predicted_actions: list[np.ndarray] = []
         ground_truth_actions: list[np.ndarray] = []
@@ -147,6 +147,18 @@ class EpisodeEvaluator:
                 if self._is_vla:
                     processed = self._preprocess_vla(obs)
                 else:
+                    # ee_rel: apply obs relativisation before normalisation.
+                    # The dataset stores raw 8-dim absolute obs, but the checkpoint's
+                    # normaliser stats are 10-dim (patched by _compute_ee_rel_stats
+                    # during training).  Convert here to match.
+                    if self.is_ee_rel and "observation.state" in obs:
+                        obs_np = obs["observation.state"].numpy()  # (n_obs_steps, 8) or (8,)
+                        anchor = obs_np[-1] if obs_np.ndim > 1 else obs_np
+                        obs_rel = ee_obs_rel_forward(obs_np, anchor)
+                        obs = dict(obs)
+                        obs["observation.state"] = torch.tensor(
+                            obs_rel, dtype=torch.float32
+                        )
                     if self.preprocessor:
                         processed = self.preprocessor(dict(obs))
                     else:
