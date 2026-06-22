@@ -84,9 +84,12 @@ class LeRobotInferenceNode(Node):
         if not self.echo_topic_only:
             self._setup_model()
 
-            # ee_rel: raw absolute obs history for re-relativizing the full obs window
+            # ee_rel: raw absolute obs history for re-relativizing the full obs window.
+            # n_obs_steps lives on model.config (not the module) in lerobot 0.5.1.
             if self.is_ee_rel and not self._is_vla:
-                self._ee_n_obs_steps: int = getattr(self.model, "n_obs_steps", 2)
+                self._ee_n_obs_steps: int = int(
+                    getattr(getattr(self.model, "config", None), "n_obs_steps", 2)
+                )
                 self._ee_raw_obs_buf: deque = deque(maxlen=self._ee_n_obs_steps)
             else:
                 self._ee_n_obs_steps = 1
@@ -630,7 +633,10 @@ class LeRobotInferenceNode(Node):
                     if len(self._ee_raw_obs_buf) == self._ee_n_obs_steps:
                         observation, _ee_obs_window_rel = self._apply_ee_rel_obs(observation)
                     else:
-                        # Warm-up: relativize current to itself → identity (correct 10-dim shape)
+                        # Warm-up (buffer not yet full): relativize current step to itself
+                        # → identity [0,0,0, 1,0,0,0,1,0, gripper].  This gives the correct
+                        # 10-dim shape for the preprocessor/model, though the obs window
+                        # won't be perfectly relativized until the buffer fills.
                         from anvil_shared.ee_transform import ee_obs_rel_forward as _eorf
                         _rel_id = _eorf(_s_np[np.newaxis], _s_np)[0]
                         observation = dict(observation)
@@ -795,13 +801,18 @@ class LeRobotInferenceNode(Node):
             model_device = torch.device(self.device)
 
         for i in range(len(obs_window_rel_np) - 1):
-            obs_t = torch.tensor(obs_window_rel_np[i], dtype=torch.float32)
+            # Keep (1, 10n) batch dim so queue entries match what populate_queues pushes.
+            # predict_action_chunk does torch.stack(queue, dim=1) which requires uniform shapes.
+            obs_t = torch.tensor(obs_window_rel_np[i], dtype=torch.float32).unsqueeze(0)  # (1,10n)
             if self.preprocessor:
                 try:
-                    norm = self.preprocessor({"observation.state": obs_t.unsqueeze(0)})
-                    obs_t = norm["observation.state"].squeeze(0)
-                except Exception:
-                    pass  # fall back to unnormalized
+                    norm = self.preprocessor({"observation.state": obs_t})
+                    obs_t = norm["observation.state"]   # stays (1, 10n) — no squeeze
+                except Exception as _exc:
+                    self.get_logger().warn(
+                        f"[ee_rel] prefill normalization failed at step {i}: {_exc} "
+                        "— appending unnormalized obs (output will be incorrect)"
+                    )
             queue.append(obs_t.to(model_device))
 
     def _reset_delta_state(self) -> None:

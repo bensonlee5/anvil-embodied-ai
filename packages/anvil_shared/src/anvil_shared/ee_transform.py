@@ -77,7 +77,7 @@ def ee_rel_forward(
     Per arm:
         body_delta  = R_state.T @ (act_xyz - state_xyz)   (body-frame translation)
         delta_rot6d = matrices_to_rot6d(R_state.T @ R_action)
-        gripper     = act_gripper  (kept absolute)
+        gripper     = act_gripper  (passthrough — kept in absolute space, not relativised)
 
     Parameters
     ----------
@@ -147,10 +147,10 @@ def ee_rel_inverse(
     model outputs back to absolute EE poses before publishing.
 
     Per arm:
-        abs_xyz     = state_xyz + delta_xyz
+        abs_xyz     = state_xyz + R_state @ body_delta   (body-frame → world-frame translation)
         R_abs       = R_state @ rot6ds_to_matrices(delta_rot6d)
         abs_rot6d   = matrices_to_rot6d(R_abs)
-        gripper     = delta_gripper  (kept absolute during training)
+        gripper     = rel_gripper  (passthrough — was kept absolute during forward transform)
 
     Parameters
     ----------

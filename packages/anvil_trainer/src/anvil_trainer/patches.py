@@ -185,24 +185,34 @@ class TransformRunner:
             # ------------------------------------------------------------------ #
             # Action stats (relative to current state, per-sample anchor)        #
             # ------------------------------------------------------------------ #
+            # Use action_delta_indices directly so the distribution exactly matches
+            # what EERelTransform.apply produces at __getitem__ time.
+            # lerobot default: action_delta_indices = range(1-n_obs_steps, 1-n_obs_steps+horizon)
+            #   e.g. [-1, 0, …, 14] for n_obs_steps=2, horizon=16.
+            # Using range(n_steps) instead would shift origin by +1 (omit t-1, include t+15),
+            # giving wrong min/max for MIN_MAX normalization.
             action_delta_indices = getattr(cfg.policy, "action_delta_indices", None)
-            n_steps = len(action_delta_indices) if action_delta_indices else 1
+            if not action_delta_indices:
+                action_delta_indices = [0]
             N = len(actions_np)
 
-            def _ee_rel_action_for_k(k: int) -> np.ndarray:
-                if k == 0:
-                    act = actions_np
-                    sta = states_np
-                    mask = np.ones(N, dtype=bool)
+            def _ee_rel_action_for_delta(d: int) -> np.ndarray:
+                """Return SE(3) relative array for action offset d (may be negative), episode-bounded."""
+                if d == 0:
+                    act, sta, mask = actions_np, states_np, np.ones(N, dtype=bool)
+                elif d > 0:
+                    act = actions_np[d:]
+                    sta = states_np[:-d]
+                    mask = episode_idx_np[d:] == episode_idx_np[:-d]
                 else:
-                    act = actions_np[k:]
-                    sta = states_np[:-k]
-                    mask = episode_idx_np[k:] == episode_idx_np[:-k]
-                d = ee_rel_forward(act, sta)
-                return d[mask]
+                    k = -d
+                    act = actions_np[:-k]
+                    sta = states_np[k:]
+                    mask = episode_idx_np[:-k] == episode_idx_np[k:]
+                return ee_rel_forward(act, sta)[mask]
 
             all_deltas = np.concatenate(
-                [_ee_rel_action_for_k(k) for k in range(n_steps)], axis=0
+                [_ee_rel_action_for_delta(d) for d in action_delta_indices], axis=0
             )  # (N_valid_pairs, 10*n_arms)
 
             orig_action = full_dataset.meta.stats.get("action", {})

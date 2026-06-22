@@ -7,8 +7,13 @@ Covers:
   4. Identity: zero rotation → forward returns zero rotation delta
   5. ee_action_to_poses layout: pos, quat_xyzw shape, gripper value
   6. Vectorised forward matches per-sample single calls
+  7. ee_obs_rel_forward — body-frame translation, identity, gripper passthrough,
+     single vs per-sample anchor, bimanual, obs↔action frame consistency
+  8. Inference queue prefill — queue entries are shape (1, 10n) not (10n,)
 """
 from __future__ import annotations
+
+from collections import deque
 
 import numpy as np
 import pytest
@@ -17,6 +22,7 @@ from anvil_shared.ee_transform import (
     EE_ACTION_DIM_PER_ARM,
     EE_STATE_DIM_PER_ARM,
     ee_action_to_poses,
+    ee_obs_rel_forward,
     ee_rel_forward,
     ee_rel_inverse,
     n_arms_from_dims,
@@ -250,3 +256,183 @@ class TestEeActionToPoses:
         q = poses[0][0]["quat_xyzw"]
         # Identity rotation: [qx,qy,qz,qw] = [0,0,0,±1]
         assert abs(abs(q[3]) - 1.0) < 1e-10, f"Expected |qw|=1, got {q}"
+
+
+# ── 7. ee_obs_rel_forward ──────────────────────────────────────────────────────
+
+class TestEEObsRelForward:
+    """Tests for ee_obs_rel_forward: abs obs (quat, 8n) → relative obs (rot6d, 10n)."""
+
+    # Identity property: obs relative to itself = [0,0,0, 1,0,0,0,1,0, gripper]
+    def test_identity_single_arm(self):
+        rng = np.random.default_rng(42)
+        state = _random_state(rng, n_arms=1)
+        rel = ee_obs_rel_forward(state, state)  # obs = anchor
+
+        expected_xyz = np.zeros(3)
+        expected_rot6d = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+        np.testing.assert_allclose(rel[:3], expected_xyz, atol=1e-12, err_msg="identity: xyz should be 0")
+        np.testing.assert_allclose(rel[3:9], expected_rot6d, atol=1e-12, err_msg="identity: rot6d should be identity")
+        np.testing.assert_allclose(rel[9], state[7], atol=1e-12, err_msg="identity: gripper passthrough")
+
+    def test_identity_bimanual(self):
+        rng = np.random.default_rng(43)
+        state = _random_state(rng, n_arms=2)
+        rel = ee_obs_rel_forward(state, state)
+
+        assert rel.shape == (2 * EE_ACTION_DIM_PER_ARM,)
+        for arm in range(2):
+            a0 = arm * EE_ACTION_DIM_PER_ARM
+            np.testing.assert_allclose(rel[a0:a0 + 3], 0.0, atol=1e-12, err_msg=f"arm {arm} xyz")
+            np.testing.assert_allclose(
+                rel[a0 + 3:a0 + 9], [1, 0, 0, 0, 1, 0], atol=1e-12, err_msg=f"arm {arm} rot6d"
+            )
+            np.testing.assert_allclose(rel[a0 + 9], state[arm * EE_STATE_DIM_PER_ARM + 7], atol=1e-12)
+
+    # Gripper is a passthrough (kept absolute, not relativised)
+    def test_gripper_passthrough(self):
+        rng = np.random.default_rng(5)
+        obs = _random_state(rng)
+        anchor = _random_state(rng)
+        rel = ee_obs_rel_forward(obs, anchor)
+        np.testing.assert_allclose(rel[9], obs[7], atol=1e-12, err_msg="gripper must pass through unchanged")
+
+    # Output shape: single obs → (10n,); batched obs → (..., 10n)
+    def test_output_shape_single(self):
+        rng = np.random.default_rng(6)
+        obs = _random_state(rng)
+        anchor = _random_state(rng)
+        rel = ee_obs_rel_forward(obs, anchor)
+        assert rel.shape == (EE_ACTION_DIM_PER_ARM,)
+
+    def test_output_shape_batched(self):
+        rng = np.random.default_rng(7)
+        T = 4
+        obs_window = np.stack([_random_state(rng) for _ in range(T)])
+        anchor = _random_state(rng)
+        rel = ee_obs_rel_forward(obs_window, anchor)
+        assert rel.shape == (T, EE_ACTION_DIM_PER_ARM)
+
+    # Single anchor (broadcast) must equal per-sample anchor with same value tiled
+    def test_single_vs_per_sample_anchor(self):
+        rng = np.random.default_rng(8)
+        T = 5
+        obs = np.stack([_random_state(rng) for _ in range(T)])
+        anchor = _random_state(rng)
+
+        rel_single = ee_obs_rel_forward(obs, anchor)  # anchor shape (8,) → broadcast
+        rel_per_sample = ee_obs_rel_forward(obs, np.tile(anchor, (T, 1)))  # anchor (T,8)
+
+        np.testing.assert_allclose(rel_single, rel_per_sample, atol=1e-12)
+
+    # Body-frame translation: verify manually for a known rotation
+    def test_body_frame_translation(self):
+        """Obs offset along +y in world, anchor rotated 90° around z.
+        Body-frame translation = R_anchor.T @ world_delta = [1, 0, 0]."""
+        import math
+
+        # Anchor at origin, rotated 90° around z.
+        # R_z(90°) = [[0,-1,0],[1,0,0],[0,0,1]]; R.T @ [0,1,0] = [1,0,0].
+        # Also world_delta @ R_anchor = [0,1,0]@[[0,-1,0],[1,0,0],[0,0,1]] = [1,0,0] ✓
+        theta = math.pi / 2
+        c, s = math.cos(theta / 2), math.sin(theta / 2)
+        anchor_quat = np.array([0.0, 0.0, s, c])  # [qx,qy,qz,qw]
+        anchor_state = np.zeros(EE_STATE_DIM_PER_ARM)
+        anchor_state[3:7] = anchor_quat
+
+        # Obs at [0, 1, 0] in world, same rotation as anchor
+        obs_state = anchor_state.copy()
+        obs_state[1] = 1.0  # y offset in world
+
+        rel = ee_obs_rel_forward(obs_state, anchor_state)
+        body_delta = rel[:3]
+
+        expected_body_delta = np.array([1.0, 0.0, 0.0])
+        np.testing.assert_allclose(body_delta, expected_body_delta, atol=1e-12)
+
+    # Obs path and action path must agree on [xyz, rot6d] for the same pose
+    def test_obs_action_frame_consistency(self):
+        """For the same absolute pose, obs_rel_forward and rel_forward give
+        matching [xyz, rot6d] (gripper excluded since state has 1D, action has 1D)."""
+        rng = np.random.default_rng(9)
+        anchor_state = _random_state(rng)   # (8,) anchor in state/quat layout
+
+        # Build an action in rot6d layout from the SAME pose as anchor_state
+        # (obs and action share xyz and rotation, only gripper index differs)
+        action_same_pose = np.zeros(EE_ACTION_DIM_PER_ARM)
+        action_same_pose[:3] = anchor_state[:3]  # same xyz
+        from anvil_shared.rotation import quat_to_matrix, matrices_to_rot6d
+        R = quat_to_matrix(anchor_state[3:7])
+        r6d = matrices_to_rot6d(R[np.newaxis])[0]
+        action_same_pose[3:9] = r6d
+
+        obs_rel = ee_obs_rel_forward(anchor_state, anchor_state)  # should be identity
+        act_rel = ee_rel_forward(action_same_pose, anchor_state)  # should also be identity
+
+        # [xyz, rot6d] should match (max err ~1e-14 from floating point)
+        np.testing.assert_allclose(obs_rel[:9], act_rel[:9], atol=1e-12,
+                                   err_msg="obs and action relative frames should agree for same pose")
+
+
+# ── 8. Inference queue prefill shape ─────────────────────────────────────────
+
+class TestPrefillQueueShape:
+    """Regression test for C1: queue entries must be (1, 10n), not (10n,).
+
+    Directly tests the shape contract expected by lerobot's
+    ``predict_action_chunk`` (``torch.stack(queue, dim=1)``).
+    """
+
+    def test_prefilled_entries_have_batch_dim(self):
+        """After prefill, every queue entry must have shape (1, 10*n_arms)."""
+        torch = pytest.importorskip("torch", reason="torch not installed")
+
+        rng = np.random.default_rng(20)
+        n_arms = 1
+        n_obs_steps = 2
+        obs_window_rel_np = np.stack([
+            np.random.default_rng(i).standard_normal(EE_ACTION_DIM_PER_ARM * n_arms)
+            for i in range(n_obs_steps)
+        ])  # (n_obs_steps, 10n)
+
+        # Simulate: queue is a deque with maxlen matching model._queues
+        queue = deque(maxlen=n_obs_steps)
+
+        # Simulate preprocessor: identity (no-op), returns dict as-is
+        def fake_preprocessor(d):
+            return d
+
+        # Run the same logic as _prefill_ee_rel_queue (C1 fix applied)
+        for i in range(len(obs_window_rel_np) - 1):
+            obs_t = torch.tensor(obs_window_rel_np[i], dtype=torch.float32).unsqueeze(0)  # (1,10n)
+            norm = fake_preprocessor({"observation.state": obs_t})
+            obs_t = norm["observation.state"]   # stays (1, 10n) — no squeeze
+            queue.append(obs_t)
+
+        assert len(queue) == n_obs_steps - 1, "queue should have n_obs_steps-1 entries after prefill"
+        for entry in queue:
+            assert entry.shape == (1, EE_ACTION_DIM_PER_ARM * n_arms), (
+                f"Expected (1, {EE_ACTION_DIM_PER_ARM * n_arms}), got {entry.shape}. "
+                "C1 regression: squeeze(0) would give ({EE_ACTION_DIM_PER_ARM * n_arms},) "
+                "which crashes torch.stack(..., dim=1) in predict_action_chunk."
+            )
+
+    def test_stack_dim1_succeeds_after_prefill(self):
+        """torch.stack(queue+[current], dim=1) must succeed (regression for C1 crash)."""
+        torch = pytest.importorskip("torch", reason="torch not installed")
+
+        n_arms = 1
+        n_obs_steps = 2
+        state_dim = EE_ACTION_DIM_PER_ARM * n_arms
+
+        # Simulate prefilled queue (shape (1, state_dim) entries)
+        queue = deque(maxlen=n_obs_steps)
+        queue.append(torch.zeros(1, state_dim))  # historical entry — (1, 10n)
+
+        # Simulate select_action pushing current obs via populate_queues: also (1, 10n)
+        current_obs = torch.zeros(1, state_dim)
+        queue.append(current_obs)
+
+        # This is what predict_action_chunk does; it must not raise
+        stacked = torch.stack(list(queue), dim=1)   # (1, n_obs_steps, state_dim)
+        assert stacked.shape == (1, n_obs_steps, state_dim)
