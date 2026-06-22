@@ -192,8 +192,20 @@ class LeRobotInferenceNode(Node):
         self.min_position_delta = safety_config.get("min_position_delta", None)
 
         self.joint_state_topic = self.config.get("joint_state_topic", "/joint_states")
-        self.camera_mapping = self.config.get("camera_mapping", {})
+        _cameras_cfg: dict = self.config.get("cameras", {})
+        self.camera_mapping = _cameras_cfg.get("mapping", {})
         self.camera_names = list(self.camera_mapping.values())
+
+        # Build per-camera expected fps dict (camera name → expected fps).
+        # Warning threshold = expected * 2/3, independent of control_frequency.
+        _global_expected_fps: float = _cameras_cfg.get("fps", 30.0)
+        _fps_overrides: dict = _cameras_cfg.get("fps_overrides", {})
+        # overrides are keyed by ROS topic; map to camera name via camera_mapping
+        self._expected_camera_fps: dict[str, float] = {
+            name: _fps_overrides.get(topic, _global_expected_fps)
+            for topic, name in self.camera_mapping.items()
+        }
+
         self.arms_config = self.config.get("arms", {})
         self.joint_names_config = self.config.get("joint_names", {})
 
@@ -360,6 +372,11 @@ class LeRobotInferenceNode(Node):
         if self._is_vla:
             self._setup_vla_inference()
             self._start_inference_thread()
+        else:
+            # Classic (ACT/Diffusion): initialise latency tracker
+            from lerobot_control.latency_stats import LatencyStats
+
+            self._latency_tracker = LatencyStats(maxlen=100)
 
         if self.model_type in {"smolvla", "pi0", "pi05"} and not self.task_description:
             self.get_logger().warn(
@@ -642,6 +659,16 @@ class LeRobotInferenceNode(Node):
                         observation = dict(observation)
                         observation["observation.state"] = torch.tensor(_rel_id, dtype=torch.float32).unsqueeze(0)
 
+                # True when the model will actually run a forward pass this tick.
+                # ACT uses self._action_queue; Diffusion uses self._queues["action"].
+                if hasattr(self.model, "_action_queue"):
+                    _will_run_forward = len(self.model._action_queue) == 0
+                elif hasattr(self.model, "_queues") and self.model._queues is not None:
+                    action_q = self.model._queues.get("action")
+                    _will_run_forward = action_q is None or len(action_q) == 0
+                else:
+                    _will_run_forward = True
+
                 # Detect whether a new action chunk is about to be generated.
                 # When the queue is empty, select_action will run the model and fill
                 # it with n_action_steps new predictions, all computed relative to
@@ -675,7 +702,11 @@ class LeRobotInferenceNode(Node):
                     )
 
                 with torch.inference_mode():
+                    if _will_run_forward:
+                        _t0 = time.monotonic()
                     action = self.model.select_action(observation)
+                    if _will_run_forward:
+                        self._latency_tracker.add(time.monotonic() - _t0)
                     # Collect remaining normalized queue items BEFORE postprocessing so
                     # the whole chunk can be denormalized together for ee_rel restore.
                     if _is_new_chunk and _needs_restore and hasattr(self.model, "_queues"):
@@ -727,7 +758,8 @@ class LeRobotInferenceNode(Node):
                         action = ee_rel_restore_chunk(action[np.newaxis], self._delta_ref_state)[0]
 
                 self._classic_action_deque.append(action)
-                self.metrics.record_inference()
+                if _will_run_forward:
+                    self.metrics.record_inference()
 
         except Exception as e:
             import traceback
@@ -1052,12 +1084,17 @@ class LeRobotInferenceNode(Node):
         self._prev_action_output_count = stats["action_output_count"]
         self._prev_frame_counters = dict(frame_counters)
 
-        # Find bottleneck camera (only relevant when not echo_topic_only)
+        # Find bottleneck camera: compare each camera against its own expected fps,
+        # not control_freq (camera target rate is independent of the control loop).
         bottleneck_name = None
         if not self.echo_topic_only and camera_hz:
-            slowest = min(camera_hz.items(), key=lambda x: x[1])
-            if slowest[1] < self.control_freq:
-                bottleneck_name = slowest[0]
+            slow_cameras = [
+                (name, hz)
+                for name, hz in camera_hz.items()
+                if hz < self._expected_camera_fps.get(name, 30.0) * 2 / 3
+            ]
+            if slow_cameras:
+                bottleneck_name = min(slow_cameras, key=lambda x: x[1])[0]
 
         # Common header: joint state + cameras
         logger = self.get_logger()
@@ -1075,21 +1112,30 @@ class LeRobotInferenceNode(Node):
             else:
                 self._log_stats_classic(logger, dt, stats, control_hz, inference_hz, action_output_hz, bottleneck_name, camera_hz)
 
-    def _log_stats_vla(self, logger, dt, stats, inference_hz, action_output_hz, bottleneck_name, camera_hz) -> None:
-        """Log VLA (RTC) specific stats."""
-        logger.info(f"  Action output{action_output_hz:7.1f} Hz")
-        logger.info(f"  Inference    {inference_hz:7.1f} Hz  ({stats['inference_count']} total)")
-
-        # VLA latency + queue size (always)
+    def _log_stats_common(self, logger, inference_hz, action_output_hz, stats) -> None:
+        """Log model-agnostic stats shared across all model types."""
+        logger.info(f"  Inference FPS{inference_hz:7.1f} Hz  ({stats['inference_count']} total)")
+        logger.info(f"  Action FPS   {action_output_hz:7.1f} Hz")
         if hasattr(self, "_latency_tracker"):
             lat_mean = self._latency_tracker.mean()
             lat_std = self._latency_tracker.std()
             lat_p95 = self._latency_tracker.p95() or 0.0
-            queue_size = self._action_queue.qsize() if hasattr(self, "_action_queue") else 0
-            logger.info(
-                f"  VLA latency  mean={lat_mean * 1000:.1f}ms  "
-                f"std={lat_std * 1000:.1f}ms  p95={lat_p95 * 1000:.1f}ms  queue={queue_size}"
-            )
+            if lat_mean > 0:
+                logger.info(
+                    f"  Infer latency mean={lat_mean * 1000:.1f}ms  "
+                    f"std={lat_std * 1000:.1f}ms  p95={lat_p95 * 1000:.1f}ms"
+                )
+
+    def _log_stats_vla(self, logger, dt, stats, inference_hz, action_output_hz, bottleneck_name, camera_hz) -> None:
+        """Log VLA (RTC) specific stats."""
+        self._log_stats_common(logger, inference_hz, action_output_hz, stats)
+
+        # VLA: additionally log queue size
+        if hasattr(self, "_latency_tracker"):
+            lat_mean = self._latency_tracker.mean()
+            if lat_mean > 0 and hasattr(self, "_action_queue"):
+                queue_size = self._action_queue.qsize()
+                logger.info(f"  VLA queue    {queue_size}")
 
             # Debug: Action FPS, Eff ctrl Hz, queue depth stats, smoothness
             if self._debug and lat_mean > 0:
@@ -1116,12 +1162,15 @@ class LeRobotInferenceNode(Node):
                 )
 
         if bottleneck_name is not None:
-            logger.warn(f"  '{bottleneck_name}' limits to {camera_hz[bottleneck_name]:.1f} Hz (target: {self.control_freq:.0f} Hz)")
+            exp = self._expected_camera_fps.get(bottleneck_name, 30.0)
+            logger.warn(
+                f"  '{bottleneck_name}' is slow: {camera_hz[bottleneck_name]:.1f} Hz"
+                f" (threshold: {exp * 2 / 3:.0f} Hz, expected: {exp:.0f} Hz)"
+            )
 
     def _log_stats_classic(self, logger, dt, stats, control_hz, inference_hz, action_output_hz, bottleneck_name, camera_hz) -> None:
         """Log non-VLA (ACT/Diffusion) stats."""
-        logger.info(f"  Action output{action_output_hz:7.1f} Hz")
-        logger.info(f"  Inference    {inference_hz:7.1f} Hz  ({stats['inference_count']} total)")
+        self._log_stats_common(logger, inference_hz, action_output_hz, stats)
 
         if self._debug and self._smooth_tracker is not None:
             smooth = self._smooth_tracker.get_stats()
@@ -1133,7 +1182,11 @@ class LeRobotInferenceNode(Node):
                 )
 
         if bottleneck_name is not None:
-            logger.warn(f"  '{bottleneck_name}' limits to {camera_hz[bottleneck_name]:.1f} Hz (target: {self.control_freq:.0f} Hz)")
+            exp = self._expected_camera_fps.get(bottleneck_name, 30.0)
+            logger.warn(
+                f"  '{bottleneck_name}' is slow: {camera_hz[bottleneck_name]:.1f} Hz"
+                f" (threshold: {exp * 2 / 3:.0f} Hz, expected: {exp:.0f} Hz)"
+            )
 
     def reset_policy(self) -> None:
         """Reset policy state."""
@@ -1145,9 +1198,10 @@ class LeRobotInferenceNode(Node):
         if self._is_vla and hasattr(self, "_action_queue"):
             from lerobot.policies.rtc.action_queue import ActionQueue
             self._action_queue = ActionQueue(self.model.config.rtc_config)
-            self._latency_tracker.reset()
             with self._obs_lock:
                 self._latest_obs = None
+        if hasattr(self, "_latency_tracker"):
+            self._latency_tracker.reset()
         self.get_logger().info("Policy state reset complete")
 
     def get_input_stats(self) -> dict:

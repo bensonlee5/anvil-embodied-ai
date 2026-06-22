@@ -20,6 +20,14 @@
 
 ---
 
+## 📢 News
+
+- **2026-05-08** — Upgraded to LeRobot v0.5.1.
+
+_See full history in [CHANGELOG.md](CHANGELOG.md)._
+
+---
+
 ## Overview
 
 This repository is the embodied AI stack for the Anvil platform — data conversion, model training, and real-time inference for robot manipulation policies.
@@ -35,10 +43,10 @@ This repository is the embodied AI stack for the Anvil platform — data convers
 | Stage | Description |
 |-------|-------------|
 | **0. Data Collection** | Record teleoperation demos as MCAP files via [Anvil Devbox](https://shop.anvil.bot/products/anvil-devbox) |
-| **1. Data Conversion** | Convert MCAP recordings to LeRobot v3.0 datasets |
-| **2. Model Training** | Train ACT, Diffusion, SmolVLA, Pi0, or Pi0.5 policies |
-| **3. Offline Evaluation** | Validate model performance against ground-truth before deploying |
-| **4. Run Inference** | Deploy trained models on a GPU PC via ROS2 CycloneDDS |
+| **1. Data Conversion** | Convert MCAP recordings to LeRobot v3.0 datasets → [docs/data-conversion.md](docs/data-conversion.md) |
+| **2. Model Training** | Train ACT, Diffusion, SmolVLA, Pi0, or Pi0.5 policies → [docs/training.md](docs/training.md) |
+| **3. Offline Evaluation** | Validate model performance against ground-truth before deploying → [docs/evaluation.md](docs/evaluation.md) |
+| **4. Run Inference** | Deploy trained models on a GPU PC via ROS2 CycloneDDS → [docs/inference.md](docs/inference.md) |
 
 > **Don't have data yet?** The [Anvil OpenARM Quest Teleop Kit](https://shop.anvil.bot/products/openarm-quest-teleop-kit) gives you everything you need to start collecting demonstrations out of the box. See the [data collection guide](https://docs.anvil.bot/software/collecting-data).
 
@@ -47,13 +55,8 @@ This repository is the embodied AI stack for the Anvil platform — data convers
 ## Table of Contents
 
 - [Installation](#installation)
-- [Step 0 — Data Collection](#0-data-collection)
-- [Step 1 — Data Conversion](#1-data-conversion)
-- [Step 2 — Model Training](#2-model-training)
-- [Step 3 — Offline Evaluation](#3-offline-evaluation)
-- [Step 4 — Run Inference](#4-run-inference)
+- [Usage](#usage)
 - [Project Structure](#project-structure)
-- [CLI Tools](#cli-tools)
 
 ---
 
@@ -88,17 +91,19 @@ uv sync --all-packages --extra all                  # all policies
 
 ---
 
-## 0. Data Collection
+## Usage
+
+### 0. Data Collection
 
 Record teleoperation demonstrations as ROS2 MCAP files through an [Anvil Devbox](https://shop.anvil.bot/products/anvil-devbox). See the [data collection guide](https://docs.anvil.bot/software/collecting-data) for details.
 
----
+### 1. Data Conversion ([doc](docs/data-conversion.md))
 
-## 1. Data Conversion
+Convert MCAP recordings into LeRobot v3.0 datasets. Pick the config that matches your recording setup and run `mcap-convert`.
 
-Convert MCAP recordings into LeRobot v3.0 datasets.
+### 2. Model Training ([doc](docs/training.md))
 
-Pick the config that matches your recording setup:
+Train ACT, Diffusion, SmolVLA, Pi0, or Pi0.5 policies. Checkpoints saved to `model_zoo/<dataset>/<job_name>/`.
 
 | Config | Data space | Teleop mode | Arms | `observation.state` | `action` |
 |--------|-----------|-------------|------|---------------------|---------|
@@ -122,7 +127,11 @@ uv run mcap-convert \
   --config configs/mcap_converter/openarm_joint_bimanual.yaml
 ```
 
-Output is always saved to `<output-dir>/<input-dir-name>/` (default: `data/datasets/my-sessions/`).
+### 3. Offline Evaluation ([doc](docs/evaluation.md))
+
+Validate model performance before deploying. Two modes: dataset replay (`anvil-eval`) and ROS2 MCAP replay (`anvil-eval-ros`).
+
+### 4. Run Inference ([doc](docs/inference.md))
 
 ### EE Cartesian mode
 
@@ -688,39 +697,34 @@ anvil-embodied-ai/
 │   ├── mcap_converter/            # MCAP → LeRobot dataset conversion
 │   ├── anvil_trainer/             # Training wrapper: transforms, splits, val loss
 │   ├── anvil_eval/                # Offline evaluation: dataset replay
-│   └── anvil_eval_ros/            # Offline evaluation: ROS2 MCAP replay
+│   ├── anvil_eval_ros/            # Offline evaluation: ROS2 MCAP replay
+│   └── anvil_shared/              # Shared utilities (pure-Python, no ML deps)
 ├── ros2/
 │   └── src/lerobot_control/       # ROS2 inference node (Jazzy)
 ├── configs/
 │   ├── cyclonedds/                # CycloneDDS peer configs
 │   ├── lerobot_control/           # Inference YAML configs (cameras, joints, arms)
 │   └── mcap_converter/            # Data conversion configs
+├── docs/
+│   ├── data-conversion.md         # Data conversion guide
+│   ├── training.md                # Model training guide
+│   ├── evaluation.md              # Offline evaluation guide
+│   └── inference.md               # Inference deployment guide
 ├── docker/
 │   └── inference/                 # Dockerfile + entrypoint
 ├── scripts/
 │   ├── run_inference.sh           # Entry point for all inference scenarios
 │   └── plot_monitor_csv.py        # Plot obs.state / raw_output / control_cmd from CSV
-├── docker-compose.yml             # Production inference
-├── docker-compose.fake-hardware.yml  # Simulate 2-PC setup locally
-├── docker-compose.eval.yml        # ROS2 MCAP replay eval stack
-├── .env.example                   # Environment variable template
-└── model_zoo/                     # Trained checkpoints (gitignored)
+├── tests/
+│   ├── smoke/                     # End-to-end smoke tests
+│   └── unit/                      # Unit tests per package
+├── docker-compose.yml                    # Production inference
+├── docker-compose.fake-hardware.yml      # Simulate 2-PC setup locally
+├── docker-compose.eval.yml               # ROS2 MCAP replay eval stack
+├── docker-compose.monitor-smoke-test.yml # Monitor smoke test
+├── .env.example                          # Environment variable template
+└── model_zoo/                            # Trained checkpoints (gitignored)
 ```
-
----
-
-## CLI Tools
-
-| Command | Description |
-|---------|-------------|
-| `anvil-trainer` | Train ML models |
-| `anvil-eval` | Offline evaluation: feed dataset observations into model, compare against GT |
-| `anvil-eval-ros` | Offline evaluation: replay raw MCAP through full Docker inference stack |
-| `mcap-convert` | Convert MCAP recordings to LeRobot datasets |
-| `mcap-inspect` | Inspect MCAP file structure, topics, and message counts |
-| `mcap-to-video` | Extract MCAP image topics to MP4 videos |
-| `dataset-validate` | Validate a converted LeRobot dataset |
-| `mcap-upload` | Upload a converted dataset to HuggingFace Hub |
 
 ---
 

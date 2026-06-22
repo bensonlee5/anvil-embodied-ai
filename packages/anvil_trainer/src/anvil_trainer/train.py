@@ -13,15 +13,15 @@ one place:
 
 Usage:
     # CLI
-    anvil-trainer [lerobot args] [--use-delta-actions] [--task-description="..."] [--exclude-observation=images.chest,velocity]
+    anvil-trainer [lerobot args] [--use-delta-actions] [--task-description="..."] [--exclude-observs=images.chest,velocity]
 
     # Python
     from anvil_trainer import train, TrainingConfig
-    config = TrainingConfig(exclude_observation=["images.chest"])
+    config = TrainingConfig(exclude_observs=["images.chest"])
     train(config)
 
 Environment variables:
-    LEROBOT_EXCLUDE_OBSERVATION: Comma-separated observation suffixes to drop
+    LEROBOT_EXCLUDE_OBSERVS: Comma-separated observation suffixes to drop
     LEROBOT_TASK_OVERRIDE: Override task string for all samples
 """
 from __future__ import annotations
@@ -74,7 +74,7 @@ def train(config: TrainingConfig | None = None) -> None:
     if config is None:
         config = TrainingConfig.from_env_and_args()
 
-    # Warn about unknown --exclude-observation keys
+    # Warn about unknown --exclude-observs keys
     config.warn_unknown_exclude_keys()
 
     # Validate that the dataset action space matches the chosen action_type.
@@ -193,6 +193,11 @@ Anvil-specific flags (stripped before passing to LeRobot):
   --task-description=TEXT
       Task prompt for SmolVLA. Overrides LEROBOT_TASK_OVERRIDE env var.
       Example: --task-description="Grab the gray doll and put it in the bucket"
+
+  --exclude-observs=SUFFIX1,SUFFIX2,...
+      Drop observation keys by suffix after "observation.". Supports image and non-image keys.
+      Overrides LEROBOT_EXCLUDE_OBSERVS.
+      Example: --exclude-observs=images.wrist_r,velocity,effort
 
   --note=TEXT
       Free-text note attached to this run.

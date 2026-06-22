@@ -768,7 +768,9 @@ def main() -> None:
         ),
         # Action type (from anvil_config.json in checkpoint)
         "EVAL_ACTION_TYPE": action_type,
-        # dataset fps for GT downsampling (from meta/info.json)
+        # dataset fps for GT downsampling (from meta/info.json).
+        # Must be a float string (e.g. "30.0") because eval_recorder_node declares
+        # dataset_fps as DOUBLE — passing an INTEGER literal causes a type mismatch.
         "EVAL_DATASET_FPS": str(float(dataset_fps)),
         # Inference monitor
         "MONITOR_ENABLE": "true" if args.monitor else "false",

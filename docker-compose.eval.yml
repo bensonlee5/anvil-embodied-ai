@@ -39,6 +39,7 @@
 #   EVAL_ACTION_TYPE       — action type: "joint_abs", "ee_abs", or "ee_rel" (auto-set from anvil_config.json)
 #   EVAL_DATASET_FPS       — training dataset fps (auto-set from meta/info.json, default 30); used to
 #                            downsample 60fps MCAP GT to match training data rate
+#   CONTROL_FREQ          — target action publish rate in Hz; robot receives this many commands/sec (default: 30.0)
 #   MONITOR_ENABLE        — "true" to publish /monitor/* topics for inference_monitor_node
 #   MONITOR_OUTPUT_DIR    — host path for monitor CSV (auto-set to OUTPUT_DIR/monitor)
 
@@ -86,6 +87,7 @@ services:
         model_path:=/workspace/model
         config_file:=/workspace/config.yaml
         monitor_enable:=${MONITOR_ENABLE:-false}
+        control_frequency:=${CONTROL_FREQ:-30.0}
 
   # ── 4. Inference monitor — real-time Rerun + CSV (optional, profile: monitor) ──
   inference-monitor:
@@ -160,7 +162,7 @@ services:
         -p pred_topics:=${EVAL_PRED_TOPICS:-["/eval/follower_l_forward_position_controller/commands","/eval/follower_r_forward_position_controller/commands"]}
         -p arm_names:=${EVAL_ARM_NAMES:-["left","right"]}
         -p action_type:=${EVAL_ACTION_TYPE:-joint_abs}
-        -p dataset_fps:=${EVAL_DATASET_FPS:-30}
+        -p dataset_fps:=${EVAL_DATASET_FPS:-30.0}
 
 networks:
   ros2_eval:

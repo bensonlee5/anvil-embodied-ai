@@ -1,4 +1,5 @@
 """Shared pure-Python utilities used across anvil packages."""
+from anvil_shared.provenance import git_provenance
 from anvil_shared.rotation import (
     matrix_to_quat,
     matrix_to_rot6d,
@@ -21,4 +22,5 @@ __all__ = [
     "quat_to_matrix",
     "rot6d_to_matrix",
     "save_split_info",
+    "git_provenance",
 ]
