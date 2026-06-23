@@ -13,7 +13,7 @@
 model:
   # VLA task prompt — required for SmolVLA / Pi0 / Pi0.5, ignored for ACT / Diffusion
   # Set to the task the model was trained/finetuned for.
-  task_description: "Pick up the block and place it on the target location"
+  task_description: null
 
 # -----------------------------------------------------------------------------
 # Inference Tuning (per model type)
@@ -95,10 +95,8 @@ joint_names:
     - position
 
 # -----------------------------------------------------------------------------
-# Arm Configuration — REMAPPED for eval
+# Arm Configuration
 # -----------------------------------------------------------------------------
-# Inference node publishes to /eval/* so the recorder can distinguish
-# predicted actions from the GT actions replayed by mcap_player_node.
 
 arms:
   right:
@@ -135,6 +133,7 @@ cameras:
 #   Use to overcome motor friction when model delta outputs are too small to move joints.
 #   Commands are held at last published value until cumulative change exceeds this threshold.
 #   Default: disabled (null). Recommended starting value: 0.05.
+# Uncomment to override defaults:
 # safety:
 #   max_position_delta: 0.1
 #   min_position_delta: 0.05
