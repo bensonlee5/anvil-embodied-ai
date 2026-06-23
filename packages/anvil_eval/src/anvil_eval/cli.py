@@ -11,11 +11,37 @@ from pathlib import Path
 from .config import EvalConfig
 from .dataset import EvaluationDataset, get_episode_indices
 from .evaluator import EpisodeEvaluator, load_model
+from .horizon import aggregate_horizon, write_horizon_csv
 from .metrics import compute_episode_metrics
-from .plotting import plot_episode_joints, plot_summary_box_plot
+from .phases import label_phases, segments_to_boundaries, segments_to_frame_map
+from .plotting import (
+    plot_episode_joints,
+    plot_phase_mae_timeline,
+    plot_horizon_curve,
+    plot_summary_box_plot,
+)
 from .reporting import write_metrics_csv, write_metrics_summary
+from .substrate import write_run_meta_json, write_substrate_csv
 
 log = logging.getLogger(__name__)
+
+EVAL_TYPE_CHOICES = ("trajectory", "horizon")
+
+
+def _parse_eval_types(value: str) -> list[str]:
+    """argparse type for --eval-type: split a comma list, validate, dedupe (keep order)."""
+    types = [t.strip() for t in value.split(",") if t.strip()]
+    invalid = [t for t in types if t not in EVAL_TYPE_CHOICES]
+    if invalid:
+        raise argparse.ArgumentTypeError(
+            f"invalid eval type(s) {invalid}; choose from: {', '.join(EVAL_TYPE_CHOICES)}"
+        )
+    if not types:
+        raise argparse.ArgumentTypeError(
+            f"--eval-type must list at least one of: {', '.join(EVAL_TYPE_CHOICES)}"
+        )
+    seen: set[str] = set()
+    return [t for t in types if not (t in seen or seen.add(t))]
 
 
 def setup_logging() -> None:
@@ -83,6 +109,21 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=42,
         help="Random seed for sampling episodes (default: 42)",
+    )
+    parser.add_argument(
+        "--eval-type",
+        type=_parse_eval_types,
+        default="trajectory",
+        metavar="LIST",
+        help=f"Comma-separated analysis modes ({', '.join(EVAL_TYPE_CHOICES)}); default: trajectory",
+    )
+    parser.add_argument(
+        "--phases",
+        type=str,
+        default="gripper",
+        choices=["none", "gripper"],
+        help="Gripper-phase overlay on trajectory plots + per-arm MAE timeline (default: gripper). "
+             "Use 'none' to disable.",
     )
 
     return parser.parse_args()
@@ -158,7 +199,13 @@ def main() -> None:
         traceback.print_exc()
         sys.exit(1)
 
-    # 6. Initialize Evaluator
+    eval_types = args.eval_type  # already parsed + validated to a list by argparse
+    do_trajectory = "trajectory" in eval_types
+    do_horizon = "horizon" in eval_types
+    do_phases = args.phases == "gripper"
+
+    # 6. Initialize Evaluator. Full-chunk capture (extra inference per anchor) only when
+    # the horizon analysis is requested — phases/trajectory don't need it.
     evaluator = EpisodeEvaluator(
         model=model,
         preprocessor=preprocessor,
@@ -168,6 +215,7 @@ def main() -> None:
         anvil_cfg=anvil_cfg,
         task_description=config.task_description,
         joint_names=eval_dataset.joint_names,
+        capture_horizon=do_horizon,
     )
 
     # 7. Create output directory
@@ -181,12 +229,29 @@ def main() -> None:
 
     # 8. Run Evaluation loop
     all_metrics = []
+    substrates = []
     for ep_idx, split_label in episodes_to_eval:
         log.info("[anvil-eval] Evaluating episode %d (%s)...", ep_idx, split_label)
-        
+
         frame_indices = eval_dataset.get_episode_frames(ep_idx)
         result = evaluator.evaluate_episode(eval_dataset.dataset, frame_indices, ep_idx, split_label)
-        
+
+        # Phase segmentation (used for both substrate phase columns and trajectory plot lines)
+        phase_boundaries = None
+        if do_phases:
+            seg = label_phases(result.ground_truth, result.joint_names)
+            phase_boundaries = {arm: segments_to_boundaries(segs) for arm, segs in seg.items()}
+            if result.substrate is not None:
+                for arm, segs in seg.items():
+                    fm = segments_to_frame_map(segs)
+                    if "right" in arm:
+                        result.substrate.phase_right = fm
+                    else:
+                        result.substrate.phase_left = fm
+
+        if result.substrate is not None:
+            substrates.append(result.substrate)
+
         # Compute metrics in model-output space (raw_output vs raw_ground_truth) so that
         # delta and absolute models are evaluated on what the model actually predicts,
         # not on the restored absolute trajectory.
@@ -196,25 +261,49 @@ def main() -> None:
             _pred_for_metrics, _gt_for_metrics, result.joint_names, ep_idx, split_label
         )
         all_metrics.append(metrics)
-        
-        # Plot episode
-        plot_path = plots_dir / f"episode_{ep_idx:04d}_{split_label}.png"
-        plot_episode_joints(
-            result.predicted, result.ground_truth, result.joint_names, metrics, plot_path,
-            raw_output=result.raw_output,
-            obs_states=result.obs_states,
-            action_type=evaluator.action_type,
-            raw_ground_truth=result.raw_ground_truth,
-        )
+
+        # Plot episode (trajectory mode) — phase lines drawn by default
+        if do_trajectory:
+            plot_path = plots_dir / f"episode_{ep_idx:04d}_{split_label}.png"
+            plot_episode_joints(
+                result.predicted, result.ground_truth, result.joint_names, metrics, plot_path,
+                raw_output=result.raw_output,
+                obs_states=result.obs_states,
+                action_type=evaluator.action_type,
+                raw_ground_truth=result.raw_ground_truth,
+                phase_boundaries=phase_boundaries,
+            )
+
+        # Per-arm MAE-over-time with phase boundaries
+        if do_phases and phase_boundaries:
+            mae_path = plots_dir / f"episode_{ep_idx:04d}_{split_label}_phase_mae.png"
+            plot_phase_mae_timeline(
+                result.predicted, result.ground_truth, result.joint_names,
+                phase_boundaries, ep_idx, split_label, mae_path,
+            )
         log.info("[anvil-eval] Episode %d MAE: %.4f", ep_idx, metrics.mae)
 
     # 9. Save Summary Results
     log.info("[anvil-eval] Writing summary reports...")
     write_metrics_summary(all_metrics, config.output_dir / "metrics_summary.json")
     write_metrics_csv(all_metrics, config.output_dir / "metrics_per_episode.csv")
-    
-    # Summary plot
-    plot_summary_box_plot(all_metrics, eval_dataset.joint_names, plots_dir / "summary_per_joint_mae.png")
+    if do_trajectory:
+        plot_summary_box_plot(all_metrics, eval_dataset.joint_names, plots_dir / "summary_per_joint_mae.png")
+
+    # 10. Horizon analysis (from captured substrate)
+    if do_horizon:
+        have_substrate = bool(substrates) and any(len(s.anchors) > 0 for s in substrates)
+        if not have_substrate:
+            log.warning("[anvil-eval] horizon requested but no chunks captured "
+                        "(model may not support chunked prediction); skipping.")
+        else:
+            log.info("[anvil-eval] Writing horizon analysis + substrate...")
+            write_substrate_csv(substrates, config.output_dir / "substrate.csv")
+            write_run_meta_json(substrates, config.output_dir / "substrate_meta.json",
+                                extra={"eval_types": eval_types, "phases": args.phases})
+            agg = aggregate_horizon(substrates)
+            write_horizon_csv(agg, config.output_dir / "horizon_by_offset.csv")
+            plot_horizon_curve(agg, plots_dir / "horizon_curve.png")
 
     log.info("[anvil-eval] Evaluation complete!")
 

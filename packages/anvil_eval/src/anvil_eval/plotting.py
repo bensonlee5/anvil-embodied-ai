@@ -27,6 +27,7 @@ def plot_episode_joints(
     obs_states: np.ndarray | None = None,
     action_type: str = "absolute",
     raw_ground_truth: np.ndarray | None = None,
+    phase_boundaries: dict[str, list[tuple[int, str]]] | None = None,
 ) -> None:
     """Plot predicted vs ground-truth joint trajectories for one episode.
 
@@ -34,8 +35,26 @@ def plot_episode_joints(
     - Top block (absolute scale): GT, Pred, obs_state
     - Bottom block (delta scale, when action_type is delta and raw_ground_truth provided):
       raw model output and ΔGT taken directly from raw_ground_truth (pre-computed by evaluator)
+
+    phase_boundaries: optional {arm: [(frame, entered_state)]} — draws a dashed vertical
+        line at each gripper phase transition on that arm's joint subplots. ``entered_state``
+        ("closed"=grasp, "open"=release) sets the line color.
     """
     import matplotlib.pyplot as plt
+
+    _PHASE_COLOR = {"closed": "tab:green", "open": "tab:red"}
+
+    def _draw_phase_lines(ax, arm: str, label: bool) -> None:
+        if not phase_boundaries:
+            return
+        seen: set[str] = set()
+        for frame, state in phase_boundaries.get(arm, []):
+            lbl = None
+            if label and state not in seen:
+                lbl = "grasp" if state == "closed" else "release"
+                seen.add(state)
+            ax.axvline(frame, color=_PHASE_COLOR.get(state, "gray"),
+                       linestyle="--", linewidth=0.9, alpha=0.6, label=lbl)
 
     new_names = reorder_joint_names(joint_names)
     idx_map = [joint_names.index(name) for name in new_names]
@@ -63,6 +82,7 @@ def plot_episode_joints(
         orig_idx = idx_map[j]
         abs_row = j // ncols
         col = j % ncols
+        arm = name.split("_")[0]  # "left"/"right" — selects this joint's phase boundaries
 
         # ── Top block: absolute signals ──
         ax = axes[abs_row][col]
@@ -71,6 +91,7 @@ def plot_episode_joints(
         if obs_states is not None:
             ax.plot(frames, obs_states[:, orig_idx], color="purple",
                     linewidth=0.9, alpha=0.7, label="Obs")
+        _draw_phase_lines(ax, arm, label=(j == 0))
         joint_mae = metrics.per_joint_mae.get(name, 0.0)
         ax.set_title(f"{name} (MAE: {joint_mae:.4f})", fontsize=9)
         ax.set_xlabel("frame", fontsize=8)
@@ -89,6 +110,7 @@ def plot_episode_joints(
             if orig_idx < raw_ground_truth.shape[1]:
                 ax_d.plot(frames, raw_ground_truth[:, orig_idx], color="green",
                           linewidth=0.8, linestyle="--", label="ΔGT")
+            _draw_phase_lines(ax_d, arm, label=False)
             ax_d.set_title(f"{name} [delta]", fontsize=9)
             ax_d.set_xlabel("frame", fontsize=8)
             ax_d.set_ylabel("delta [rad]", fontsize=8)
@@ -108,6 +130,104 @@ def plot_episode_joints(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
+
+
+def plot_horizon_curve(agg: dict, output_path: Path) -> None:
+    """Plot mean absolute error vs. horizon offset, one line per split.
+
+    A vertical marker shows the executed prefix (native ``n_action_steps``): error to
+    its left is what the robot runs; error to its right is the discarded tail. A flat
+    curve means the model holds its plan well (safe to execute longer); a steep one
+    points to retraining.
+    """
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    exec_len = None
+    for split, d in agg.items():
+        offsets = np.asarray(d["offsets"])
+        mean = np.asarray(d["mae_mean"])
+        std = np.asarray(d["mae_std"])
+        line, = ax.plot(offsets, mean, marker="o", markersize=3, label=f"{split} (n={d['count'][0] if d['count'] else 0})")
+        ax.fill_between(offsets, mean - std, mean + std, alpha=0.15, color=line.get_color())
+        exec_len = d.get("executed_len") or exec_len
+
+    if exec_len:
+        ax.axvline(exec_len - 0.5, color="gray", linestyle="--", linewidth=1.0,
+                   label=f"executed prefix (n_action_steps={exec_len})")
+
+    ax.set_xlabel("horizon offset (steps ahead of inference)")
+    ax.set_ylabel("mean |error| [rad]")
+    ax.set_title("Prediction error vs. horizon")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_phase_mae_timeline(
+    predicted: np.ndarray,
+    ground_truth: np.ndarray,
+    joint_names: list[str],
+    phase_boundaries: dict[str, list[tuple[int, str]]],
+    episode_idx: int,
+    split_label: str,
+    output_path: Path,
+) -> None:
+    """Per-arm MAE-over-time with phase lines: one subplot per arm.
+
+    Each subplot shows ``frame vs mean|error|`` averaged across that arm's joints (gripper
+    finger joints excluded), with grasp (green) / release (red) phase boundaries overlaid.
+    MAE (abs taken per joint before averaging) means positive/negative per-joint errors do
+    not cancel.
+    """
+    import matplotlib.pyplot as plt
+
+    arms = [a for a in phase_boundaries if _arm_score_indices(joint_names, a)]
+    if not arms:
+        return
+    err = np.abs(predicted - ground_truth)  # (T, D)
+    frames = np.arange(err.shape[0])
+
+    fig, axes = plt.subplots(len(arms), 1, figsize=(10, 3 * len(arms)), squeeze=False)
+    fig.suptitle(f"Episode {episode_idx} [{split_label}] — per-arm MAE over time", fontsize=13)
+    color = {"closed": "tab:green", "open": "tab:red"}
+
+    for row, arm in enumerate(arms):
+        ax = axes[row][0]
+        jidx = _arm_score_indices(joint_names, arm)
+        arm_mae = err[:, jidx].mean(axis=1)
+        ax.plot(frames, arm_mae, "b-", linewidth=1.0, label="MAE")
+        seen: set[str] = set()
+        for frame, state in phase_boundaries.get(arm, []):
+            lbl = None
+            if state not in seen:
+                lbl = "grasp" if state == "closed" else "release"
+                seen.add(state)
+            ax.axvline(frame, color=color.get(state, "gray"), linestyle="--",
+                       linewidth=0.9, alpha=0.6, label=lbl)
+        ax.set_title(f"{arm} arm (mean over {len(jidx)} joints, fingers excluded) — "
+                     f"MAE {arm_mae.mean():.4f}", fontsize=10)
+        ax.set_xlabel("frame", fontsize=8)
+        ax.set_ylabel("mean |error| [rad]", fontsize=8)
+        ax.tick_params(labelsize=7)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=7)
+
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def _arm_score_indices(joint_names: list[str], arm: str) -> list[int]:
+    """Indices of an arm's joints used for MAE, excluding gripper finger joints."""
+    return [
+        i for i, n in enumerate(joint_names)
+        if (n == arm or n.startswith(f"{arm}_")) and "finger_joint1" not in n
+    ]
 
 
 def plot_monitor_signals(
