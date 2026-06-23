@@ -200,14 +200,22 @@ class TrainingConfig:
                     break
 
         # --resume=PATH  (anvil flag — value is a path, not a boolean)
+        # Also handles --resume PATH (space-separated) for shell convenience.
         # lerobot's own --resume=true/false is left in sys.argv untouched.
         resume_raw: str | None = None
-        for arg in sys.argv:
+        for i, arg in enumerate(sys.argv):
             if arg.startswith("--resume="):
                 val = arg.split("=", 1)[1]
                 if val.lower() not in ("true", "false", "1", "0"):
                     resume_raw = val
                     sys.argv.remove(arg)
+                    break
+            elif arg == "--resume" and i + 1 < len(sys.argv):
+                val = sys.argv[i + 1]
+                if val.lower() not in ("true", "false", "1", "0"):
+                    resume_raw = val
+                    sys.argv.pop(i + 1)
+                    sys.argv.pop(i)
                     break
 
         resume_job_path: str | None = None
