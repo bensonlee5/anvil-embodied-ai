@@ -25,6 +25,7 @@ Usage:
   uv run python tests/smoke/scripts/pipeline_smoke_test.py --force                      # wipe + rerun
   uv run python tests/smoke/scripts/pipeline_smoke_test.py --no-docker                  # step 4 skips Docker
   uv run python tests/smoke/scripts/pipeline_smoke_test.py --keep-going                 # don't stop on failure
+  uv run python tests/smoke/scripts/pipeline_smoke_test.py --resume                     # test step 2 resume path
 
 Each step reads its inputs from stable artifact paths produced by earlier steps,
 so you can rerun a subset after fixing a later stage without redoing the whole
@@ -246,8 +247,33 @@ def run_step_convert(sc: Scenario, force: bool) -> StepResult:
 
 # ── Step 2: anvil-trainer ────────────────────────────────────────────────────
 
+def _build_train_cmd(sc: Scenario, job_name: str, steps: int, save_freq: int,
+                     exclude_observs: str = "") -> list[str]:
+    cmd = [
+        "uv", "run", "anvil-trainer",
+        f"--dataset.root={sc.dataset_dir}",
+        "--dataset.repo_id=local",
+        "--policy.type=diffusion",
+        "--policy.push_to_hub=false",
+        "--split-ratio=3,1,1",
+        f"--steps={steps}",
+        f"--save_freq={save_freq}",
+        "--log_freq=5",
+        "--batch_size=1",
+        "--num_workers=0",
+        "--eval_freq=0",
+        f"--output_dir={sc.train_out}",
+        f"--job_name={job_name}",
+    ]
+    if sc.action_type != "joint_abs":
+        cmd.append(f"--action-type={sc.action_type}")
+    if exclude_observs:
+        cmd.append(f"--exclude-observs={exclude_observs}")
+    return cmd
+
+
 def run_step_train(sc: Scenario, force: bool, steps_override: int,
-                   exclude_observs: str = "") -> StepResult:
+                   exclude_observs: str = "", do_resume: bool = False) -> StepResult:
     if not (sc.dataset_dir / "meta" / "info.json").exists():
         return _missing(sc.dataset_dir / "meta" / "info.json")
 
@@ -263,37 +289,61 @@ def run_step_train(sc: Scenario, force: bool, steps_override: int,
     excl_tag = ("_excl_" + exclude_observs.replace(",", "_").replace(".", "_")
                 if exclude_observs else "")
     job_name = f"smoke{excl_tag}"
+    _env = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
 
-    t0 = time.monotonic()
-    train_cmd = [
-        "uv", "run", "anvil-trainer",
-        f"--dataset.root={sc.dataset_dir}",
-        "--dataset.repo_id=local",
-        "--policy.type=diffusion",
-        "--policy.push_to_hub=false",
-        "--split-ratio=3,1,1",
-        f"--steps={steps_override}",
-        f"--save_freq={steps_override}",
-        "--log_freq=5",
-        "--batch_size=1",
-        "--num_workers=0",
-        "--eval_freq=0",
-        f"--output_dir={sc.train_out}",
-        f"--job_name={job_name}",
-    ]
-    if sc.action_type != "joint_abs":
-        train_cmd.append(f"--action-type={sc.action_type}")
-    if exclude_observs:
-        train_cmd.append(f"--exclude-observs={exclude_observs}")
-    rc = _run(train_cmd, env_extra={"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
-    dt = time.monotonic() - t0
+    if do_resume:
+        # ── Resume path ─────────────────────────────────────────────────────
+        # Phase 1: train to halfway to create the checkpoint we will resume from.
+        # Phase 2: resume=sc.train_out with --steps=steps_override to complete.
+        half = max(1, steps_override // 2)
+        half_ckpt = sc.ckpt_dir(half)
+        half_expected = half_ckpt / "pretrained_model" / "model.safetensors"
 
-    if rc != 0:
-        return StepResult(ok=False, duration_s=dt, artifact=ckpt_dir, notes=f"exit {rc}")
-    if not expected.exists():
-        return StepResult(ok=False, duration_s=dt, artifact=ckpt_dir,
-                          notes=f"missing {expected.relative_to(REPO)}")
-    return StepResult(ok=True, duration_s=dt, artifact=ckpt_dir)
+        phase1_dt = 0.0
+        if not half_expected.exists():
+            t0 = time.monotonic()
+            rc = _run(_build_train_cmd(sc, job_name, half, half, exclude_observs), env_extra=_env)
+            phase1_dt = time.monotonic() - t0
+            if rc != 0:
+                return StepResult(ok=False, duration_s=phase1_dt, artifact=half_ckpt,
+                                  notes=f"phase1 exit {rc}")
+            if not half_expected.exists():
+                return StepResult(ok=False, duration_s=phase1_dt, artifact=half_ckpt,
+                                  notes=f"phase1 missing {half_expected.relative_to(REPO)}")
+
+        # Phase 2: resume from the partial checkpoint
+        t1 = time.monotonic()
+        resume_cmd = [
+            "uv", "run", "anvil-trainer",
+            f"--resume={sc.train_out}",
+            f"--steps={steps_override}",
+        ]
+        if sc.action_type != "joint_abs":
+            resume_cmd.append(f"--action-type={sc.action_type}")
+        rc = _run(resume_cmd, env_extra=_env)
+        total_dt = phase1_dt + (time.monotonic() - t1)
+
+        if rc != 0:
+            return StepResult(ok=False, duration_s=total_dt, artifact=ckpt_dir,
+                              notes=f"phase2 exit {rc}")
+        if not expected.exists():
+            return StepResult(ok=False, duration_s=total_dt, artifact=ckpt_dir,
+                              notes=f"missing {expected.relative_to(REPO)}")
+        return StepResult(ok=True, duration_s=total_dt, artifact=ckpt_dir,
+                          notes=f"resumed from step {half}")
+    else:
+        # ── Normal single-phase training ─────────────────────────────────────
+        t0 = time.monotonic()
+        rc = _run(_build_train_cmd(sc, job_name, steps_override, steps_override, exclude_observs),
+                  env_extra=_env)
+        dt = time.monotonic() - t0
+
+        if rc != 0:
+            return StepResult(ok=False, duration_s=dt, artifact=ckpt_dir, notes=f"exit {rc}")
+        if not expected.exists():
+            return StepResult(ok=False, duration_s=dt, artifact=ckpt_dir,
+                              notes=f"missing {expected.relative_to(REPO)}")
+        return StepResult(ok=True, duration_s=dt, artifact=ckpt_dir)
 
 
 # ── Step 3: anvil-eval ───────────────────────────────────────────────────────
@@ -427,11 +477,12 @@ STEP_NAMES: dict[int, str] = {
 
 
 def run_step(step_no: int, sc: Scenario, force: bool, steps_override: int,
-             with_docker: bool, exclude_observs: str = "") -> StepResult:
+             with_docker: bool, exclude_observs: str = "",
+             do_resume: bool = False) -> StepResult:
     if step_no == 1:
         return run_step_convert(sc, force)
     elif step_no == 2:
-        return run_step_train(sc, force, steps_override, exclude_observs)
+        return run_step_train(sc, force, steps_override, exclude_observs, do_resume)
     elif step_no == 3:
         return run_step_eval(sc, force, steps_override)
     elif step_no == 4:
@@ -492,6 +543,12 @@ def main() -> int:
                        "cache collision with the baseline run.  "
                        "Validates docs/training.md Data Filter section."
                    ))
+    p.add_argument("--resume", action="store_true",
+                   help=(
+                       "test the anvil-trainer resume path in step 2: "
+                       "phase 1 trains to steps//2, phase 2 resumes to steps. "
+                       "Uses --resume=PATH (equals form) to exercise the fixed resume detection."
+                   ))
     args = p.parse_args()
 
     selected_steps = parse_select(args.select)
@@ -539,7 +596,8 @@ def main() -> int:
             print(f"\n  ─── Step {step_no}: {name} ───", flush=True)
             res = run_step(step_no, sc, args.force, args.steps_override,
                            with_docker=not args.no_docker,
-                           exclude_observs=exclude_observs)
+                           exclude_observs=exclude_observs,
+                           do_resume=args.resume)
             row = format_row(sc.key, pos, len(selected_steps), name, res)
             print(row, flush=True)
             all_results.append((sc.key, step_no, name, res))
