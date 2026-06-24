@@ -714,14 +714,14 @@ class LeRobotInferenceNode(Node):
                     else:
                         _rest_norm = None
 
-                # Capture reference state right after chunk generation
-                if _is_new_chunk and "observation.state" in _raw_obs:
-                    _s = _raw_obs["observation.state"]
-                    if hasattr(_s, "numpy"):
-                        _s = (_s.squeeze(0).numpy() if _s.dim() > 1 else _s.numpy())
-                    elif hasattr(_s, "cpu"):
-                        _s = _s.cpu().numpy()
-                    self._delta_ref_state = np.asarray(_s, dtype=np.float64).flatten()
+                # Capture reference state right after chunk generation.
+                # Use _ee_raw_obs_buf[-1] — the same raw absolute EE pose used as the
+                # obs anchor in _apply_ee_rel_obs — so the action-restore frame is
+                # explicitly identical to the obs-relativization frame.
+                if _is_new_chunk and self._ee_raw_obs_buf:
+                    self._delta_ref_state = np.asarray(
+                        self._ee_raw_obs_buf[-1], dtype=np.float64
+                    ).flatten()
 
                 if self.postprocessor:
                     action = self.postprocessor.process_action(action)

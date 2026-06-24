@@ -49,7 +49,7 @@ inference_tuning:
 
   # Diffusion — iterative denoising (UNet)
   diffusion:
-    n_action_steps: 12
+    n_action_steps: 8    # must match training checkpoint (horizon=24, n_action_steps=8)
     # Set 10 for real-time (78ms vs 711ms for full 100 steps)
     num_inference_steps: 10
 
