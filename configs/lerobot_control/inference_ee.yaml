@@ -50,8 +50,9 @@ inference_tuning:
   # Diffusion — iterative denoising (UNet)
   diffusion:
     n_action_steps: 8    # must match training checkpoint (horizon=24, n_action_steps=8)
-    # Set 10 for real-time (78ms vs 711ms for full 100 steps)
-    num_inference_steps: 10
+    # DDIM 16 steps (UMI-aligned): deterministic sampler, safe to skip steps.
+    # Use 10 for DDPM checkpoints (squaredcos schedule, non-deterministic).
+    num_inference_steps: 16
 
   # RTC — VLA models only (pi0, pi0.5, smolvla), always enabled
   rtc:

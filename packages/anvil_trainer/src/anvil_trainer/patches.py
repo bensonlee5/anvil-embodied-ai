@@ -2,16 +2,20 @@
 
 ``TransformRunner`` owns:
     * The active list of :class:`~anvil_trainer.transforms.Transform` instances.
-    * Five monkey-patches on lerobot modules:
+    * Six monkey-patches on lerobot modules:
         - ``apply_dataset_patches`` — patches ``LeRobotDataset.__getitem__``.
         - ``apply_val_loss_patch`` — patches ``make_dataset`` (split creation),
           captures the preprocessor from ``make_pre_post_processors``, and
           injects EE rel action stats into the returned ``train_dataset``.
         - ``apply_checkpoint_patch`` — patches ``save_checkpoint`` to compute
-          test loss and write ``anvil_config.json`` / ``split_info.json`` next
-          to each checkpoint.
+          test loss (raw + EMA) and write EMA weights / ``anvil_config.json`` /
+          ``split_info.json`` / ``model_raw.safetensors`` next to each checkpoint.
         - ``apply_val_loss_hook`` — patches ``update_policy`` for periodic val
           loss computation.
+        - ``apply_ddpm_ip_patch`` — patches ``DiffusionModel.compute_loss`` to add
+          DDPM-IP input perturbation (UMI alpha=0.1, disable with ``--no-ddpm-ip``).
+        - ``apply_ema_hook`` — patches ``update_policy`` to maintain an EMA of
+          policy weights (UMI-style, enabled by default, disable with ``--no-ema``).
         - ``apply_metadata_patches`` — runs ``Transform.patch_metadata`` hooks
           (currently used by ``ExcludeObservationTransform``).
 
@@ -46,6 +50,60 @@ log = logging.getLogger(__name__)
 # Sentinel used to mark "patch already installed" in the originals list so we
 # can keep insertion order + detect re-entrancy without wrapping in tuples.
 _PATCHED_MARKER = object()
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers shared by multiple patches
+# ---------------------------------------------------------------------------
+
+def _log_wandb(metrics: dict, step: int) -> None:
+    """Log *metrics* to the active wandb run at *step*, silently no-op if unavailable."""
+    try:
+        import wandb as _wandb
+        if _wandb.run is not None:
+            _wandb.log(metrics, step=step)
+    except Exception:
+        pass
+
+
+def _compute_mean_loss(policy, dataloader, preprocessor) -> float | None:
+    """Run *policy* over *dataloader* and return mean loss.
+
+    Handles:
+    - Moving tensors to the policy device when no *preprocessor* is provided.
+    - Temporarily switching ACTPolicy to train mode (needed to activate the VAE
+      for loss computation) and restoring eval mode afterwards.
+    - Returns ``None`` if *dataloader* is ``None`` or *policy* is ``None``.
+    """
+    import torch
+
+    if dataloader is None or policy is None:
+        return None
+
+    is_act = "ACTPolicy" in str(type(policy))
+    policy.eval()
+    if is_act:
+        policy.train()
+
+    total = 0.0
+    n = 0
+    with torch.no_grad():
+        for batch in dataloader:
+            if preprocessor is not None:
+                batch = preprocessor(batch)
+            else:
+                device = next(policy.parameters()).device
+                batch = {
+                    k: v.to(device) if isinstance(v, torch.Tensor) else v
+                    for k, v in batch.items()
+                }
+            loss, _ = policy.forward(batch)
+            total += loss.item()
+            n += 1
+
+    if is_act:
+        policy.eval()
+    return total / max(n, 1)
 
 
 class TransformRunner:
@@ -570,7 +628,6 @@ class TransformRunner:
 
         import lerobot.scripts.lerobot_train as lerobot_train_mod
         import lerobot.utils.train_utils as train_utils_mod
-        import torch
         from lerobot.utils.train_utils import save_checkpoint as original_save_checkpoint
 
         anvil_cfg_base: dict = {
@@ -587,55 +644,60 @@ class TransformRunner:
         val_state = self
 
         def patched_save_checkpoint(checkpoint_dir, **kwargs):
-            # --- Test loss (computed at save_freq) ---
-            if val_state._test_dataloader is not None:
-                policy = kwargs.get("policy")
-                preprocessor = kwargs.get("preprocessor") or val_state._preprocessor
-                step = kwargs.get("step", "?")
+            policy = kwargs.get("policy")
+            preprocessor = kwargs.get("preprocessor") or val_state._preprocessor
+            step = kwargs.get("step", "?")
 
-                if policy is not None:
-                    policy.eval()
+            # EMA model — present only after the first optimizer step (lazy init).
+            ema = getattr(val_state, "_ema", None)
+            has_test = val_state._test_dataloader is not None and policy is not None
+
+            # --- Test loss (raw policy weights) ---
+            if has_test:
+                t0 = time.perf_counter()
+                test_loss = _compute_mean_loss(policy, val_state._test_dataloader, preprocessor)
+                log.info("[eval] test_loss=%.6f @ step %s (%.1fs)", test_loss, step, time.perf_counter() - t0)
+                _log_wandb({"eval/test_loss": test_loss}, step=int(step))
+
+            # --- EMA: single swap for both EMA test loss AND checkpoint save ---
+            # Clone raw weights once; swap to EMA; compute EMA loss + save; restore.
+            raw_sd = None
+            if ema is not None and policy is not None:
+                raw_sd = {k: v.clone() for k, v in policy.state_dict().items()}
+                policy.load_state_dict(ema.averaged_model.state_dict())
+
+                # Test loss on EMA weights (policy is now EMA).
+                if has_test:
                     t0 = time.perf_counter()
-                    total_loss = 0.0
-                    n_batches = 0
+                    ema_test_loss = _compute_mean_loss(policy, val_state._test_dataloader, preprocessor)
+                    log.info(
+                        "[eval] test_loss_ema=%.6f @ step %s (%.1fs)",
+                        ema_test_loss, step, time.perf_counter() - t0,
+                    )
+                    _log_wandb({"eval/test_loss_ema": ema_test_loss}, step=int(step))
 
-                    # ACTPolicy in evaluation mode has no VAE, but test_loss
-                    # needs to calculate the full loss. We set back to train mode
-                    # to get the VAE loss if needed.
-                    is_act = "ACTPolicy" in str(type(policy))
-                    if is_act:
-                        policy.train()
+            # --- Original save (pretrained_model/ = EMA weights when EMA active) ---
+            try:
+                original_save_checkpoint(checkpoint_dir, **kwargs)
+            finally:
+                # Always restore raw weights so training continues from raw trajectory.
+                if raw_sd is not None and policy is not None:
+                    policy.load_state_dict(raw_sd)
+                    del raw_sd
 
-                    with torch.no_grad():
-                        for batch in val_state._test_dataloader:
-                            if preprocessor is not None:
-                                batch = preprocessor(batch)
-                            else:
-                                device = next(policy.parameters()).device
-                                batch = {
-                                    k: v.to(device) if isinstance(v, torch.Tensor) else v
-                                    for k, v in batch.items()
-                                }
-                            loss, _ = policy.forward(batch)
-                            total_loss += loss.item()
-                            n_batches += 1
+            # --- Persist raw weights + EMA counter to training_state/ (for resume) ---
+            if ema is not None and policy is not None:
+                from safetensors.torch import save_file as _st_save
 
-                    if is_act:
-                        policy.eval()
-
-                    test_loss = total_loss / max(n_batches, 1)
-                    test_s = time.perf_counter() - t0
-                    log.info("[eval] test_loss=%.6f @ step %s (%.1fs)", test_loss, step, test_s)
-
-                    try:
-                        import wandb as _wandb
-                        if _wandb.run is not None:
-                            _wandb.log({"eval/test_loss": test_loss}, step=int(step))
-                    except Exception:
-                        pass
-
-            # --- Original save ---
-            original_save_checkpoint(checkpoint_dir, **kwargs)
+                training_dir = checkpoint_dir / "training_state"
+                training_dir.mkdir(parents=True, exist_ok=True)
+                # policy is now back to raw weights (restored above).
+                _st_save(
+                    {k: v.contiguous() for k, v in policy.state_dict().items()},
+                    str(training_dir / "model_raw.safetensors"),
+                )
+                (training_dir / "ema_state.json").write_text(json.dumps(ema.state_dict()))
+                log.info("[ema] Saved raw weights + EMA state to %s", training_dir)
 
             # --- Save split_info.json and anvil_config.json ---
             pretrained_dir = checkpoint_dir / "pretrained_model"
@@ -659,7 +721,6 @@ class TransformRunner:
         import time
 
         import lerobot.scripts.lerobot_train as lerobot_train_mod
-        import torch
 
         original_update_policy = lerobot_train_mod.update_policy
         val_state = self
@@ -691,49 +752,199 @@ class TransformRunner:
             else:
                 unwrapped = policy
 
-            unwrapped.eval()
             t0 = time.perf_counter()
-            total_loss = 0.0
-            n_batches = 0
-
-            # ACTPolicy in evaluation mode has no VAE, but val_loss
-            # needs to calculate the full loss.
-            is_act = "ACTPolicy" in str(type(unwrapped))
-            if is_act:
-                unwrapped.train()
-
-            with torch.no_grad():
-                for val_batch in val_state._val_dataloader:
-                    if preprocessor is not None:
-                        val_batch = preprocessor(val_batch)
-                    else:
-                        device = next(unwrapped.parameters()).device
-                        val_batch = {
-                            k: v.to(device) if isinstance(v, torch.Tensor) else v
-                            for k, v in val_batch.items()
-                        }
-                    loss, _ = unwrapped.forward(val_batch)
-                    total_loss += loss.item()
-                    n_batches += 1
-
-            if is_act:
-                unwrapped.eval()
-
-            val_loss = total_loss / max(n_batches, 1)
+            val_loss = _compute_mean_loss(unwrapped, val_state._val_dataloader, preprocessor)
             val_s = time.perf_counter() - t0
             log.info("[eval] val_loss=%.6f @ step %s (%.1fs)", val_loss, abs_step, val_s)
-
-            try:
-                import wandb as _wandb
-                if _wandb.run is not None:
-                    _wandb.log({"eval/val_loss": val_loss}, step=abs_step)
-            except Exception:
-                pass
+            _log_wandb({"eval/val_loss": val_loss}, step=abs_step)
 
             return result
 
         self._patch(lerobot_train_mod, "update_policy", patched_update_policy)
         log.info("[eval] Patched update_policy for periodic val loss (val_freq will be log_freq*5)")
+
+    def apply_ddpm_ip_patch(self) -> None:
+        """Monkey-patch DiffusionModel.compute_loss to add DDPM-IP input perturbation.
+
+        DDPM-IP (Input Perturbation, Ning et al. 2023) adds a small extra noise
+        perturbation to the noise sample used for ``add_noise`` during training:
+
+            eps_perturbed = eps + alpha * randn_like(eps)
+            noisy = add_noise(x_0, eps_perturbed, t)
+            target = eps                               # original noise, NOT perturbed
+
+        This forces the model to handle slightly-off inputs, reducing exposure bias
+        in closed-loop inference where each step receives the previous step's
+        (imperfect) output rather than ground-truth.
+
+        Matches UMI's ``input_pertub=0.1`` exactly.  Disabled with ``--no-ddpm-ip``.
+        """
+        if not self.config.use_ddpm_ip:
+            log.info("[ddpm-ip] DDPM-IP disabled (--no-ddpm-ip). Skipping patch.")
+            return
+
+        import torch
+        import torch.nn.functional as F
+        from lerobot.policies.diffusion.modeling_diffusion import DiffusionModel
+        from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
+
+        alpha = self.config.ddpm_ip_alpha
+        original_compute_loss = DiffusionModel.compute_loss
+
+        def patched_compute_loss(model_self, batch):
+            # --- Input validation (unchanged from original) ---
+            assert set(batch).issuperset({OBS_STATE, ACTION, "action_is_pad"})
+            assert OBS_IMAGES in batch or OBS_ENV_STATE in batch
+            assert batch[ACTION].shape[1] == model_self.config.horizon
+            assert batch[OBS_STATE].shape[1] == model_self.config.n_obs_steps
+
+            global_cond = model_self._prepare_global_conditioning(batch)
+
+            trajectory = batch[ACTION]
+            eps = torch.randn(trajectory.shape, device=trajectory.device)
+            timesteps = torch.randint(
+                low=0,
+                high=model_self.noise_scheduler.config.num_train_timesteps,
+                size=(trajectory.shape[0],),
+                device=trajectory.device,
+            ).long()
+
+            # DDPM-IP: perturb the noise used for add_noise, keep original eps as target.
+            # Reference: https://github.com/forever208/DDPM-IP  (matches UMI input_pertub=0.1)
+            eps_perturbed = eps + alpha * torch.randn_like(eps)
+            noisy_trajectory = model_self.noise_scheduler.add_noise(trajectory, eps_perturbed, timesteps)
+
+            pred = model_self.unet(noisy_trajectory, timesteps, global_cond=global_cond)
+
+            # Target is always the ORIGINAL eps (not eps_perturbed) — this is the key.
+            if model_self.config.prediction_type == "epsilon":
+                target = eps
+            elif model_self.config.prediction_type == "sample":
+                target = batch[ACTION]
+            else:
+                raise ValueError(f"Unsupported prediction type {model_self.config.prediction_type}")
+
+            loss = F.mse_loss(pred, target, reduction="none")
+
+            if model_self.config.do_mask_loss_for_padding:
+                if "action_is_pad" not in batch:
+                    raise ValueError(
+                        "You need to provide 'action_is_pad' in the batch when "
+                        f"{model_self.config.do_mask_loss_for_padding=}."
+                    )
+                in_episode_bound = ~batch["action_is_pad"]
+                loss = loss * in_episode_bound.unsqueeze(-1)
+
+            return loss.mean()
+
+        self._patch(DiffusionModel, "compute_loss", patched_compute_loss)
+        log.info("[ddpm-ip] Patched DiffusionModel.compute_loss with DDPM-IP (alpha=%.2f)", alpha)
+
+    def apply_ema_hook(self) -> None:
+        """Monkey-patch update_policy to maintain an EMA of policy weights.
+
+        Enabled by default; disable with ``--no-ema`` (``config.use_ema=False``).
+
+        On the **first** call to ``update_policy`` (lazy init):
+        - **Fresh run**: deepcopy the live policy as the EMA seed.
+        - **Resume**: load ``training_state/model_raw.safetensors`` back into the
+          live model (aligning it with optimizer moments); seed the EMA averaged_model
+          from the current live policy (= EMA weights in ``pretrained_model/``);
+          restore the EMA counter from ``training_state/ema_state.json``.
+
+        On every subsequent call: ``ema.step(unwrapped_policy)`` after the
+        original ``update_policy`` returns.
+
+        The EMA model is stored on ``self._ema`` so ``patched_save_checkpoint``
+        can access it to swap weights and persist state.
+        """
+        if not self.config.use_ema:
+            log.info("[ema] EMA disabled (--no-ema). Skipping apply_ema_hook.")
+            return
+
+        import copy
+
+        import lerobot.scripts.lerobot_train as lerobot_train_mod
+
+        from anvil_trainer.ema import EMAModel
+
+        original_update_policy = lerobot_train_mod.update_policy
+        _state: dict = {"initialized": False}
+        runner = self
+
+        def _build_fresh_ema(model) -> EMAModel:
+            """Seed a new EMAModel from *model* (deepcopy) with runner config hyperparams."""
+            ema = EMAModel(
+                copy.deepcopy(model),
+                inv_gamma=runner.config.ema_inv_gamma,
+                power=runner.config.ema_power,
+                max_value=runner.config.ema_max_value,
+            )
+            ema.averaged_model.to(next(model.parameters()).device)
+            return ema
+
+        def patched_update_policy(
+            train_metrics, policy, batch, optimizer, grad_clip_norm,
+            accelerator=None, lr_scheduler=None, lock=None, rabc_weights_provider=None,
+        ):
+            result = original_update_policy(
+                train_metrics, policy, batch, optimizer, grad_clip_norm,
+                accelerator=accelerator, lr_scheduler=lr_scheduler,
+                lock=lock, rabc_weights_provider=rabc_weights_provider,
+            )
+
+            unwrapped = (
+                accelerator.unwrap_model(policy, keep_fp32_wrapper=True)
+                if accelerator is not None
+                else policy
+            )
+
+            # Lazy EMA initialisation on the first call.
+            if not _state["initialized"]:
+                _state["initialized"] = True
+
+                if runner.config.resume_job_path:
+                    # Resume path: pretrained_model/ holds EMA weights (already loaded
+                    # by lerobot into the live policy).  We deepcopy those as the EMA
+                    # averaged_model seed, then reload raw weights into the live policy.
+                    from pathlib import Path
+
+                    ckpt_root = (
+                        Path(runner.config.resume_job_path)
+                        / "checkpoints"
+                        / runner.config.resume_checkpoint
+                    )
+                    training_state_dir = ckpt_root / "training_state"
+                    ema = EMAModel.load_from_dir(training_state_dir, unwrapped)
+                    if ema is None:
+                        # Old checkpoint without EMA state — start fresh from current weights.
+                        log.warning(
+                            "[ema] No ema_state.json found at %s. "
+                            "Starting EMA from scratch (counter at 0).",
+                            training_state_dir,
+                        )
+                        ema = _build_fresh_ema(unwrapped)
+                else:
+                    # Fresh run: seed EMA from initial policy weights.
+                    ema = _build_fresh_ema(unwrapped)
+                    log.info(
+                        "[ema] EMAModel initialised: power=%.4f  max_value=%.4f  inv_gamma=%.1f",
+                        runner.config.ema_power,
+                        runner.config.ema_max_value,
+                        runner.config.ema_inv_gamma,
+                    )
+
+                runner._ema = ema
+
+            runner._ema.step(unwrapped)
+            return result
+
+        self._patch(lerobot_train_mod, "update_policy", patched_update_policy)
+        log.info(
+            "[ema] Patched update_policy for EMA (power=%.4f max_value=%.4f)",
+            self.config.ema_power,
+            self.config.ema_max_value,
+        )
 
 
 # =============================================================================
@@ -768,6 +979,8 @@ def patched_lerobot(config: TrainingConfig):
     runner.apply_val_loss_patch()
     runner.apply_checkpoint_patch()
     runner.apply_val_loss_hook()
+    runner.apply_ddpm_ip_patch()
+    runner.apply_ema_hook()
     try:
         yield runner
     finally:

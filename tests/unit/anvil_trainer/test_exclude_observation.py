@@ -1,14 +1,14 @@
 """
-Tests for ExcludeObservationTransform and --exclude-observation CLI parsing.
+Tests for ExcludeObservationTransform and --exclude-observs CLI parsing.
 
 Covers:
-  1. ExcludeObservationTransform._full_keys() suffix expansion
+  1. ExcludeObservationTransform._excluded_keys() suffix expansion
   2. ExcludeObservationTransform.apply() removes correct keys
-  3. ExcludeObservationTransform.apply() is a no-op when exclude_observation is None
+  3. ExcludeObservationTransform.apply() is a no-op when exclude_observs is None
   4. ExcludeObservationTransform.is_enabled() reflects config
   5. patch_metadata() wraps dataset_to_policy_features to exclude keys
   6. warn_unknown_exclude_keys() warns on unknown keys, silent on valid keys
-  7. CLI parsing: --exclude-observation=images.chest,velocity sets config correctly
+  7. CLI parsing: --exclude-observs=images.chest,velocity sets config correctly
 """
 
 import json
@@ -27,20 +27,20 @@ from anvil_trainer.train import ExcludeObservationTransform, TrainingConfig
 # 1. _full_keys() suffix expansion
 # =============================================================================
 
-class TestFullKeys:
+class TestExcludedKeys:
     def test_image_suffix_expansion(self):
-        cfg = TrainingConfig(exclude_observation=["images.chest", "images.wrist_l"])
-        result = ExcludeObservationTransform._full_keys(cfg)
+        cfg = TrainingConfig(exclude_observs=["images.chest", "images.wrist_l"])
+        result = ExcludeObservationTransform._excluded_keys(cfg)
         assert result == {"observation.images.chest", "observation.images.wrist_l"}
 
     def test_non_image_suffix_expansion(self):
-        cfg = TrainingConfig(exclude_observation=["velocity", "effort"])
-        result = ExcludeObservationTransform._full_keys(cfg)
+        cfg = TrainingConfig(exclude_observs=["velocity", "effort"])
+        result = ExcludeObservationTransform._excluded_keys(cfg)
         assert result == {"observation.velocity", "observation.effort"}
 
     def test_mixed_suffix_expansion(self):
-        cfg = TrainingConfig(exclude_observation=["images.chest", "velocity", "effort"])
-        result = ExcludeObservationTransform._full_keys(cfg)
+        cfg = TrainingConfig(exclude_observs=["images.chest", "velocity", "effort"])
+        result = ExcludeObservationTransform._excluded_keys(cfg)
         assert result == {
             "observation.images.chest",
             "observation.velocity",
@@ -48,8 +48,8 @@ class TestFullKeys:
         }
 
     def test_single_suffix(self):
-        cfg = TrainingConfig(exclude_observation=["velocity"])
-        result = ExcludeObservationTransform._full_keys(cfg)
+        cfg = TrainingConfig(exclude_observs=["velocity"])
+        result = ExcludeObservationTransform._excluded_keys(cfg)
         assert result == {"observation.velocity"}
 
 
@@ -70,7 +70,7 @@ class TestApply:
         }
 
     def test_removes_image_keys(self):
-        cfg = TrainingConfig(exclude_observation=["images.chest", "images.wrist_r"])
+        cfg = TrainingConfig(exclude_observs=["images.chest", "images.wrist_r"])
         item = self._make_item()
         result = ExcludeObservationTransform().apply(item, cfg)
         assert "observation.images.chest" not in result
@@ -81,7 +81,7 @@ class TestApply:
         assert "action" in result
 
     def test_removes_non_image_keys(self):
-        cfg = TrainingConfig(exclude_observation=["velocity", "effort"])
+        cfg = TrainingConfig(exclude_observs=["velocity", "effort"])
         item = self._make_item()
         result = ExcludeObservationTransform().apply(item, cfg)
         assert "observation.velocity" not in result
@@ -90,7 +90,7 @@ class TestApply:
         assert "action" in result
 
     def test_removes_mixed_keys(self):
-        cfg = TrainingConfig(exclude_observation=["images.chest", "velocity"])
+        cfg = TrainingConfig(exclude_observs=["images.chest", "velocity"])
         item = self._make_item()
         result = ExcludeObservationTransform().apply(item, cfg)
         assert "observation.images.chest" not in result
@@ -100,7 +100,7 @@ class TestApply:
 
     def test_nonexistent_key_is_silent(self):
         """pop() on non-existent key should not raise."""
-        cfg = TrainingConfig(exclude_observation=["nonexistent_key"])
+        cfg = TrainingConfig(exclude_observs=["nonexistent_key"])
         item = self._make_item()
         result = ExcludeObservationTransform().apply(item, cfg)
         # All original keys should still be present
@@ -108,7 +108,7 @@ class TestApply:
         assert "action" in result
 
     def test_returns_dict(self):
-        cfg = TrainingConfig(exclude_observation=["velocity"])
+        cfg = TrainingConfig(exclude_observs=["velocity"])
         item = self._make_item()
         result = ExcludeObservationTransform().apply(item, cfg)
         assert isinstance(result, dict)
@@ -120,15 +120,15 @@ class TestApply:
 
 class TestApplyNoOp:
     def test_none_config_is_disabled(self):
-        """When exclude_observation=None, is_enabled() is False so apply() is never called."""
-        cfg = TrainingConfig(exclude_observation=None)
+        """When exclude_observs=None, is_enabled() is False so apply() is never called."""
+        cfg = TrainingConfig(exclude_observs=None)
         transform = ExcludeObservationTransform()
         # is_enabled() must be False — TransformRunner never calls apply() in this state
         assert transform.is_enabled(cfg) is False
 
     def test_empty_list_is_disabled(self):
-        """When exclude_observation=[], is_enabled() is False so apply() is never called."""
-        cfg = TrainingConfig(exclude_observation=[])
+        """When exclude_observs=[], is_enabled() is False so apply() is never called."""
+        cfg = TrainingConfig(exclude_observs=[])
         transform = ExcludeObservationTransform()
         assert transform.is_enabled(cfg) is False
 
@@ -139,15 +139,15 @@ class TestApplyNoOp:
 
 class TestIsEnabled:
     def test_enabled_with_list(self):
-        cfg = TrainingConfig(exclude_observation=["velocity"])
+        cfg = TrainingConfig(exclude_observs=["velocity"])
         assert ExcludeObservationTransform().is_enabled(cfg) is True
 
     def test_disabled_with_none(self):
-        cfg = TrainingConfig(exclude_observation=None)
+        cfg = TrainingConfig(exclude_observs=None)
         assert ExcludeObservationTransform().is_enabled(cfg) is False
 
     def test_disabled_with_empty_list(self):
-        cfg = TrainingConfig(exclude_observation=[])
+        cfg = TrainingConfig(exclude_observs=[])
         assert ExcludeObservationTransform().is_enabled(cfg) is False
 
 
@@ -179,7 +179,7 @@ class TestPatchMetadata:
         factory_mod.dataset_to_policy_features = mock_original
 
         try:
-            cfg = TrainingConfig(exclude_observation=exclude_observation)
+            cfg = TrainingConfig(exclude_observs=exclude_observation)
             transform = ExcludeObservationTransform()
             transform.patch_metadata(cfg)
 
@@ -240,7 +240,7 @@ class TestWarnUnknownExcludeKeys:
                 features=["observation.state", "action"],
             )
             cfg = TrainingConfig(
-                exclude_observation=["velocity"],  # not in dataset
+                exclude_observs=["velocity"],  # not in dataset
                 dataset_root=root,
             )
             import logging
@@ -256,7 +256,7 @@ class TestWarnUnknownExcludeKeys:
                 features=["observation.state", "observation.velocity", "action"],
             )
             cfg = TrainingConfig(
-                exclude_observation=["velocity"],  # IS in dataset
+                exclude_observs=["velocity"],  # IS in dataset
                 dataset_root=root,
             )
             import logging
@@ -268,19 +268,19 @@ class TestWarnUnknownExcludeKeys:
 
     def test_skips_when_no_exclude(self):
         """warn_unknown_exclude_keys() returns early when exclude_observation is None."""
-        cfg = TrainingConfig(exclude_observation=None, dataset_root="/does/not/exist")
+        cfg = TrainingConfig(exclude_observs=None, dataset_root="/does/not/exist")
         # Should not raise even if dataset_root is invalid
         cfg.warn_unknown_exclude_keys()
 
     def test_skips_when_no_dataset_root(self):
         """warn_unknown_exclude_keys() returns early when dataset_root is None."""
-        cfg = TrainingConfig(exclude_observation=["velocity"], dataset_root=None)
+        cfg = TrainingConfig(exclude_observs=["velocity"], dataset_root=None)
         cfg.warn_unknown_exclude_keys()
 
     def test_warns_when_info_not_found(self, caplog):
         """warn_unknown_exclude_keys() warns when info.json is missing."""
         cfg = TrainingConfig(
-            exclude_observation=["velocity"],
+            exclude_observs=["velocity"],
             dataset_root="/nonexistent/path",
         )
         import logging
@@ -307,7 +307,7 @@ class TestCLIParsing:
                 "--dataset.repo_id=local",
             ] + extra_argv
             # Clear env vars that might interfere
-            os.environ.pop("LEROBOT_EXCLUDE_OBSERVATION", None)
+            os.environ.pop("LEROBOT_EXCLUDE_OBSERVS", None)
             return TrainingConfig.from_env_and_args()
         finally:
             sys.argv = original_argv
@@ -319,16 +319,16 @@ class TestCLIParsing:
                     del os.environ[k]
 
     def test_parse_single_value(self):
-        cfg = self._run_parsing(["--exclude-observation=velocity"])
-        assert cfg.exclude_observation == ["velocity"]
+        cfg = self._run_parsing(["--exclude-observs=velocity"])
+        assert cfg.exclude_observs == ["velocity"]
 
     def test_parse_multiple_values(self):
-        cfg = self._run_parsing(["--exclude-observation=images.chest,velocity,effort"])
-        assert set(cfg.exclude_observation) == {"images.chest", "velocity", "effort"}
+        cfg = self._run_parsing(["--exclude-observs=images.chest,velocity,effort"])
+        assert set(cfg.exclude_observs) == {"images.chest", "velocity", "effort"}
 
     def test_parse_empty_gives_none(self):
         cfg = self._run_parsing([])
-        assert cfg.exclude_observation is None
+        assert cfg.exclude_observs is None
 
     def test_env_var_fallback(self):
         original_argv = sys.argv[:]
@@ -340,9 +340,9 @@ class TestCLIParsing:
                 "--policy.type=diffusion",
                 "--dataset.repo_id=local",
             ]
-            os.environ["LEROBOT_EXCLUDE_OBSERVATION"] = "velocity,effort"
+            os.environ["LEROBOT_EXCLUDE_OBSERVS"] = "velocity,effort"
             cfg = TrainingConfig.from_env_and_args()
-            assert set(cfg.exclude_observation) == {"velocity", "effort"}
+            assert set(cfg.exclude_observs) == {"velocity", "effort"}
         finally:
             sys.argv = original_argv
             for k, v in original_env.items():
@@ -361,9 +361,9 @@ class TestCLIParsing:
                 "--dataset.root=/tmp/fake",
                 "--policy.type=diffusion",
                 "--dataset.repo_id=local",
-                "--exclude-observation=velocity",
+                "--exclude-observs=velocity",
             ]
-            os.environ.pop("LEROBOT_EXCLUDE_OBSERVATION", None)
+            os.environ.pop("LEROBOT_EXCLUDE_OBSERVS", None)
             TrainingConfig.from_env_and_args()
             assert not any(a.startswith("--exclude-observation") for a in sys.argv)
         finally:

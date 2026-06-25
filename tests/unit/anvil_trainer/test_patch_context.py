@@ -111,7 +111,7 @@ class TestTransformPatchMetadataUsesRunner:
         monkeypatch.setitem(sys.modules, "lerobot.policies", fake_policies)
         monkeypatch.setitem(sys.modules, "lerobot.policies.factory", policies_factory)
 
-        cfg = TrainingConfig(exclude_observation=["images.chest"])
+        cfg = TrainingConfig(exclude_observs=["images.chest"])
         runner = TransformRunner(cfg)
         transform = ExcludeObservationTransform()
 

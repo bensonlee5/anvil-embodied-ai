@@ -111,10 +111,13 @@ inference_tuning:
   diffusion:
     n_action_steps: null
     # Steps to execute per chunk. null = use training value.
-    num_inference_steps: 10
+    num_inference_steps: 16
     # Denoising iterations at inference time.
-    # null = num_train_timesteps (100 steps, ~300ms on GPU).
-    # 10   = ~30ms on GPU — recommended for real-time deployment.
+    # DDIM checkpoints (anvil-trainer default since 2026-06):
+    #   16 steps = ~120ms on GPU — deterministic, safe to skip steps.
+    #   null     = falls back to num_train_timesteps in checkpoint (50 for DDIM).
+    # DDPM checkpoints (older, trained with --policy.noise_scheduler_type=DDPM):
+    #   Use 10   = ~30ms on GPU — DDPM cannot safely skip steps; quality degrades below 10.
 
   rtc:
     # VLA models only (SmolVLA / Pi0 / Pi0.5)

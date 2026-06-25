@@ -36,8 +36,10 @@ inference_tuning:
   diffusion:
     n_action_steps: null
     # num_inference_steps: denoising steps at inference time.
-    #   Default (null) = num_train_timesteps (100). Set 10 for real-time (78ms vs 711ms).
-    num_inference_steps: 10
+    #   DDIM 16 steps (UMI-aligned): deterministic sampler, safe to skip steps (~120ms on GPU).
+    #   Use 10 for DDPM checkpoints (squaredcos schedule, non-deterministic; ~78ms).
+    #   null = falls back to num_train_timesteps stored in checkpoint (50 for DDIM, 100 for DDPM).
+    num_inference_steps: 16
 
   # RTC — VLA models only (pi0, pi0.5, smolvla), always enabled
   #   Background thread runs inference continuously; control loop reads from ActionQueue.

@@ -84,6 +84,8 @@ These are LeRobot's own flags that `anvil-trainer` sets automatically so you don
 | `--output_dir` | `model_zoo/<space>-space/<dataset>/<job_name>` | `<space>` = `ee` for `ee_abs`/`ee_rel`, `joint` for `joint_abs` |
 | `--policy.vision_backbone` + `--policy.pretrained_backbone_weights` | `resnet18` + ImageNet weights | Injected from `--backbone` (ACT/Diffusion only) |
 | `--policy.use_group_norm` | `false` | Injected for Diffusion when using a pretrained backbone |
+| `--policy.noise_scheduler_type` | `DDIM` | Diffusion only. DDIM is deterministic and safe to skip denoise steps (train 50 → infer 16). Pass `--policy.noise_scheduler_type=DDPM` to opt out. |
+| `--policy.num_train_timesteps` | `50` | Diffusion only. Noise schedule length. UMI production setting. Pass `--policy.num_train_timesteps=100` to opt out. |
 
 ---
 
@@ -307,6 +309,70 @@ uv run anvil-trainer \
 **Steps and batch size**
 
 100k steps / batch 64 is a solid default. Diffusion benefits more from larger batch sizes than ACT — this reduces score-matching variance and stabilizes training. On a 24 GB GPU with 3–4 cameras, batch 16–32 is the practical ceiling. Use `--policy.resize_shape="[256,320]"` to shrink images if you need headroom for a larger batch.
+
+---
+
+**Noise scheduler — DDPM vs DDIM (UMI-aligned defaults)**
+
+`anvil-trainer` defaults to **DDIM with 50 training timesteps** for all Diffusion Policy runs, matching the UMI production setting.
+
+| Scheduler | Training timesteps | Inference steps | Stochastic? | Skip steps safely? |
+|-----------|-------------------|-----------------|-------------|-------------------|
+| **DDPM** (old default) | 100 | 10 | ✅ (adds random noise each step) | ❌ (random term degrades quality when steps skipped) |
+| **DDIM** (new default) | 50 | 16 | ❌ (deterministic ODE) | ✅ (safe to skip from 50→16) |
+
+DDIM uses a deterministic ODE formulation — no random noise is added during the denoising loop. This means you can safely evaluate fewer than the full 50 training steps at inference time (the default inference config uses 16). DDPM's stochastic term makes step-skipping unsafe and causes quality degradation.
+
+To opt out: pass `--policy.noise_scheduler_type=DDPM --policy.num_train_timesteps=100`.
+
+---
+
+**DDPM-IP — Input Perturbation (enabled by default)**
+
+DDPM-IP adds a small perturbation to the noise used in `add_noise` during training:
+
+```
+eps_perturbed = eps + alpha * randn_like(eps)   # alpha = 0.1
+noisy_input   = add_noise(action, eps_perturbed, t)
+target        = eps                              # original, NOT perturbed
+```
+
+This reduces **exposure bias** — the gap between training (model always sees perfectly noised inputs) and closed-loop inference (model sees its own potentially imperfect predictions from previous steps). Effect: smoother closed-loop trajectories, especially over longer action horizons.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--no-ddpm-ip` | _(flag, off by default)_ | Disable DDPM-IP; revert to standard DDPM loss |
+| `--ddpm-ip-alpha=FLOAT` | `0.1` | Perturbation scale (UMI value). Larger → stronger regularization |
+
+---
+
+**EMA — Exponential Moving Average (enabled by default)**
+
+EMA maintains a shadow copy of model weights as a running average. The **EMA weights are used for evaluation and deployment** (`pretrained_model/`); the raw weights continue training. This is the single largest gap between a plain LeRobot run and UMI — EMA smooths the prediction landscape and is critical for stable closed-loop inference.
+
+Decay formula (UMI / crowsonkb warmup):
+```
+step  = max(0, optimization_step - update_after_step - 1)
+decay = clamp(1 - (1 + step / inv_gamma)^(-power), min_value, max_value)
+```
+At `power=0.75` (UMI default): decay ≈ 0.999 at ~10k steps, 0.9999 at ~215k steps.
+
+**Checkpoint layout with EMA:**
+
+| Path | Contents |
+|------|---------|
+| `pretrained_model/model.safetensors` | **EMA weights** (used for inference — zero change to inference code) |
+| `training_state/model_raw.safetensors` | Raw (non-averaged) weights for correct optimizer resume |
+| `training_state/ema_state.json` | EMA counter (`optimization_step`, `decay`, hyperparams) |
+
+WandB logs both `eval/test_loss` (raw weights) and `eval/test_loss_ema` (EMA weights) at each checkpoint.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--no-ema` | _(flag, off by default)_ | Disable EMA entirely; single checkpoint, single test_loss |
+| `--ema-power=FLOAT` | `0.75` | Decay exponent (UMI value). Higher → faster warmup to max decay |
+| `--ema-max-value=FLOAT` | `0.9999` | EMA decay ceiling |
+| `--ema-inv-gamma=FLOAT` | `1.0` | Warmup inverse-gamma (UMI value) |
 
 ---
 

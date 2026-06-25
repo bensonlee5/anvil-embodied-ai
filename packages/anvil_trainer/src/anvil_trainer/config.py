@@ -33,6 +33,12 @@ def _pop_argv(flag: str, *, remove: bool = True) -> str | None:
     return None
 
 
+def _pop_float(flag: str, default: float) -> float:
+    """Extract --flag=VALUE from sys.argv and return as float, or return *default*."""
+    raw = _pop_argv(flag)
+    return float(raw) if raw is not None else default
+
+
 def _parse_resume_path(raw: str) -> tuple[str, str]:
     """Split a --resume path into (job_root, checkpoint_name).
 
@@ -119,6 +125,19 @@ class TrainingConfig:
     backbone: str = "resnet18"
     note: str | None = None         # Free-text note for this run (also sent to wandb as run notes)
     note_append: str | None = None  # Append to existing note during --resume
+    # EMA (Exponential Moving Average) — enabled by default for diffusion training.
+    # Disable with --no-ema.  Hyperparameters match UMI production defaults.
+    # pretrained_model/ will contain EMA weights (inference-ready, zero change to
+    # inference_node); training_state/ will contain raw weights + counter for resume.
+    use_ema: bool = True             # --no-ema disables
+    ema_power: float = 0.75          # --ema-power=<float>   (UMI: 0.75)
+    ema_max_value: float = 0.9999    # --ema-max-value=<float> (UMI: 0.9999)
+    ema_inv_gamma: float = 1.0       # --ema-inv-gamma=<float> (UMI: 1.0)
+    # DDPM-IP (Input Perturbation) — add small noise perturbation to the noise
+    # during training to reduce exposure bias in closed-loop inference (UMI: 0.1).
+    # Disable with --no-ddpm-ip.  Override alpha with --ddpm-ip-alpha=<float>.
+    use_ddpm_ip: bool = True         # --no-ddpm-ip disables
+    ddpm_ip_alpha: float = 0.1       # --ddpm-ip-alpha=<float> (UMI: 0.1)
 
     @property
     def is_ee(self) -> bool:
@@ -309,6 +328,21 @@ class TrainingConfig:
                 sys.argv.append(f"--wandb.project={dataset_name}")
 
         backbone = _pop_argv("backbone") or "resnet18"
+
+        # EMA flags (applicable to diffusion training; harmless for other policy types)
+        use_ema = "--no-ema" not in sys.argv
+        if not use_ema:
+            sys.argv.remove("--no-ema")
+        ema_power = _pop_float("ema-power", 0.75)
+        ema_max_value = _pop_float("ema-max-value", 0.9999)
+        ema_inv_gamma = _pop_float("ema-inv-gamma", 1.0)
+
+        # DDPM-IP flags (input perturbation during training; UMI default alpha=0.1)
+        use_ddpm_ip = "--no-ddpm-ip" not in sys.argv
+        if not use_ddpm_ip:
+            sys.argv.remove("--no-ddpm-ip")
+        ddpm_ip_alpha = _pop_float("ddpm-ip-alpha", 0.1)
+
         note: str | None = _pop_argv("note")
         note_append: str | None = _pop_argv("note-append")
 
@@ -365,6 +399,14 @@ class TrainingConfig:
                 if policy_type == "diffusion":
                     if not any(a.startswith("--policy.use_group_norm=") for a in sys.argv):
                         sys.argv.append("--policy.use_group_norm=false")
+                    # UMI-aligned default scheduler: DDIM is deterministic and safe to skip
+                    # denoise steps (train 50 → infer 16).  DDPM cannot safely skip steps
+                    # due to its stochastic term.  Pass --policy.noise_scheduler_type=DDPM
+                    # or --policy.num_train_timesteps=100 to opt out.
+                    if not any(a.startswith("--policy.noise_scheduler_type=") for a in sys.argv):
+                        sys.argv.append("--policy.noise_scheduler_type=DDIM")
+                    if not any(a.startswith("--policy.num_train_timesteps=") for a in sys.argv):
+                        sys.argv.append("--policy.num_train_timesteps=50")
 
         # Disable wandb artifact upload by default for all runs (new + resume)
         if not any(arg.startswith("--wandb.disable_artifact") for arg in sys.argv):
@@ -383,6 +425,12 @@ class TrainingConfig:
             backbone=backbone,
             note=note,
             note_append=note_append,
+            use_ema=use_ema,
+            ema_power=ema_power,
+            ema_max_value=ema_max_value,
+            ema_inv_gamma=ema_inv_gamma,
+            use_ddpm_ip=use_ddpm_ip,
+            ddpm_ip_alpha=ddpm_ip_alpha,
         )
 
     @classmethod
