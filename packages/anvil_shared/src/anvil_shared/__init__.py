@@ -23,4 +23,5 @@ __all__ = [
     "rot6d_to_matrix",
     "save_split_info",
     "git_provenance",
+    "ee_obs_abs_forward",
 ]

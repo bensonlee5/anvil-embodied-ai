@@ -18,6 +18,7 @@ n_arms_from_dims(state_dim, action_dim)      → int
 ee_rel_forward(action_abs, state)            → np.ndarray   abs → rel action (training)
 ee_rel_inverse(action_rel, state)            → np.ndarray   rel → abs action (inference/eval)
 ee_obs_rel_forward(obs_abs, anchor)          → np.ndarray   abs obs (8n) → rel obs (10n)
+ee_obs_abs_forward(obs_abs)                  → np.ndarray   abs obs (8n quat) → abs obs (10n rot6d)
 ee_action_to_poses(action_abs, n_arms)       → list[dict]   for CommandedEEPose
 ee_rot6d_to_quat_layout(actions_10)         → np.ndarray   (T,10n) rot6d → (T,8n) quat
 ee_quat_layout_names(rot6d_names)            → list[str]    feature name conversion
@@ -264,6 +265,50 @@ def ee_obs_rel_forward(obs_abs: np.ndarray, anchor: np.ndarray) -> np.ndarray:
             result[..., a0:a0 + 3] = world_delta @ R_anchor   # row-vector: R_anchor.T applied
 
         result[..., a0 + 3:a0 + 9] = matrices_to_rot6d(Rs_rel)
+        result[..., a0 + 9:a0 + 10] = obs_grip
+
+    return result
+
+
+def ee_obs_abs_forward(obs_abs: np.ndarray) -> np.ndarray:
+    """Convert absolute EE observations from quaternion layout to rot6d layout.
+
+    Input obs use quaternion layout (8 dims/arm), output uses rot6d (10 dims/arm).
+    No SE(3) relative computation — xyz and gripper are passthrough; only rotation
+    is re-encoded from quaternion to rot6d for network compatibility.
+
+    Per arm:
+        xyz     = obs_xyz  (passthrough)
+        rot6d   = matrices_to_rot6d(quats_to_matrices(obs_quat))
+        gripper = obs_gripper  (kept absolute)
+
+    Parameters
+    ----------
+    obs_abs:
+        Absolute EE observations in quaternion layout.
+        Shape ``(..., 8 * n_arms)``.
+
+    Returns
+    -------
+    np.ndarray
+        Absolute observations in rot6d layout, shape ``(..., 10 * n_arms)``.
+    """
+    obs_abs = np.asarray(obs_abs, dtype=np.float64)
+    n_arms = obs_abs.shape[-1] // EE_STATE_DIM_PER_ARM
+    out_shape = obs_abs.shape[:-1] + (n_arms * EE_ACTION_DIM_PER_ARM,)
+    result = np.empty(out_shape, dtype=np.float64)
+
+    for arm in range(n_arms):
+        s0 = arm * EE_STATE_DIM_PER_ARM
+        a0 = arm * EE_ACTION_DIM_PER_ARM
+
+        obs_xyz = obs_abs[..., s0:s0 + 3]
+        obs_quat = obs_abs[..., s0 + 3:s0 + 7]
+        obs_grip = obs_abs[..., s0 + 7:s0 + 8]
+
+        Rs_obs = quats_to_matrices(obs_quat)          # (..., 3, 3)
+        result[..., a0:a0 + 3] = obs_xyz
+        result[..., a0 + 3:a0 + 9] = matrices_to_rot6d(Rs_obs)
         result[..., a0 + 9:a0 + 10] = obs_grip
 
     return result

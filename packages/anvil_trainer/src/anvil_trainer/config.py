@@ -147,6 +147,10 @@ class TrainingConfig:
     def is_ee_rel(self) -> bool:
         return self.action_type == "ee_rel"
 
+    @property
+    def is_ee_abs(self) -> bool:
+        return self.action_type == "ee_abs"
+
     @classmethod
     def from_env_and_args(cls) -> TrainingConfig:
         """

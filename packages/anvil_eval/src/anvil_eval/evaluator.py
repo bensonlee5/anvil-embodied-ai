@@ -78,6 +78,7 @@ class EpisodeEvaluator:
         self.action_type: str = anvil_cfg.get("action_type", "joint_abs")
         self.is_ee: bool = self.action_type in ("ee_abs", "ee_rel")
         self.is_ee_rel: bool = self.action_type == "ee_rel"
+        self.is_ee_abs: bool = self.action_type == "ee_abs"
         self.task_description = task_description
         self.joint_names = joint_names
         self._is_vla = model_type in ("pi0", "pi05", "smolvla")
@@ -94,7 +95,7 @@ class EpisodeEvaluator:
         _ensure_model_loader_importable()
         _ensure_anvil_shared()
         from lerobot_control.model_loader import reset_model_state
-        from anvil_shared.ee_transform import ee_obs_rel_forward, ee_rel_forward, ee_rel_inverse
+        from anvil_shared.ee_transform import ee_obs_abs_forward, ee_obs_rel_forward, ee_rel_forward, ee_rel_inverse
 
         predicted_actions: list[np.ndarray] = []
         ground_truth_actions: list[np.ndarray] = []
@@ -147,17 +148,25 @@ class EpisodeEvaluator:
                 if self._is_vla:
                     processed = self._preprocess_vla(obs)
                 else:
-                    # ee_rel: apply obs relativisation before normalisation.
-                    # The dataset stores raw 8-dim absolute obs, but the checkpoint's
-                    # normaliser stats are 10-dim (patched by _compute_ee_rel_stats
-                    # during training).  Convert here to match.
+                    # EE obs conversion: dataset stores 8-dim quat obs; checkpoint
+                    # normaliser stats are 10-dim rot6d (patched during training).
+                    # Convert here before normalisation to match training layout.
                     if self.is_ee_rel and "observation.state" in obs:
+                        # ee_rel: relativise to the anchor (most recent obs step).
                         obs_np = obs["observation.state"].numpy()  # (n_obs_steps, 8) or (8,)
                         anchor = obs_np[-1] if obs_np.ndim > 1 else obs_np
                         obs_rel = ee_obs_rel_forward(obs_np, anchor)
                         obs = dict(obs)
                         obs["observation.state"] = torch.tensor(
                             obs_rel, dtype=torch.float32
+                        )
+                    elif self.is_ee_abs and "observation.state" in obs:
+                        # ee_abs: convert quat layout (8n) → rot6d layout (10n), absolute.
+                        obs_np = obs["observation.state"].numpy()  # (n_obs_steps, 8) or (8,)
+                        obs_abs_rot6d = ee_obs_abs_forward(obs_np)
+                        obs = dict(obs)
+                        obs["observation.state"] = torch.tensor(
+                            obs_abs_rot6d, dtype=torch.float32
                         )
                     if self.preprocessor:
                         processed = self.preprocessor(dict(obs))

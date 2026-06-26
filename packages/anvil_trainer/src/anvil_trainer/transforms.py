@@ -166,6 +166,111 @@ class TaskOverrideTransform(Transform):
 # =============================================================================
 
 
+# =============================================================================
+# Shared metadata-patch helper
+# =============================================================================
+
+
+def _patch_obs_state_shape_8n_to_10n(
+    config: "TrainingConfig", runner: Any = None
+) -> None:
+    """Patch dataset_to_policy_features to report observation.state as 10-dim/arm.
+
+    Shared by EEAbsTransform and EERelTransform — both convert obs.state from
+    quaternion layout (8 dims/arm) to rot6d layout (10 dims/arm), so the policy
+    must be initialised with the correct (larger) input dimension.
+
+    When ``runner`` is provided the patch is tracked by the TransformRunner and
+    will be reverted automatically by :func:`patched_lerobot`.  Without a runner
+    the module attribute is set directly (test / standalone use).
+    """
+    import lerobot.datasets.feature_utils as _feat_utils
+    import lerobot.policies.factory as _factory
+    from lerobot.datasets.feature_utils import dataset_to_policy_features as _original
+
+    def _patched(features: dict) -> dict:
+        modified = {}
+        for key, feat in features.items():
+            if key == "observation.state":
+                shape = feat.get("shape", ())
+                if len(shape) == 1 and shape[0] % 8 == 0:
+                    modified[key] = {**feat, "shape": (shape[0] // 8 * 10,)}
+                else:
+                    modified[key] = feat
+            else:
+                modified[key] = feat
+        return _original(modified)
+
+    if runner is not None:
+        runner._patch(_feat_utils, "dataset_to_policy_features", _patched)
+        runner._patch(_factory, "dataset_to_policy_features", _patched)
+    else:
+        _feat_utils.dataset_to_policy_features = _patched
+        _factory.dataset_to_policy_features = _patched
+
+
+# =============================================================================
+# EEAbsTransform
+# =============================================================================
+
+
+class EEAbsTransform(Transform):
+    """Convert absolute EE obs from quaternion layout (8n) to rot6d layout (10n).
+
+    Only observation.state is converted — action is already in rot6d layout
+    from the dataset (per-arm: [x, y, z, r0..r5, gripper], 10 dims).
+    No SE(3) relative computation; xyz and gripper are passthrough.
+
+    obs: 8 dims/arm (quat layout) → 10 dims/arm (rot6d layout), absolute
+    action: 10 dims/arm (rot6d layout), unchanged
+    """
+
+    def __init__(self) -> None:
+        self._first_apply: bool = True
+
+    @property
+    def name(self) -> str:
+        return "ee_abs"
+
+    def is_enabled(self, config: TrainingConfig) -> bool:
+        return config.is_ee_abs
+
+    def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
+        import torch
+        from anvil_shared.ee_transform import ee_obs_abs_forward
+
+        if "observation.state" not in item:
+            return item
+
+        obs_full = item["observation.state"]  # (T, 8*n_arms) or (8*n_arms,)
+        obs_np = obs_full.detach().cpu().numpy().astype("float64")
+
+        obs_abs_np = ee_obs_abs_forward(obs_np)  # (..., 10*n_arms)
+        item["observation.state"] = torch.tensor(obs_abs_np, dtype=torch.float32)
+
+        if self._first_apply:
+            n_arms = obs_np.shape[-1] // 8
+            log.info(
+                "[ee_abs] active — %d arm(s), obs (8n quat) → (10n rot6d, absolute)",
+                n_arms,
+            )
+            self._first_apply = False
+
+        return item
+
+    def patch_metadata(self, config: TrainingConfig, runner: Any = None) -> None:
+        """Patch lerobot's dataset_to_policy_features to report 10-dim obs shape."""
+        if not config.is_ee_abs:
+            return
+        _patch_obs_state_shape_8n_to_10n(config, runner)
+        log.info("[ee_abs] patched dataset_to_policy_features: obs.state 8n→10n/arm")
+
+
+# =============================================================================
+# EERelTransform
+# =============================================================================
+
+
 class EERelTransform(Transform):
     """Convert absolute EE obs and actions to SE(3)-relative representation.
 
@@ -245,28 +350,5 @@ class EERelTransform(Transform):
         """
         if not config.is_ee_rel:
             return
-
-        import lerobot.datasets.feature_utils as _feat_utils
-        import lerobot.policies.factory as _factory
-        from lerobot.datasets.feature_utils import dataset_to_policy_features as _original
-
-        def _patched(features: dict) -> dict:
-            modified = {}
-            for key, feat in features.items():
-                if key == "observation.state":
-                    shape = feat.get("shape", ())
-                    if len(shape) == 1 and shape[0] % 8 == 0:
-                        modified[key] = {**feat, "shape": (shape[0] // 8 * 10,)}
-                    else:
-                        modified[key] = feat
-                else:
-                    modified[key] = feat
-            return _original(modified)
-
-        if runner is not None:
-            runner._patch(_feat_utils, "dataset_to_policy_features", _patched)
-            runner._patch(_factory, "dataset_to_policy_features", _patched)
-        else:
-            _feat_utils.dataset_to_policy_features = _patched
-            _factory.dataset_to_policy_features = _patched
+        _patch_obs_state_shape_8n_to_10n(config, runner)
         log.info("[ee_rel] patched dataset_to_policy_features: obs.state 8n→10n/arm")

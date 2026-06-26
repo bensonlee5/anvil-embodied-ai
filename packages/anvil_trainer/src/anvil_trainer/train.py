@@ -176,7 +176,9 @@ Anvil-specific flags (stripped before passing to LeRobot):
   --action-type=TYPE
       Action representation. One of:
         joint_abs  — joint absolute positions (default)
-        ee_abs     — EE Cartesian rot6d, absolute (requires EE-space dataset)
+        ee_abs     — EE Cartesian rot6d, absolute (requires EE-space dataset).
+                     obs.state converted quat→rot6d (8n→10n) at load time;
+                     rot6d dims identity-normalized (±1) for Gram-Schmidt validity.
         ee_rel     — EE Cartesian SE(3) relative, delta xyz + relative rotation
                      (requires EE-space dataset)
       Validated against the dataset's info.json at startup.

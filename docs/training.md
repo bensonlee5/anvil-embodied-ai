@@ -93,11 +93,16 @@ These are LeRobot's own flags that `anvil-trainer` sets automatically so you don
 
 Controls the action space. The chosen type is persisted to `anvil_config.json` in the checkpoint — inference reads it automatically, no manual config change needed.
 
-| `--action-type` | Space | `observation.state` | `action` | When to use |
+| `--action-type` | Space | `observation.state` fed to policy | `action` | When to use |
 |---|---|---|---|---|
 | `joint_abs` (default) | Joint | `(N,)` joint positions | `(N,)` joint positions | Joint-space policies (ACT, Diffusion) |
-| `ee_abs` | EE Cartesian | `(8×n_arms,)` xyz+quat+gripper | `(10×n_arms,)` xyz+rot6d+gripper | EE absolute; simplest EE mode |
+| `ee_abs` | EE Cartesian | `(10×n_arms,)` xyz+**rot6d**+gripper — absolute¹ | `(10×n_arms,)` xyz+rot6d+gripper | EE absolute; simplest EE mode |
 | `ee_rel` | EE Cartesian | `(10×n_arms,)` xyz+rot6d relative to current frame | `(10×n_arms,)` xyz+rot6d relative to current frame | EE SE(3)-relative (UMI-style); more robust to workspace position shift |
+
+¹ `ee_abs` converts `observation.state` from quaternion layout (8n) to rot6d layout (10n) at dataset load time.
+The dataset on disk still stores quaternions (`[xyz, qx, qy, qz, qw, gripper]` per arm); the trainer, inference node,
+and eval pipeline all apply the conversion transparently so the policy always sees rot6d.
+rot6d dims are identity-normalized (min/max forced to ±1) so Gram-Schmidt reconstruction stays geometrically valid.
 
 ```bash
 # Joint absolute (default)

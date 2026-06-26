@@ -22,12 +22,13 @@ from anvil_shared.ee_transform import (
     EE_ACTION_DIM_PER_ARM,
     EE_STATE_DIM_PER_ARM,
     ee_action_to_poses,
+    ee_obs_abs_forward,
     ee_obs_rel_forward,
     ee_rel_forward,
     ee_rel_inverse,
     n_arms_from_dims,
 )
-from anvil_shared.rotation import matrix_to_quat, rot6d_to_matrix
+from anvil_shared.rotation import matrix_to_quat, quat_to_matrix, rot6d_to_matrix
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -436,3 +437,97 @@ class TestPrefillQueueShape:
         # This is what predict_action_chunk does; it must not raise
         stacked = torch.stack(list(queue), dim=1)   # (1, n_obs_steps, state_dim)
         assert stacked.shape == (1, n_obs_steps, state_dim)
+
+
+# =============================================================================
+# 9. ee_obs_abs_forward — absolute quat (8n) → rot6d (10n) conversion
+# =============================================================================
+
+
+def _make_state_quat(n_arms: int = 1, rng: np.random.Generator | None = None) -> np.ndarray:
+    """Build a random EE state in quaternion layout (8n)."""
+    if rng is None:
+        rng = np.random.default_rng(42)
+    state = np.zeros(EE_STATE_DIM_PER_ARM * n_arms)
+    for arm in range(n_arms):
+        s0 = arm * EE_STATE_DIM_PER_ARM
+        state[s0:s0 + 3] = rng.normal(size=3)      # xyz
+        q = rng.normal(size=4)
+        state[s0 + 3:s0 + 7] = q / np.linalg.norm(q)  # unit quat
+        state[s0 + 7] = rng.uniform(0.0, 0.08)     # gripper
+    return state
+
+
+class TestEEObsAbsForward:
+    """Tests for ee_obs_abs_forward — quat (8n) → rot6d (10n), absolute."""
+
+    def test_output_shape_single_arm(self):
+        state = _make_state_quat(n_arms=1)
+        out = ee_obs_abs_forward(state)
+        assert out.shape == (EE_ACTION_DIM_PER_ARM,), f"Expected (10,), got {out.shape}"
+
+    def test_output_shape_bimanual(self):
+        state = _make_state_quat(n_arms=2)
+        out = ee_obs_abs_forward(state)
+        assert out.shape == (EE_ACTION_DIM_PER_ARM * 2,), f"Expected (20,), got {out.shape}"
+
+    def test_output_shape_batch(self):
+        """Multi-step batch: (T, 8n) → (T, 10n)."""
+        T, n_arms = 5, 1
+        rng = np.random.default_rng(99)
+        states = np.stack([_make_state_quat(n_arms, rng) for _ in range(T)])
+        out = ee_obs_abs_forward(states)
+        assert out.shape == (T, EE_ACTION_DIM_PER_ARM * n_arms)
+
+    def test_xyz_passthrough(self):
+        """xyz (dims 0-2 per arm) must be preserved exactly."""
+        state = _make_state_quat(n_arms=1)
+        out = ee_obs_abs_forward(state)
+        np.testing.assert_array_equal(out[:3], state[:3])
+
+    def test_gripper_passthrough(self):
+        """Gripper (dim 9 per arm) must be preserved exactly."""
+        state = _make_state_quat(n_arms=1)
+        out = ee_obs_abs_forward(state)
+        np.testing.assert_allclose(out[9], state[7], atol=1e-12)
+
+    def test_rot6d_recovers_rotation_matrix(self):
+        """rot6d output must reconstruct the same rotation as the input quaternion."""
+        rng = np.random.default_rng(7)
+        state = _make_state_quat(n_arms=1, rng=rng)
+        out = ee_obs_abs_forward(state)
+        rot6d = out[3:9]
+        R_recovered = rot6d_to_matrix(rot6d)                     # (3,3)
+        quat = state[3:7]                                         # [qx, qy, qz, qw]
+        R_expected = quat_to_matrix(quat)                         # (3,3)
+        np.testing.assert_allclose(R_recovered, R_expected, atol=1e-10)
+
+    def test_identity_quaternion_gives_identity_rot6d(self):
+        """qw=1, qx=qy=qz=0 → rot6d = [1,0,0, 0,1,0] (identity rotation)."""
+        state = np.zeros(EE_STATE_DIM_PER_ARM)
+        state[6] = 1.0  # qw=1
+        out = ee_obs_abs_forward(state)
+        expected_rot6d = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+        np.testing.assert_allclose(out[3:9], expected_rot6d, atol=1e-12)
+
+    def test_rot6d_bounds_for_random_rotations(self):
+        """All rot6d components must lie within [-1, 1] (orthonormal column vectors)."""
+        rng = np.random.default_rng(123)
+        for _ in range(50):
+            state = _make_state_quat(n_arms=1, rng=rng)
+            out = ee_obs_abs_forward(state)
+            rot6d = out[3:9]
+            assert np.all(rot6d >= -1.0 - 1e-10) and np.all(rot6d <= 1.0 + 1e-10), (
+                f"rot6d out of [-1,1]: {rot6d}"
+            )
+
+    def test_bimanual_xyz_and_gripper_passthrough(self):
+        """Both arms' xyz and gripper must be preserved in bimanual output."""
+        rng = np.random.default_rng(55)
+        state = _make_state_quat(n_arms=2, rng=rng)
+        out = ee_obs_abs_forward(state)
+        for arm in range(2):
+            s0 = arm * EE_STATE_DIM_PER_ARM
+            a0 = arm * EE_ACTION_DIM_PER_ARM
+            np.testing.assert_array_equal(out[a0:a0 + 3], state[s0:s0 + 3])  # xyz
+            np.testing.assert_allclose(out[a0 + 9], state[s0 + 7], atol=1e-12)  # gripper

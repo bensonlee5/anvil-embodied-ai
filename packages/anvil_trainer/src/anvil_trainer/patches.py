@@ -39,6 +39,7 @@ from anvil_shared.splits import compute_split_episodes, load_split_info, save_sp
 from anvil_trainer.config import TrainingConfig
 from anvil_trainer.transforms import (
     DataIntegrityError,
+    EEAbsTransform,
     EERelTransform,
     ExcludeObservationTransform,
     TaskOverrideTransform,
@@ -55,6 +56,25 @@ _PATCHED_MARKER = object()
 # ---------------------------------------------------------------------------
 # Module-level helpers shared by multiple patches
 # ---------------------------------------------------------------------------
+
+def _force_rot6d_identity(
+    min_arr: "np.ndarray", max_arr: "np.ndarray", n_arms: int, dim_per_arm: int = 10
+) -> None:
+    """Force rot6d dims (index 3–8 per arm) to min=-1, max=1 (identity trick).
+
+    Under MIN_MAX normalization, ``2*(x-(-1))/(1-(-1))-1 = x``, so rot6d passes
+    through unchanged — matching UMI's rot6d→identity design.  Position dims
+    (0–2) and gripper (9) are left untouched so they get proper range
+    normalization from their true data distributions.
+
+    Modifies *min_arr* and *max_arr* in-place.
+    """
+    for arm in range(n_arms):
+        for r in range(3, 9):
+            idx = arm * dim_per_arm + r
+            min_arr[idx] = -1.0
+            max_arr[idx] = 1.0
+
 
 def _log_wandb(metrics: dict, step: int) -> None:
     """Log *metrics* to the active wandb run at *step*, silently no-op if unavailable."""
@@ -125,6 +145,7 @@ class TransformRunner:
         transforms: list[Transform] = [
             ExcludeObservationTransform(),
             TaskOverrideTransform(),
+            EEAbsTransform(),
             EERelTransform(),
         ]
         self.active_transforms = [t for t in transforms if t.is_enabled(config)]
@@ -359,11 +380,7 @@ class TransformRunner:
             # With MIN_MAX normalization, 2*(x-(-1))/(1-(-1))-1 = x, so rot6d passes through
             # unchanged — matching UMI's rot6d→identity design.  pos (0-2) and gripper (9)
             # retain their real distribution and get range-normalised to [-1,1] as intended.
-            for arm in range(n_arms):
-                for r in range(3, 9):
-                    idx = arm * EE_ACTION_DIM_PER_ARM + r
-                    delta_min[idx] = -1.0
-                    delta_max[idx] = 1.0
+            _force_rot6d_identity(delta_min, delta_max, n_arms)
 
             action_patched_stats = {
                 "mean": delta_mean.tolist(),
@@ -404,11 +421,7 @@ class TransformRunner:
             obs_max = all_obs_rel.max(axis=0)
 
             # rot6d identity trick (same as action): force min=-1/max=1 for rot6d dims.
-            for arm in range(n_arms):
-                for r in range(3, 9):
-                    idx = arm * EE_ACTION_DIM_PER_ARM + r
-                    obs_min[idx] = -1.0
-                    obs_max[idx] = 1.0
+            _force_rot6d_identity(obs_min, obs_max, n_arms)
 
             obs_patched_stats = {
                 "mean": obs_mean.tolist(),
@@ -429,6 +442,97 @@ class TransformRunner:
             raise
         except Exception as e:
             log.warning("[ee_rel_stats] Failed: %s — falling back to absolute stats", e)
+            return None
+
+    def _compute_ee_abs_stats(self, full_dataset: Any, cfg: Any) -> dict | None:
+        """Compute EE absolute action AND obs stats for ``ee_abs`` training.
+
+        Action stats are taken from the dataset as-is (already absolute rot6d),
+        with rot6d dims (index 3–8 per arm) forced to min=-1/max=1 so they pass
+        through MIN_MAX normalization unchanged (identity trick).
+
+        Obs stats are computed by converting every state frame from quaternion
+        layout (8n) to rot6d layout (10n) via ``ee_obs_abs_forward``, then
+        similarly clamping rot6d dims to ±1.  xyz and gripper dims keep their
+        true absolute distributions.
+
+        Returns a dict ``{"action": stats, "observation.state": obs_stats}``,
+        or ``None`` on failure.
+        """
+        if not self.config.is_ee_abs:
+            return None
+
+        import numpy as np
+        try:
+            from anvil_shared.ee_transform import (
+                ee_obs_abs_forward,
+                n_arms_from_dims,
+                EE_ACTION_DIM_PER_ARM,
+            )
+
+            hf = full_dataset.hf_dataset
+            actions_np = np.array(hf["action"], dtype=np.float64)       # (N, 10*n_arms)
+            states_np = np.array(hf["observation.state"], dtype=np.float64)  # (N, 8*n_arms)
+
+            if states_np.ndim == 3:
+                states_np = states_np[:, -1, :]  # multi-step obs → most recent step
+
+            n_arms = n_arms_from_dims(states_np.shape[-1], actions_np.shape[-1])
+
+            # ------------------------------------------------------------------ #
+            # Action stats: dataset already has absolute rot6d; just clamp rot6d #
+            # dims to ±1 so Gram-Schmidt reconstruction stays geometrically valid.#
+            # ------------------------------------------------------------------ #
+            orig_action = full_dataset.meta.stats.get("action", {})
+            act_mean = np.array(orig_action.get("mean", actions_np.mean(axis=0)))
+            act_std = np.array(orig_action.get("std", np.where(
+                actions_np.std(axis=0) < 1e-6, 1e-6, actions_np.std(axis=0)
+            )))
+            act_min = np.array(orig_action.get("min", actions_np.min(axis=0)))
+            act_max = np.array(orig_action.get("max", actions_np.max(axis=0)))
+
+            _force_rot6d_identity(act_min, act_max, n_arms)
+
+            action_patched_stats = {
+                "mean": act_mean.tolist(),
+                "std": act_std.tolist(),
+                "min": act_min.tolist(),
+                "max": act_max.tolist(),
+                "count": orig_action.get("count", len(actions_np)),
+            }
+            full_dataset.meta.stats["action"] = action_patched_stats
+
+            # ------------------------------------------------------------------ #
+            # Obs stats: convert all frames to rot6d, then clamp rot6d dims.     #
+            # xyz and gripper retain their true absolute distributions.           #
+            # ------------------------------------------------------------------ #
+            all_obs_abs = ee_obs_abs_forward(states_np)  # (N, 10*n_arms)
+
+            obs_mean = all_obs_abs.mean(axis=0)
+            obs_std = np.where(all_obs_abs.std(axis=0) < 1e-6, 1e-6, all_obs_abs.std(axis=0))
+            obs_min = all_obs_abs.min(axis=0)
+            obs_max = all_obs_abs.max(axis=0)
+
+            _force_rot6d_identity(obs_min, obs_max, n_arms)
+
+            obs_patched_stats = {
+                "mean": obs_mean.tolist(),
+                "std": obs_std.tolist(),
+                "min": obs_min.tolist(),
+                "max": obs_max.tolist(),
+                "count": len(all_obs_abs),
+            }
+            full_dataset.meta.stats["observation.state"] = obs_patched_stats
+
+            log.info(
+                "[ee_abs_stats] action rot6d dims clamped ±1; obs: %d frames → 10-dim rot6d; %d arm(s)",
+                len(all_obs_abs), n_arms,
+            )
+            return {"action": action_patched_stats, "observation.state": obs_patched_stats}
+        except DataIntegrityError:
+            raise
+        except Exception as e:
+            log.warning("[ee_abs_stats] Failed: %s — falling back to dataset stats", e)
             return None
 
     def apply_metadata_patches(self) -> None:
@@ -512,10 +616,14 @@ class TransformRunner:
             full_dataset = original_make_dataset(cfg)
             total_ep = full_dataset.num_episodes
 
-            # Compute relative stats for ee_rel (both action and obs.state).
-            # joint_abs / ee_abs use dataset stats as-is.
+            # Compute stats patches for EE action types.
+            # ee_rel: SE(3)-relative stats with rot6d identity trick.
+            # ee_abs: absolute rot6d obs stats + rot6d identity trick on action.
+            # joint_abs: use dataset stats as-is (no patching needed).
             if val_state.config.is_ee_rel:
                 _patched_ee_stats = val_state._compute_ee_rel_stats(full_dataset, cfg)
+            elif val_state.config.is_ee_abs:
+                _patched_ee_stats = val_state._compute_ee_abs_stats(full_dataset, cfg)
             else:
                 _patched_ee_stats = None
 

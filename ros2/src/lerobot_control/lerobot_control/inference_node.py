@@ -228,6 +228,7 @@ class LeRobotInferenceNode(Node):
         self.action_type: str = resolve_action_type(meta)
         self.is_ee: bool = self.action_type in ("ee_abs", "ee_rel")
         self.is_ee_rel: bool = self.action_type == "ee_rel"
+        self.is_ee_abs: bool = self.action_type == "ee_abs"
 
         # task_description: anvil_config.json first, YAML overrides if explicitly set
         self.task_description = meta.get("task_description", "")
@@ -632,11 +633,12 @@ class LeRobotInferenceNode(Node):
                 # capture the joint-state baseline when a new chunk is generated.
                 _raw_obs = observation
 
-                # ee_rel: maintain raw abs obs history and re-relativize the full
-                # window every step (anchor = current EE).  Must happen before
-                # preprocessor so normalized obs.state is the relative version.
+                # EE obs conversion: must happen before preprocessor so the
+                # normaliser sees the correct (rot6d) obs.state layout.
                 _ee_obs_window_rel = None
                 if self.is_ee_rel and "observation.state" in _raw_obs:
+                    # ee_rel: maintain raw abs obs history and re-relativize the full
+                    # window every step (anchor = current EE).
                     _s_raw = _raw_obs["observation.state"]
                     if hasattr(_s_raw, "numpy"):
                         _s_np = (_s_raw.squeeze(0).numpy() if _s_raw.dim() > 1 else _s_raw.numpy())
@@ -658,6 +660,24 @@ class LeRobotInferenceNode(Node):
                         _rel_id = _eorf(_s_np[np.newaxis], _s_np)[0]
                         observation = dict(observation)
                         observation["observation.state"] = torch.tensor(_rel_id, dtype=torch.float32).unsqueeze(0)
+
+                elif self.is_ee_abs and "observation.state" in _raw_obs:
+                    # ee_abs: convert obs.state from quat (8n) to rot6d (10n) — absolute,
+                    # no anchor, each step is independent.  No obs history buffer needed.
+                    from anvil_shared.ee_transform import ee_obs_abs_forward as _eobsf
+                    _s_raw = _raw_obs["observation.state"]
+                    if hasattr(_s_raw, "numpy"):
+                        _s_np = (_s_raw.squeeze(0).numpy() if _s_raw.dim() > 1 else _s_raw.numpy())
+                    elif hasattr(_s_raw, "cpu"):
+                        _s_np = _s_raw.cpu().numpy()
+                    else:
+                        _s_np = np.asarray(_s_raw)
+                    _s_np = _s_np.flatten().astype(np.float64)
+                    _abs_rot6d = _eobsf(_s_np)  # (10*n_arms,)
+                    observation = dict(observation)
+                    observation["observation.state"] = torch.tensor(
+                        _abs_rot6d, dtype=torch.float32
+                    ).unsqueeze(0)  # (1, 10*n_arms)
 
                 # True when the model will actually run a forward pass this tick.
                 # ACT uses self._action_queue; Diffusion uses self._queues["action"].
