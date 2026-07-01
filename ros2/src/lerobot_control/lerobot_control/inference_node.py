@@ -229,6 +229,12 @@ class LeRobotInferenceNode(Node):
         self.is_ee: bool = self.action_type in ("ee_abs", "ee_rel")
         self.is_ee_rel: bool = self.action_type == "ee_rel"
         self.is_ee_abs: bool = self.action_type == "ee_abs"
+        # True only for ee_abs checkpoints trained with rot6d obs (obs_state_dim % 10 == 0).
+        # Old ee_abs checkpoints use raw quat obs (obs_state_dim % 8 == 0) — no conversion needed.
+        _obs_dim = meta.get("obs_state_dim")
+        self.ee_abs_uses_rot6d_obs: bool = (
+            self.is_ee_abs and _obs_dim is not None and _obs_dim % 10 == 0
+        )
 
         # task_description: anvil_config.json first, YAML overrides if explicitly set
         self.task_description = meta.get("task_description", "")
@@ -287,11 +293,14 @@ class LeRobotInferenceNode(Node):
 
         # image shape from input_features (first VISUAL entry)
         image_shape = None
-        for feat in cfg.get("input_features", {}).values():
-            if feat.get("type") == "VISUAL":
+        obs_state_dim = None
+        for key, feat in cfg.get("input_features", {}).items():
+            if feat.get("type") == "VISUAL" and image_shape is None:
                 c, h, w = feat["shape"]   # stored as [C, H, W]
                 image_shape = (h, w, c)   # return as (H, W, C) for cv2
-                break
+            if key == "observation.state":
+                shape = feat.get("shape", [])
+                obs_state_dim = shape[0] if shape else None
         if image_shape is None:
             raise RuntimeError(f"No VISUAL input feature found in {config_path}")
 
@@ -299,8 +308,9 @@ class LeRobotInferenceNode(Node):
         self.model_path = str(checkpoint)
 
         meta = {
-            "image_shape": image_shape,
-            "model_type":  cfg.get("type"),
+            "image_shape":    image_shape,
+            "model_type":     cfg.get("type"),
+            "obs_state_dim":  obs_state_dim,
         }
 
         # anvil_config.json — optional (absent for checkpoints pre-anvil_config)
@@ -661,9 +671,9 @@ class LeRobotInferenceNode(Node):
                         observation = dict(observation)
                         observation["observation.state"] = torch.tensor(_rel_id, dtype=torch.float32).unsqueeze(0)
 
-                elif self.is_ee_abs and "observation.state" in _raw_obs:
-                    # ee_abs: convert obs.state from quat (8n) to rot6d (10n) — absolute,
-                    # no anchor, each step is independent.  No obs history buffer needed.
+                elif self.ee_abs_uses_rot6d_obs and "observation.state" in _raw_obs:
+                    # ee_abs (rot6d checkpoint): convert obs.state from quat (8n) to rot6d (10n).
+                    # Skipped for old ee_abs checkpoints where obs was already quat (8n).
                     from anvil_shared.ee_transform import ee_obs_abs_forward as _eobsf
                     _s_raw = _raw_obs["observation.state"]
                     if hasattr(_s_raw, "numpy"):
@@ -678,6 +688,17 @@ class LeRobotInferenceNode(Node):
                     observation["observation.state"] = torch.tensor(
                         _abs_rot6d, dtype=torch.float32
                     ).unsqueeze(0)  # (1, 10*n_arms)
+
+                # Capture raw absolute EE obs for monitor (all EE modes).
+                # _raw_obs still points to the original observation dict before any
+                # in-place conversion, so this always holds the quat-layout state.
+                if self.is_ee and self._monitor_enable and "observation.state" in _raw_obs:
+                    _mon_s = _raw_obs["observation.state"]
+                    if hasattr(_mon_s, "numpy"):
+                        _mon_np = _mon_s.squeeze(0).numpy() if _mon_s.dim() > 1 else _mon_s.numpy()
+                    else:
+                        _mon_np = np.asarray(_mon_s)
+                    self._last_raw_ee_obs_np: np.ndarray = _mon_np.flatten().astype(np.float64)
 
                 # True when the model will actually run a forward pass this tick.
                 # ACT uses self._action_queue; Diffusion uses self._queues["action"].
@@ -1042,8 +1063,13 @@ class LeRobotInferenceNode(Node):
                 monitor_cmd_parts.append(arm_action_abs)
 
         if self._monitor_enable and monitor_cmd_parts:
+            # Convert last raw EE obs (quat 8n) → rot6d (10n) to match command space.
+            _mon_obs = np.zeros_like(action)
+            if hasattr(self, "_last_raw_ee_obs_np"):
+                from anvil_shared.ee_transform import ee_obs_abs_forward as _eobsf
+                _mon_obs = _eobsf(self._last_raw_ee_obs_np).astype(np.float32)
             self._publish_monitor(
-                obs_state=np.zeros_like(action),
+                obs_state=_mon_obs,
                 raw_output=action,
                 control_cmd=np.concatenate(monitor_cmd_parts),
             )

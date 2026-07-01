@@ -139,8 +139,23 @@ def plot_monitor_signals(
     nrows_delta = math.ceil(n_joints / ncols) if show_delta else 0
     total_rows = nrows_abs + nrows_delta
 
+    _EE_DIM_NAMES = ["x", "y", "z", "r0", "r1", "r2", "r3", "r4", "r5", "grip"]
+    _EE_DIM_UNITS = ["m", "m", "m", "", "", "", "", "", "", "m"]
+    _is_ee = action_type in ("ee_abs", "ee_rel")
+
     def _joint_label(j: int) -> str:
-        return joint_names[j] if j < len(joint_names) else f"joint[{j}]"
+        if joint_names and j < len(joint_names):
+            return joint_names[j]
+        if _is_ee:
+            arm = "L" if j < 10 else "R"
+            dim = _EE_DIM_NAMES[j % 10]
+            return f"{arm}_{dim}"
+        return f"joint[{j}]"
+
+    def _joint_unit(j: int) -> str:
+        if _is_ee:
+            return _EE_DIM_UNITS[j % 10]
+        return "rad"
 
     fig, axes = plt.subplots(
         total_rows, ncols,
@@ -158,7 +173,7 @@ def plot_monitor_signals(
         ax.plot(frames, cmd[:, j], color="forestgreen", linewidth=0.8, label="control cmd")
         ax.set_title(_joint_label(j), fontsize=8)
         ax.set_xlabel("step", fontsize=7)
-        ax.set_ylabel("rad", fontsize=7)
+        ax.set_ylabel(_joint_unit(j) or "·", fontsize=7)
         ax.tick_params(labelsize=6)
         if j == 0:
             ax.legend(fontsize=6, loc="upper right")

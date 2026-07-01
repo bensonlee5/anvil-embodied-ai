@@ -52,11 +52,12 @@ services:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-}
       - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-}
       - CYCLONEDDS_URI=${CYCLONEDDS_URI:-}
-      - ACTION_TYPE=${ACTION_TYPE:-absolute}
+      - ACTION_TYPE=${ACTION_TYPE:-joint_abs}
+      - JOINT_NAMES=${JOINT_NAMES:-}
     volumes:
       - ${MONITOR_OUTPUT_DIR:-./monitor_output}:/workspace/monitor_output
     command: >
       ros2 run lerobot_control inference_monitor_node
         --ros-args
         -p output_dir:=/workspace/monitor_output
-        -p action_type:=${ACTION_TYPE:-absolute}
+        -p action_type:=${ACTION_TYPE:-joint_abs}

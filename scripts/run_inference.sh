@@ -127,11 +127,26 @@ if [[ -n "${MODEL_PATH:-}" ]]; then
     fi
 
     if [[ -n "${_anvil_config}" && -f "${_anvil_config}" ]]; then
-        _detected=$(python3 -c "import json; d=json.load(open('${_anvil_config}')); print(d.get('action_type','absolute'))" 2>/dev/null || true)
+        _detected=$(python3 -c "import json; d=json.load(open('${_anvil_config}')); print(d.get('action_type','joint_abs'))" 2>/dev/null || true)
         if [[ -n "${_detected}" ]]; then
             export ACTION_TYPE="${_detected}"
             echo "[run_inference] ACTION_TYPE=${ACTION_TYPE} (auto-detected from $(basename $(dirname ${_anvil_config})))"
         fi
+    fi
+fi
+
+# Auto-detect JOINT_NAMES from CONFIG_FILE for joint_abs models (needed by monitor node).
+# For EE models (ee_abs/ee_rel), joint_names is empty — monitor uses dim indices instead.
+if [[ "${ACTION_TYPE:-joint_abs}" == "joint_abs" && -n "${CONFIG_FILE:-}" && -f "${CONFIG_FILE}" ]]; then
+    _joint_names=$(python3 -c "
+import yaml
+cfg = yaml.safe_load(open('${CONFIG_FILE}'))
+order = cfg.get('joint_names', {}).get('model_joint_order', [])
+print(','.join(order))
+" 2>/dev/null || true)
+    if [[ -n "${_joint_names}" ]]; then
+        export JOINT_NAMES="${_joint_names}"
+        echo "[run_inference] JOINT_NAMES=${JOINT_NAMES}"
     fi
 fi
 
