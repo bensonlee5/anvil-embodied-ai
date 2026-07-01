@@ -66,7 +66,12 @@ This repository is the embodied AI stack for the Anvil platform — data convers
 
 - Python 3.12+
 - [uv](https://github.com/astral-sh/uv)
+- FFmpeg (required by `torchcodec` for video decoding)
 - Docker (for inference and ROS2 eval)
+
+```bash
+sudo apt install ffmpeg   # Ubuntu / Debian
+```
 
 ```bash
 git clone https://github.com/anvil-robotics/anvil-embodied-ai.git
@@ -114,6 +119,7 @@ Validate model performance before deploying. Two modes: dataset replay (`anvil-e
 Deploy trained models on a GPU PC via ROS2 CycloneDDS. All inference scenarios go through `scripts/run_inference.sh`.
 
 ---
+
 
 ## Project Structure
 
