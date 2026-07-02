@@ -30,6 +30,8 @@ services:
       - ${HF_CACHE:-.docker_empty_hf_cache}:/root/.cache/huggingface
       # DEBUG=true: pre-model input frames saved here for training/inference comparison
       - ./debug_images:/workspace/debug_images
+      # MONITOR_ENABLE=true: per-camera mp4 recordings saved here (same dir as monitor CSV/plot)
+      - ${MONITOR_OUTPUT_DIR:-./monitor_output}:/workspace/monitor_output
     deploy:
       resources:
         reservations:
@@ -56,8 +58,12 @@ services:
       - JOINT_NAMES=${JOINT_NAMES:-}
     volumes:
       - ${MONITOR_OUTPUT_DIR:-./monitor_output}:/workspace/monitor_output
+      # Self-detect action_type from the checkpoint directly (robust regardless of
+      # whether ACTION_TYPE env var was correctly threaded through the launcher).
+      - ${MODEL_PATH:-.docker_empty_model_path}:/workspace/model:ro
     command: >
       ros2 run lerobot_control inference_monitor_node
         --ros-args
         -p output_dir:=/workspace/monitor_output
         -p action_type:=${ACTION_TYPE:-joint_abs}
+        -p model_path:=/workspace/model

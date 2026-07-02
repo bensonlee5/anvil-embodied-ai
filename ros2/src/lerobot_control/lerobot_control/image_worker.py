@@ -35,6 +35,8 @@ class ImageWorkerNode(Node):
         buffer_name_prefix: str = "lerobot_img_",
         debug_dir: str | None = None,
         debug_max_frames: int = 10,
+        video_dir: str | None = None,
+        video_fps: float = 30.0,
     ):
         super().__init__(f"image_worker_{camera_name}")
 
@@ -46,6 +48,20 @@ class ImageWorkerNode(Node):
         self._debug_max_frames = debug_max_frames
         self._debug_saved = 0
         self._debug_last_save: float = 0.0
+
+        # Full-episode mp4 recording (unlike the capped debug PNGs above) — enabled
+        # alongside monitor_enable so a divergence anywhere in a long rollout can be
+        # reviewed visually, not just the first `debug_max_frames` seconds.
+        self._video_writer: cv2.VideoWriter | None = None
+        self._video_path: Path | None = None
+        if video_dir:
+            video_root = Path(video_dir)
+            video_root.mkdir(parents=True, exist_ok=True)
+            self._video_path = video_root / f"{camera_name}.mp4"
+            h, w = image_shape[0], image_shape[1]
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            self._video_writer = cv2.VideoWriter(str(self._video_path), fourcc, video_fps, (w, h))
+            self.get_logger().info(f"[video] Recording {camera_name} -> {self._video_path}")
 
         # Connect to shared memory (created by main process)
         self.shared_buffer = SharedImageBuffer(
@@ -107,6 +123,10 @@ class ImageWorkerNode(Node):
                             f"[debug] Saved {self._debug_max_frames} frames to {self._debug_dir}"
                         )
 
+            # Write full-episode video frame (same post-resize/pad image as model input)
+            if self._video_writer is not None:
+                self._video_writer.write(cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+
             # Get timestamp from message
             timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
 
@@ -120,6 +140,9 @@ class ImageWorkerNode(Node):
 
     def destroy_node(self):
         """Cleanup."""
+        if self._video_writer is not None:
+            self._video_writer.release()
+            self.get_logger().info(f"[video] Saved: {self._video_path}")
         self.shared_buffer.close()
         super().destroy_node()
 
@@ -132,6 +155,8 @@ def run_image_worker(
     stop_event=None,
     debug_dir: str | None = None,
     debug_max_frames: int = 10,
+    video_dir: str | None = None,
+    video_fps: float = 30.0,
 ):
     """
     Entry point for running image worker in a separate process.
@@ -142,6 +167,8 @@ def run_image_worker(
         image_shape: Shape of images (H, W, C)
         buffer_name_prefix: Prefix for shared memory names
         stop_event: Optional multiprocessing.Event to signal shutdown
+        debug_dir: If set, save the first debug_max_frames frames as PNGs (1 Hz)
+        video_dir: If set, record the full episode to <video_dir>/<camera_name>.mp4
     """
     rclpy.init(args=[])  # Empty args to avoid inheriting parent's --ros-args node name
 
@@ -151,6 +178,8 @@ def run_image_worker(
         image_shape=image_shape,
         buffer_name_prefix=buffer_name_prefix,
         debug_dir=debug_dir,
+        video_dir=video_dir,
+        video_fps=video_fps,
         debug_max_frames=debug_max_frames,
     )
 

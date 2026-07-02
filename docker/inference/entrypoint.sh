@@ -40,4 +40,12 @@ if [ "${DEBUG:-false}" = "true" ]; then
     echo "[entrypoint] DEBUG=true — saving pre-model images to /workspace/debug_images"
 fi
 
-exec "$@" ${DEBUG_IMAGE_ARG}
+# When MONITOR_ENABLE=true, auto-configure full-episode camera video recording
+MONITOR_VIDEO_ARG=""
+if [ "${MONITOR_ENABLE:-false}" = "true" ]; then
+    mkdir -p /workspace/monitor_output/videos
+    MONITOR_VIDEO_ARG="monitor_video_dir:=/workspace/monitor_output/videos"
+    echo "[entrypoint] MONITOR_ENABLE=true — recording cameras to /workspace/monitor_output/videos"
+fi
+
+exec "$@" ${DEBUG_IMAGE_ARG} ${MONITOR_VIDEO_ARG}

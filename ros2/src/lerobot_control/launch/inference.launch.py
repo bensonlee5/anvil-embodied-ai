@@ -66,6 +66,13 @@ def generate_launch_description():
         description="Publish /monitor/obs_state, /monitor/raw_output, /monitor/control_cmd for inference_monitor_node",
     )
 
+    monitor_video_dir_arg = DeclareLaunchArgument(
+        "monitor_video_dir",
+        default_value="",
+        description="Record each camera to <dir>/<camera_name>.mp4 for the full episode. "
+        "Only takes effect when monitor_enable is true. Empty = disabled.",
+    )
+
     # Node
     inference_node = Node(
         package="lerobot_control",
@@ -84,6 +91,7 @@ def generate_launch_description():
                 "debug": LaunchConfiguration("debug"),
                 "debug_image_dir": LaunchConfiguration("debug_image_dir"),
                 "monitor_enable": LaunchConfiguration("monitor_enable"),
+                "monitor_video_dir": LaunchConfiguration("monitor_video_dir"),
             }
         ],
     )
@@ -100,6 +108,7 @@ def generate_launch_description():
             debug_arg,
             debug_image_dir_arg,
             monitor_enable_arg,
+            monitor_video_dir_arg,
             inference_node,
         ]
     )

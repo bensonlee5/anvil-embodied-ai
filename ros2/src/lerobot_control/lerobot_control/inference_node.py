@@ -66,6 +66,7 @@ class LeRobotInferenceNode(Node):
             metrics=self.metrics,
             callback_group=self._subscription_callback_group,
             debug_image_dir=self._debug_image_dir,
+            video_dir=self._monitor_video_dir if self._monitor_enable else None,
         )
 
         # Non-VLA action buffer (ACT/Diffusion put actions here from obs timer)
@@ -168,6 +169,7 @@ class LeRobotInferenceNode(Node):
         self.declare_parameter("debug", False)
         self.declare_parameter("debug_image_dir", "")
         self.declare_parameter("monitor_enable", False)
+        self.declare_parameter("monitor_video_dir", "")
 
         # Static fields from ROS2 params
         self.echo_topic_only = self.get_parameter("echo_topic_only").value
@@ -175,6 +177,8 @@ class LeRobotInferenceNode(Node):
         self._monitor_enable: bool = self.get_parameter("monitor_enable").value
         _debug_image_dir = self.get_parameter("debug_image_dir").value
         self._debug_image_dir: str | None = _debug_image_dir if _debug_image_dir else None
+        _monitor_video_dir = self.get_parameter("monitor_video_dir").value
+        self._monitor_video_dir: str | None = _monitor_video_dir if _monitor_video_dir else None
         self.model_path = self.get_parameter("model_path").value
         if not self.model_path and not self.echo_topic_only:
             raise ValueError("model_path parameter is required")

@@ -33,6 +33,8 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray
 
+from .ee_runtime import read_checkpoint_anvil_config
+
 
 class InferenceMonitorNode(Node):
     """Subscribes to /monitor/* topics and writes a CSV for offline plotting."""
@@ -43,6 +45,7 @@ class InferenceMonitorNode(Node):
         self.declare_parameter("output_dir", "")
         self.declare_parameter("action_type", "joint_abs")
         self.declare_parameter("joint_names", "")
+        self.declare_parameter("model_path", "")
 
         raw_output_dir = self.get_parameter("output_dir").value
         if not raw_output_dir:
@@ -51,7 +54,18 @@ class InferenceMonitorNode(Node):
         self._output_dir = Path(raw_output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
 
-        self._action_type: str = self.get_parameter("action_type").value
+        # Self-detect action_type from the checkpoint's own anvil_config.json when
+        # model_path is available — robust regardless of whether ACTION_TYPE was
+        # correctly threaded through the launcher/env var for this process.
+        # Falls back to the action_type ROS param (env-var-driven) otherwise.
+        _model_path = self.get_parameter("model_path").value
+        _anvil_cfg = read_checkpoint_anvil_config(_model_path) if _model_path else {}
+        if "action_type" in _anvil_cfg:
+            self._action_type: str = _anvil_cfg["action_type"]
+            self._action_type_source = f"model_path checkpoint ({_model_path})"
+        else:
+            self._action_type = self.get_parameter("action_type").value
+            self._action_type_source = "action_type ROS param"
 
         # ROS param takes priority; fall back to JOINT_NAMES env var.
         # Passing -p joint_names:= (empty) is invalid ROS2 syntax, so docker-compose
@@ -86,7 +100,7 @@ class InferenceMonitorNode(Node):
 
         self.get_logger().info(
             f"[monitor] Listening on /monitor/{{obs_state,raw_output,control_cmd}}\n"
-            f"[monitor] action_type: {self._action_type}\n"
+            f"[monitor] action_type: {self._action_type} (source: {self._action_type_source})\n"
             f"[monitor] joint_names: {self._joint_names or '(none, will use indices)'}\n"
             f"[monitor] Output: {self._output_dir}\n"
             f"[monitor] Plot:   uv run python scripts/plot_monitor_csv.py {self._csv_path}"

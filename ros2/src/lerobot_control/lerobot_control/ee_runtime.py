@@ -4,6 +4,10 @@
     Normalises the action_type field from a checkpoint anvil_config dict.
     Accepts the three canonical types: joint_abs, ee_abs, ee_rel.
 
+``read_checkpoint_anvil_config(model_path)``
+    Resolves a checkpoint path (bare / pretrained_model/ / HF-cache snapshot)
+    and reads its anvil_config.json, if present.
+
 ``ee_rel_restore_chunk(chunk_np, obs_t)``
     Restores EE relative actions (ee_rel) to absolute EE poses.
     Thin wrapper around ``anvil_shared.ee_transform.ee_rel_inverse``.
@@ -14,6 +18,9 @@
     Thin wrapper around ``anvil_shared.ee_transform.ee_action_to_poses``.
 """
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 import numpy as np
 
@@ -41,6 +48,40 @@ def resolve_action_type(cfg: dict) -> str:
     ``action_type="joint_abs"`` (or absent, defaulting to "joint_abs").
     """
     return cfg.get("action_type", "joint_abs")
+
+
+def read_checkpoint_anvil_config(model_path: str) -> dict:
+    """Resolve *model_path* to a checkpoint dir and read its anvil_config.json.
+
+    Mirrors the path resolution in ``inference_node._read_checkpoint_metadata``
+    (bare checkpoint dir / ``pretrained_model/`` subdir / HF-cache
+    ``snapshots/<hash>/`` layout) so callers get the same answer regardless
+    of which convention *model_path* uses.
+
+    Returns ``{}`` if *model_path* is falsy or no anvil_config.json is found —
+    callers should fall back to their own default (e.g. a ROS param) in that case.
+    """
+    if not model_path:
+        return {}
+
+    checkpoint = Path(model_path)
+
+    pretrained = checkpoint / "pretrained_model"
+    if pretrained.exists() and (pretrained / "config.json").exists():
+        checkpoint = pretrained
+
+    if not (checkpoint / "config.json").exists():
+        snapshots = checkpoint / "snapshots"
+        if snapshots.is_dir():
+            for snap in sorted(snapshots.iterdir(), reverse=True):
+                if (snap / "config.json").exists():
+                    checkpoint = snap
+                    break
+
+    anvil_path = checkpoint / "anvil_config.json"
+    if not anvil_path.exists():
+        return {}
+    return json.loads(anvil_path.read_text())
 
 
 def ee_rel_restore_chunk(
