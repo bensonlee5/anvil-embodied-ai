@@ -437,6 +437,20 @@ def convert_session(
                 episode_times.append(time.time() - episode_start_time)
                 continue
 
+            for robot, counts in stream_extractor.get_action_fill_stats().items():
+                filled = counts["hold_last"] + counts["fallback_to_observation"]
+                if filled == 0 and counts["dropped"] == 0:
+                    continue
+                robot_label = robot or "action"
+                dropped_suffix = (
+                    f", [red]{counts['dropped']} dropped[/red]" if counts["dropped"] else ""
+                )
+                console.print(
+                    f"    [yellow]↺[/yellow] {robot_label}: {counts['exact']} exact, "
+                    f"{counts['hold_last']} hold-last, "
+                    f"{counts['fallback_to_observation']} fallback-to-obs{dropped_suffix}"
+                )
+
             # Save episode — suppress ffmpeg/libx264 noise
             progress.update(
                 episode_task,

@@ -588,6 +588,19 @@ class BufferedStreamExtractor:
         # Cache for action topic reorder permutations: {topic: np.ndarray}
         self._action_reorder_cache: Dict[str, np.ndarray] = {}
 
+        # Last known action position per robot ("" for single-arm, "left"/"right"
+        # for bimanual) — used to forward-fill action frames when an arm is
+        # disengaged (no new command published). Updated in
+        # _buffer_action_command() and is NOT evicted by the sliding buffer
+        # window, so a command published long ago can still be reused.
+        self._last_known_action: Dict[str, np.ndarray] = {}
+
+        # Per-robot, per-episode gap-fill counters, keyed by robot then by
+        # one of "exact" | "hold_last" | "fallback_to_observation" | "dropped".
+        # Reset implicitly per episode because BufferedStreamExtractor is
+        # constructed fresh for each MCAP file (see convert.py).
+        self._action_fill_stats: Dict[str, Dict[str, int]] = {}
+
     @staticmethod
     def _check_action_topics_present(mcap_path: str, action_topic_set: set) -> None:
         """Raise DataExtractionError when none of the configured action topics are in the MCAP.
@@ -666,7 +679,7 @@ class BufferedStreamExtractor:
         }
 
         # Joint state buffers: {(role, robot): {'buffer': deque, 'joint_names': list}}
-        joint_buffers: Dict[Tuple[str, str], Dict] = {}
+        joint_buffers = self._init_joint_buffers()
 
         # Build topic list for reading (cameras + joint states + action commands)
         all_topics = list(all_camera_topics)
@@ -921,27 +934,41 @@ class BufferedStreamExtractor:
         obs_data = {}  # {robot: {pos, vel, eff}}
         action_data = {}  # {robot: {pos}}
 
+        # Pass 1: observation — required, no fallback (unchanged behavior).
+        # Action fallback (pass 2 below) needs obs_data fully populated first,
+        # which is why this is a separate pass rather than one combined loop.
         for (role, robot), data in joint_buffers.items():
+            if role != "observation":
+                continue
             buffer = data["buffer"]
 
             if len(buffer) == 0:
-                return None  # Required joint data missing
+                return None  # Required observation data missing
 
-            # Find nearest joint state sample for observation
             nearest_idx = self._find_nearest_in_buffer(buffer, target_ts)
             if nearest_idx is None:
                 return None
 
             ts, pos, vel, eff = buffer[nearest_idx]
+            obs_data[robot] = {
+                "pos": pos.copy(),
+                "vel": vel.copy() if vel.size > 0 else None,
+                "eff": eff.copy() if eff.size > 0 else None,
+            }
 
-            if role == "observation":
-                obs_data[robot] = {
-                    "pos": pos.copy(),
-                    "vel": vel.copy() if vel.size > 0 else None,
-                    "eff": eff.copy() if eff.size > 0 else None,
-                }
-            else:  # action
-                action_data[robot] = {"pos": pos.copy()}
+        # Pass 2: action — forward-fill instead of dropping the whole frame
+        # when the arm is disengaged. See _resolve_action_position docstring
+        # for the fallback order.
+        for (role, robot), data in joint_buffers.items():
+            if role != "action":
+                continue
+            pos, fill_kind = self._resolve_action_position(
+                robot, data["buffer"], target_ts, obs_data
+            )
+            self._record_action_fill(robot, fill_kind)
+            if pos is None:
+                return None  # No action and no observation fallback available
+            action_data[robot] = {"pos": pos}
 
         # Fallback: use observation at action_ts (t+1) as action when action_topics
         # are configured but not recorded in this MCAP.
@@ -1049,9 +1076,85 @@ class BufferedStreamExtractor:
 
         return nearest_idx
 
+    def _resolve_action_position(
+        self,
+        robot: str,
+        buffer: deque,
+        target_ts: float,
+        obs_data: Dict[str, Dict[str, Any]],
+    ) -> Tuple[Optional[np.ndarray], str]:
+        """
+        Resolve the action position for one robot at target_ts, forward-filling
+        when the arm is disengaged (no live command in the sliding buffer).
+
+        Fallback order:
+        1. Nearest command in the live buffer ("exact").
+        2. Last command ever published for this robot, regardless of how long
+           ago ("hold_last") — the arm physically holds its last commanded
+           position when idle, so this reflects reality.
+        3. The robot's current measured joint position from obs_data
+           ("fallback_to_observation") — used when the robot has never
+           published a command yet in this episode (e.g. an idle arm at the
+           very start of a recording).
+        4. None ("dropped") — should not happen in practice since
+           observation data is dense, but kept as a safety net.
+
+        Returns:
+            (position, fill_kind) where position is a copy of the resolved
+            array, or None if fill_kind == "dropped".
+        """
+        if buffer:
+            nearest_idx = self._find_nearest_in_buffer(buffer, target_ts)
+            _, pos, _, _ = buffer[nearest_idx]
+            return pos.copy(), "exact"
+
+        last_known = self._last_known_action.get(robot)
+        if last_known is not None:
+            return last_known.copy(), "hold_last"
+
+        if robot in obs_data:
+            return obs_data[robot]["pos"].copy(), "fallback_to_observation"
+
+        return None, "dropped"
+
+    def _record_action_fill(self, robot: str, fill_kind: str) -> None:
+        """Increment the per-robot, per-episode gap-fill counter."""
+        stats = self._action_fill_stats.setdefault(
+            robot, {"exact": 0, "hold_last": 0, "fallback_to_observation": 0, "dropped": 0}
+        )
+        stats[fill_kind] += 1
+
+    def get_action_fill_stats(self) -> Dict[str, Dict[str, int]]:
+        """Return per-robot action gap-fill counters accumulated this episode."""
+        return self._action_fill_stats
+
     def _parse_joint_name(self, joint_name: str) -> Optional[Tuple[str, str, str]]:
         """Parse joint name using shared utility."""
         return parse_joint_name(joint_name, self._joint_pattern)
+
+    def _init_joint_buffers(self) -> Dict[Tuple[str, str], Dict]:
+        """
+        Create the initial joint_buffers dict for a new extraction run.
+
+        Pre-seeds an empty ("action", robot) entry for every robot configured
+        in action_topics, so _align_joint_states's action pass always visits
+        every configured robot from the first frame onward — even before that
+        robot has published its first command. Without this, a robot with no
+        live command yet would have no key in joint_buffers at all, and
+        _resolve_action_position's "fallback_to_observation" tier would never
+        be reached: the frame would instead be silently dropped by the
+        multi-robot consistency check further down in _align_joint_states.
+
+        Observation keys are NOT pre-seeded here — they're always created
+        densely and immediately by _buffer_joint_state from the continuous
+        /joint_states stream, so there's no equivalent gap for them.
+        """
+        joint_buffers: Dict[Tuple[str, str], Dict] = {}
+        for topic_cfg in self.config.action_topics.values():
+            key = ("action", topic_cfg.arm)
+            joint_names = sorted(topic_cfg.joint_order) if topic_cfg.joint_order else []
+            joint_buffers[key] = {"buffer": deque(), "joint_names": joint_names}
+        return joint_buffers
 
     def _buffer_joint_state(
         self,
@@ -1202,6 +1305,8 @@ class BufferedStreamExtractor:
         pos = np.array(positions, dtype=np.float32)[reorder]
         vel = np.array([], dtype=np.float32)
         eff = np.array([], dtype=np.float32)
+
+        self._last_known_action[robot] = pos.copy()
 
         # Append as tuple: (timestamp, position, velocity, effort)
         joint_buffers[key]["buffer"].append((timestamp, pos, vel, eff))
