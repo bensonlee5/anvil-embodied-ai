@@ -19,6 +19,7 @@ Publishes:
 
 import json
 import math
+import signal
 import threading
 import time
 from collections import deque
@@ -1321,6 +1322,17 @@ def main(args=None):
     rclpy.init(args=args)
     node = None
     executor = None
+
+    # Docker/docker-compose sends SIGTERM on stop (not SIGINT) — Python's default
+    # SIGTERM action is immediate termination with no `finally` block, which was
+    # skipping strategy.cleanup() and leaving image-worker video writers
+    # unreleased (corrupted mp4s, missing moov atom). Convert it to the same
+    # KeyboardInterrupt path already used for Ctrl+C / SIGINT.
+    def _sigterm_handler(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+
     try:
         node = LeRobotInferenceNode()
 

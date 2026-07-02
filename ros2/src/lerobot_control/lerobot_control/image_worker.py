@@ -6,6 +6,7 @@ decompressing JPEG images, and writing to shared memory. This eliminates GIL
 contention with the main inference process.
 """
 
+import signal
 import time
 from pathlib import Path
 
@@ -182,6 +183,15 @@ def run_image_worker(
         video_fps=video_fps,
         debug_max_frames=debug_max_frames,
     )
+
+    # Defense in depth: if the parent's graceful stop_event handshake times out,
+    # MultiProcessStrategy.cleanup() escalates to Process.terminate() (bare
+    # SIGTERM). Python's default SIGTERM action skips this finally block, which
+    # would leave the video writer unreleased (corrupted mp4, missing moov atom).
+    def _sigterm_handler(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
 
     executor = SingleThreadedExecutor()
     executor.add_node(node)
