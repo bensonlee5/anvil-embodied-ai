@@ -37,7 +37,6 @@ class ImageWorkerNode(Node):
         debug_dir: str | None = None,
         debug_max_frames: int = 10,
         video_dir: str | None = None,
-        video_fps: float = 30.0,
     ):
         super().__init__(f"image_worker_{camera_name}")
 
@@ -50,19 +49,23 @@ class ImageWorkerNode(Node):
         self._debug_saved = 0
         self._debug_last_save: float = 0.0
 
-        # Full-episode mp4 recording (unlike the capped debug PNGs above) — enabled
+        # Full-episode recording (unlike the capped debug PNGs above) — enabled
         # alongside monitor_enable so a divergence anywhere in a long rollout can be
         # reviewed visually, not just the first `debug_max_frames` seconds.
-        self._video_writer: cv2.VideoWriter | None = None
-        self._video_path: Path | None = None
-        if video_dir:
-            video_root = Path(video_dir)
-            video_root.mkdir(parents=True, exist_ok=True)
-            self._video_path = video_root / f"{camera_name}.mp4"
-            h, w = image_shape[0], image_shape[1]
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            self._video_writer = cv2.VideoWriter(str(self._video_path), fourcc, video_fps, (w, h))
-            self.get_logger().info(f"[video] Recording {camera_name} -> {self._video_path}")
+        #
+        # Deliberately NOT a cv2.VideoWriter: an mp4 container's index (moov atom)
+        # is only written on a clean release(), so any abrupt process kill (SIGKILL,
+        # or a slow shutdown racing a container's stop_grace_period) produces a
+        # corrupted, unplayable file — this bit us in practice even after fixing
+        # SIGTERM handling. Instead, dump one JPEG per frame (each write is complete
+        # and independent; a kill mid-episode just means the tail frames are
+        # missing, never corruption) and let run_inference.sh batch-convert the
+        # sequence to mp4 with ffmpeg after the container has fully exited.
+        self._frames_dir: Path | None = Path(video_dir) / f"{camera_name}_frames" if video_dir else None
+        self._frame_index = 0
+        if self._frames_dir is not None:
+            self._frames_dir.mkdir(parents=True, exist_ok=True)
+            self.get_logger().info(f"[video] Recording {camera_name} frames -> {self._frames_dir}")
 
         # Connect to shared memory (created by main process)
         self.shared_buffer = SharedImageBuffer(
@@ -124,9 +127,13 @@ class ImageWorkerNode(Node):
                             f"[debug] Saved {self._debug_max_frames} frames to {self._debug_dir}"
                         )
 
-            # Write full-episode video frame (same post-resize/pad image as model input)
-            if self._video_writer is not None:
-                self._video_writer.write(cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+            # Write full-episode frame (same post-resize/pad image as model input).
+            # Each imwrite() is a complete, independent file — no cross-frame state
+            # that a mid-episode kill could corrupt (see __init__ docstring note).
+            if self._frames_dir is not None:
+                fname = self._frames_dir / f"frame_{self._frame_index:06d}.jpg"
+                cv2.imwrite(str(fname), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+                self._frame_index += 1
 
             # Get timestamp from message
             timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
@@ -141,9 +148,10 @@ class ImageWorkerNode(Node):
 
     def destroy_node(self):
         """Cleanup."""
-        if self._video_writer is not None:
-            self._video_writer.release()
-            self.get_logger().info(f"[video] Saved: {self._video_path}")
+        if self._frames_dir is not None:
+            self.get_logger().info(
+                f"[video] Saved {self._frame_index} frames to {self._frames_dir}"
+            )
         self.shared_buffer.close()
         super().destroy_node()
 
@@ -157,7 +165,6 @@ def run_image_worker(
     debug_dir: str | None = None,
     debug_max_frames: int = 10,
     video_dir: str | None = None,
-    video_fps: float = 30.0,
 ):
     """
     Entry point for running image worker in a separate process.
@@ -169,7 +176,9 @@ def run_image_worker(
         buffer_name_prefix: Prefix for shared memory names
         stop_event: Optional multiprocessing.Event to signal shutdown
         debug_dir: If set, save the first debug_max_frames frames as PNGs (1 Hz)
-        video_dir: If set, record the full episode to <video_dir>/<camera_name>.mp4
+        video_dir: If set, dump every frame as a JPEG under
+            <video_dir>/<camera_name>_frames/ for run_inference.sh to batch-convert
+            to <video_dir>/<camera_name>.mp4 with ffmpeg after shutdown.
     """
     rclpy.init(args=[])  # Empty args to avoid inheriting parent's --ros-args node name
 
@@ -180,16 +189,20 @@ def run_image_worker(
         buffer_name_prefix=buffer_name_prefix,
         debug_dir=debug_dir,
         video_dir=video_dir,
-        video_fps=video_fps,
         debug_max_frames=debug_max_frames,
     )
 
     # Defense in depth: if the parent's graceful stop_event handshake times out,
     # MultiProcessStrategy.cleanup() escalates to Process.terminate() (bare
-    # SIGTERM). Python's default SIGTERM action skips this finally block, which
-    # would leave the video writer unreleased (corrupted mp4, missing moov atom).
+    # SIGTERM). Call rclpy.shutdown() directly (matches inference_node.py /
+    # inference_monitor_node.py) rather than raising KeyboardInterrupt — both
+    # spin loops below check context validity every iteration, so invalidating
+    # the context is enough to make them exit cleanly and reach the video
+    # writer release in destroy_node().
     def _sigterm_handler(signum, frame):
-        raise KeyboardInterrupt
+        node.get_logger().info(f"[video] SIGTERM received for {camera_name}, shutting down...")
+        if rclpy.ok():
+            rclpy.shutdown()
 
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
@@ -204,11 +217,12 @@ def run_image_worker(
         else:
             # Spin forever
             executor.spin()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 class JointStateWorkerNode(Node):

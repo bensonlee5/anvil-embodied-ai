@@ -1326,10 +1326,25 @@ def main(args=None):
     # Docker/docker-compose sends SIGTERM on stop (not SIGINT) — Python's default
     # SIGTERM action is immediate termination with no `finally` block, which was
     # skipping strategy.cleanup() and leaving image-worker video writers
-    # unreleased (corrupted mp4s, missing moov atom). Convert it to the same
-    # KeyboardInterrupt path already used for Ctrl+C / SIGINT.
+    # unreleased (corrupted mp4s, missing moov atom).
+    #
+    # Call rclpy.shutdown() directly (matches inference_monitor_node.py's existing
+    # SIGINT/SIGTERM handler) rather than raising KeyboardInterrupt: executor.spin()'s
+    # own loop is `while self._context.ok(): spin_once()`, so invalidating the
+    # context makes it return normally on its next check — no reliance on a Python
+    # exception being raised cleanly out of a blocked C-extension wait call.
+    # The log line below is deliberate: if a video-writer bug ever recurs, checking
+    # whether this line appears tells us immediately whether the handler fired at
+    # all, versus fired but ran out of time before the container was SIGKILLed.
     def _sigterm_handler(signum, frame):
-        raise KeyboardInterrupt
+        # node may still be None if SIGTERM arrives while LeRobotInferenceNode()
+        # is under construction (e.g. still loading the model).
+        if node is not None:
+            node.get_logger().info("[shutdown] SIGTERM received, shutting down...")
+        else:
+            print("[shutdown] SIGTERM received during startup, shutting down...")
+        if rclpy.ok():
+            rclpy.shutdown()
 
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
@@ -1343,7 +1358,7 @@ def main(args=None):
 
         node.get_logger().info("Starting inference loop...")
         executor.spin()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
         pass
     except Exception as e:
         print(f"Error: {e}")

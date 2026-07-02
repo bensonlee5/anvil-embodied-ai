@@ -11,6 +11,12 @@ services:
     network_mode: host
     ipc: host
     privileged: true
+    # Default 10s grace period on stop was observed to be too short for a
+    # clean shutdown (ros2 launch's own --sigterm-timeout/--sigkill-timeout
+    # forwarding overhead stacked with strategy.cleanup()'s worker join),
+    # resulting in SIGKILL (exit 137) before image-worker video writers could
+    # release — corrupted mp4s (missing moov atom).
+    stop_grace_period: 30s
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-}
       - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-}
@@ -30,7 +36,9 @@ services:
       - ${HF_CACHE:-.docker_empty_hf_cache}:/root/.cache/huggingface
       # DEBUG=true: pre-model input frames saved here for training/inference comparison
       - ./debug_images:/workspace/debug_images
-      # MONITOR_ENABLE=true: per-camera mp4 recordings saved here (same dir as monitor CSV/plot)
+      # MONITOR_ENABLE=true: per-camera JPEG frame sequences written here during the
+      # run; run_inference.sh batch-converts them to mp4 with ffmpeg after the
+      # container exits (same dir as monitor CSV/plot)
       - ${MONITOR_OUTPUT_DIR:-./monitor_output}:/workspace/monitor_output
     deploy:
       resources:

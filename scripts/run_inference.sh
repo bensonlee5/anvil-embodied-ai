@@ -182,6 +182,41 @@ if [[ "$REAL_MONITOR" == true ]]; then
     else
         echo "[run_inference] WARNING: monitor CSV not found at $CSV"
     fi
+
+    # Batch-convert per-camera frame sequences to mp4 now that the container has
+    # fully exited — deliberately done here (host side, after shutdown) rather
+    # than as a cv2.VideoWriter inside the container: an mp4 container's index is
+    # only written on a clean release(), so any abrupt kill (SIGKILL, or a slow
+    # shutdown racing the container's stop_grace_period) produced a corrupted,
+    # unplayable file in practice. Individual JPEG frames can't be corrupted this
+    # way — a kill just means the tail frames are missing.
+    VIDEO_DIR="${MONITOR_DIR}/videos"
+    if [[ -d "$VIDEO_DIR" ]] && command -v ffmpeg >/dev/null 2>&1; then
+        shopt -s nullglob
+        for frames_dir in "$VIDEO_DIR"/*_frames; do
+            camera_name="$(basename "$frames_dir" _frames)"
+            mp4_out="${VIDEO_DIR}/${camera_name}.mp4"
+            n_frames=$(find "$frames_dir" -name "frame_*.jpg" | wc -l)
+            if [[ "$n_frames" -eq 0 ]]; then
+                echo "[run_inference] WARNING: no frames found in $frames_dir, skipping"
+                continue
+            fi
+            echo "[run_inference] Encoding $camera_name ($n_frames frames) -> $mp4_out"
+            if ffmpeg -y -loglevel error \
+                -framerate "${CONTROL_FREQ:-30.0}" \
+                -i "${frames_dir}/frame_%06d.jpg" \
+                -c:v libx264 -pix_fmt yuv420p \
+                "$mp4_out"; then
+                rm -rf "$frames_dir"
+                echo "[run_inference] Video saved: $mp4_out"
+            else
+                echo "[run_inference] WARNING: ffmpeg failed for $camera_name (exit $?) — frames kept at $frames_dir"
+            fi
+        done
+        shopt -u nullglob
+    elif [[ -d "$VIDEO_DIR" ]]; then
+        echo "[run_inference] WARNING: ffmpeg not found on host — frame sequences left at $VIDEO_DIR"
+    fi
 fi
 
 exit "$COMPOSE_EXIT"

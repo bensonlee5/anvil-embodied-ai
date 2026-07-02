@@ -69,8 +69,10 @@ def generate_launch_description():
     monitor_video_dir_arg = DeclareLaunchArgument(
         "monitor_video_dir",
         default_value="",
-        description="Record each camera to <dir>/<camera_name>.mp4 for the full episode. "
-        "Only takes effect when monitor_enable is true. Empty = disabled.",
+        description="Dump each camera's frames to <dir>/<camera_name>_frames/ for the "
+        "full episode; run_inference.sh converts them to <dir>/<camera_name>.mp4 with "
+        "ffmpeg after shutdown. Only takes effect when monitor_enable is true. "
+        "Empty = disabled.",
     )
 
     # Node
