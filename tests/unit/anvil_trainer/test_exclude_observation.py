@@ -16,12 +16,8 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
 
 from anvil_trainer.train import ExcludeObservationTransform, TrainingConfig
-
 
 # =============================================================================
 # 1. _full_keys() suffix expansion
@@ -157,8 +153,9 @@ class TestIsEnabled:
 
 class TestPatchMetadata:
     """
-    patch_metadata() patches lerobot.datasets.feature_utils.dataset_to_policy_features
-    AND lerobot.policies.factory.dataset_to_policy_features (where it is actually called).
+    patch_metadata() patches whichever LeRobot dataset_to_policy_features hook exists.
+    LeRobot 0.6 keeps it in lerobot.policies.factory; older releases also exposed
+    lerobot.datasets.feature_utils.dataset_to_policy_features.
     """
 
     def _run_patch_test(self, exclude_observation, features):
@@ -166,7 +163,7 @@ class TestPatchMetadata:
         import lerobot.datasets.feature_utils as feature_utils_mod
         import lerobot.policies.factory as factory_mod
 
-        original_feature_utils = feature_utils_mod.dataset_to_policy_features
+        original_feature_utils = getattr(feature_utils_mod, "dataset_to_policy_features", None)
         original_factory = factory_mod.dataset_to_policy_features
         captured = {}
 
@@ -174,8 +171,9 @@ class TestPatchMetadata:
             captured["received"] = dict(feats)
             return feats
 
-        # Set the mock as the "original" that will be captured by the closure
-        feature_utils_mod.dataset_to_policy_features = mock_original
+        # Set the mock as the "original" that will be captured by the closure.
+        if original_feature_utils is not None:
+            feature_utils_mod.dataset_to_policy_features = mock_original
         factory_mod.dataset_to_policy_features = mock_original
 
         try:
@@ -183,11 +181,12 @@ class TestPatchMetadata:
             transform = ExcludeObservationTransform()
             transform.patch_metadata(cfg)
 
-            # Call via the factory module (where lerobot actually calls it)
+            # Call via the factory module (where LeRobot 0.6 calls it)
             factory_mod.dataset_to_policy_features(features)
             return captured.get("received", {})
         finally:
-            feature_utils_mod.dataset_to_policy_features = original_feature_utils
+            if original_feature_utils is not None:
+                feature_utils_mod.dataset_to_policy_features = original_feature_utils
             factory_mod.dataset_to_policy_features = original_factory
 
     def test_excluded_keys_filtered_from_features(self):

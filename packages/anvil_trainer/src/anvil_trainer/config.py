@@ -68,6 +68,8 @@ class TrainingConfig:
     """
 
     exclude_observs: list[str] | None = None
+    # Backward-compatible alias for the older --exclude-observation spelling.
+    exclude_observation: list[str] | None = None
     task_override: str | None = None
     # action_type: "absolute" | "delta_obs_t" | "delta_sequential"
     # delta_obs_t:     delta[k] = action[t+k] - obs[t]  (all k share the same obs reference)
@@ -85,6 +87,11 @@ class TrainingConfig:
     backbone: str = "resnet18"
     note: str | None = None         # Free-text note for this run (also sent to wandb as run notes)
     note_append: str | None = None  # Append to existing note during --resume
+
+    def __post_init__(self) -> None:
+        if self.exclude_observs is None and self.exclude_observation is not None:
+            self.exclude_observs = self.exclude_observation
+        self.exclude_observation = self.exclude_observs
 
     @property
     def use_delta_actions(self) -> bool:
@@ -108,7 +115,12 @@ class TrainingConfig:
             --use-delta-actions: Legacy flag, maps to --action-type=delta_obs_t
             --exclude-observs=SUFFIX1,SUFFIX2: Drop observations by suffix
         """
-        excl_str = _pop_argv("exclude-observs") or os.environ.get("LEROBOT_EXCLUDE_OBSERVS", "")
+        excl_str = (
+            _pop_argv("exclude-observs")
+            or _pop_argv("exclude-observation")
+            or os.environ.get("LEROBOT_EXCLUDE_OBSERVS")
+            or os.environ.get("LEROBOT_EXCLUDE_OBSERVATION", "")
+        )
         exclude_observs = [k.strip() for k in excl_str.split(",") if k.strip()] or None
 
         task_override = _pop_argv("task-description") or os.environ.get("LEROBOT_TASK_OVERRIDE", "") or None
@@ -286,9 +298,18 @@ class TrainingConfig:
             if not any(arg.startswith("--dataset.repo_id") for arg in sys.argv):
                 sys.argv.append("--dataset.repo_id=local")
 
-            # Disable eval by default — no gym env available for Anvil datasets
-            if not any(arg.startswith("--eval_freq") for arg in sys.argv):
-                sys.argv.append("--eval_freq=0")
+            # TorchCodec's CUDA 13 wheels require extra runtime library path setup on Jetson.
+            # PyAV is already part of LeRobot's dataset extra and works for local Anvil datasets.
+            if not any(arg.startswith("--dataset.video_backend") for arg in sys.argv):
+                sys.argv.append("--dataset.video_backend=pyav")
+
+            # Disable env eval by default — no gym env available for Anvil datasets.
+            # LeRobot 0.6 renamed --eval_freq to --env_eval_freq.
+            if not any(
+                arg.startswith("--env_eval_freq") or arg.startswith("--eval_freq")
+                for arg in sys.argv
+            ):
+                sys.argv.append("--env_eval_freq=0")
 
             # Default total training steps
             if not any(arg.startswith("--steps") for arg in sys.argv):
@@ -363,7 +384,7 @@ class TrainingConfig:
         if _action_type == "absolute" and data.get("use_delta_actions", False):
             _action_type = "delta_obs_t"
         return cls(
-            exclude_observs=data.get("exclude_observs"),
+            exclude_observs=data.get("exclude_observs") or data.get("exclude_observation"),
             task_override=data.get("task_override"),
             action_type=_action_type,
             delta_exclude_joints=data.get("delta_exclude_joints"),
