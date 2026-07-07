@@ -538,6 +538,11 @@ class TransformRunner:
                 "make_train_eval_datasets",
                 patched_make_train_eval_datasets,
             )
+            log.info(
+                "[split] LeRobot's native dataset eval is disabled while --split-ratio "
+                "is active (eval_steps/max_eval_samples are no-ops); anvil-trainer's "
+                "val/test loss hooks are used instead"
+            )
         log.info("[split] Patched make_dataset (split_ratio=%s, random=True)", s)
 
         # Capture preprocessor when it's created by lerobot

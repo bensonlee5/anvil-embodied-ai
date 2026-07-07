@@ -2,7 +2,7 @@
 Tests for ExcludeObservationTransform and --exclude-observation CLI parsing.
 
 Covers:
-  1. ExcludeObservationTransform._full_keys() suffix expansion
+  1. ExcludeObservationTransform._excluded_keys() suffix expansion
   2. ExcludeObservationTransform.apply() removes correct keys
   3. ExcludeObservationTransform.apply() is a no-op when exclude_observation is None
   4. ExcludeObservationTransform.is_enabled() reflects config
@@ -20,23 +20,23 @@ from pathlib import Path
 from anvil_trainer.train import ExcludeObservationTransform, TrainingConfig
 
 # =============================================================================
-# 1. _full_keys() suffix expansion
+# 1. _excluded_keys() suffix expansion
 # =============================================================================
 
 class TestFullKeys:
     def test_image_suffix_expansion(self):
         cfg = TrainingConfig(exclude_observation=["images.chest", "images.wrist_l"])
-        result = ExcludeObservationTransform._full_keys(cfg)
+        result = ExcludeObservationTransform._excluded_keys(cfg)
         assert result == {"observation.images.chest", "observation.images.wrist_l"}
 
     def test_non_image_suffix_expansion(self):
         cfg = TrainingConfig(exclude_observation=["velocity", "effort"])
-        result = ExcludeObservationTransform._full_keys(cfg)
+        result = ExcludeObservationTransform._excluded_keys(cfg)
         assert result == {"observation.velocity", "observation.effort"}
 
     def test_mixed_suffix_expansion(self):
         cfg = TrainingConfig(exclude_observation=["images.chest", "velocity", "effort"])
-        result = ExcludeObservationTransform._full_keys(cfg)
+        result = ExcludeObservationTransform._excluded_keys(cfg)
         assert result == {
             "observation.images.chest",
             "observation.velocity",
@@ -45,7 +45,7 @@ class TestFullKeys:
 
     def test_single_suffix(self):
         cfg = TrainingConfig(exclude_observation=["velocity"])
-        result = ExcludeObservationTransform._full_keys(cfg)
+        result = ExcludeObservationTransform._excluded_keys(cfg)
         assert result == {"observation.velocity"}
 
 

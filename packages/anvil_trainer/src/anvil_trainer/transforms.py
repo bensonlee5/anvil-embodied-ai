@@ -96,9 +96,6 @@ class ExcludeObservationTransform(Transform):
             return set()
         return {f"observation.{s}" for s in config.exclude_observs}
 
-    # Older tests/user code used this helper name.
-    _full_keys = _excluded_keys
-
     def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
         excluded = self._excluded_keys(config)
         for key in list(item.keys()):

@@ -115,9 +115,13 @@ class TrainingConfig:
             --use-delta-actions: Legacy flag, maps to --action-type=delta_obs_t
             --exclude-observs=SUFFIX1,SUFFIX2: Drop observations by suffix
         """
+        # Pop both spellings unconditionally so neither leaks through to
+        # lerobot's parser (draccus rejects unknown args) if both are passed.
+        excl_primary = _pop_argv("exclude-observs")
+        excl_legacy = _pop_argv("exclude-observation")
         excl_str = (
-            _pop_argv("exclude-observs")
-            or _pop_argv("exclude-observation")
+            excl_primary
+            or excl_legacy
             or os.environ.get("LEROBOT_EXCLUDE_OBSERVS")
             or os.environ.get("LEROBOT_EXCLUDE_OBSERVATION", "")
         )
@@ -288,6 +292,13 @@ class TrainingConfig:
         note: str | None = _pop_argv("note")
         note_append: str | None = _pop_argv("note-append")
 
+        # Back-compat: LeRobot 0.6 renamed --eval_freq to --env_eval_freq.
+        # Rewrite in-place (even on resume) — draccus rejects the old flag as unknown.
+        for i, arg in enumerate(sys.argv):
+            if arg == "--eval_freq" or arg.startswith("--eval_freq="):
+                sys.argv[i] = "--env_eval_freq" + arg[len("--eval_freq"):]
+                log.info("[anvil_trainer] Rewrote legacy %s to %s", arg, sys.argv[i])
+
         # Defaults injection — skip if resuming to avoid draccus decoding errors
         if not is_resume:
             # Default push_to_hub=false unless explicitly set
@@ -304,11 +315,8 @@ class TrainingConfig:
                 sys.argv.append("--dataset.video_backend=pyav")
 
             # Disable env eval by default — no gym env available for Anvil datasets.
-            # LeRobot 0.6 renamed --eval_freq to --env_eval_freq.
-            if not any(
-                arg.startswith("--env_eval_freq") or arg.startswith("--eval_freq")
-                for arg in sys.argv
-            ):
+            # (Legacy --eval_freq has already been rewritten to --env_eval_freq above.)
+            if not any(arg.startswith("--env_eval_freq") for arg in sys.argv):
                 sys.argv.append("--env_eval_freq=0")
 
             # Default total training steps
