@@ -3,13 +3,9 @@ from __future__ import annotations
 
 import sys
 import types
-from unittest.mock import MagicMock
-
-import pytest
 
 from anvil_trainer.config import TrainingConfig
 from anvil_trainer.patches import TransformRunner
-
 
 # =============================================================================
 # _patch / restore_all_patches
@@ -132,59 +128,73 @@ class TestTransformPatchMetadataUsesRunner:
 
 
 class TestProcessorCompatAliases:
-    """Tests for the relative_actions_processor → delta_actions_processor alias."""
+    """Tests for relative_actions_processor / delta_actions_processor aliases."""
 
     def _make_runner(self) -> TransformRunner:
         return TransformRunner(TrainingConfig())
 
-    def test_alias_registered_after_apply(self):
-        """relative_actions_processor should resolve after apply_processor_compat_aliases."""
-        from lerobot.processor.pipeline import ProcessorStepRegistry
+    @staticmethod
+    def _canonical_and_alias():
         from lerobot.processor.relative_action_processor import RelativeActionsProcessorStep
 
+        canonical = RelativeActionsProcessorStep._registry_name
+        alias = (
+            "delta_actions_processor"
+            if canonical == "relative_actions_processor"
+            else "relative_actions_processor"
+        )
+        return canonical, alias, RelativeActionsProcessorStep
+
+    def test_alias_registered_after_apply(self):
+        """The non-canonical processor name should resolve after alias setup."""
+        from lerobot.processor.pipeline import ProcessorStepRegistry
+
+        canonical, alias, step_cls = self._canonical_and_alias()
         runner = self._make_runner()
-        # Ensure clean state — unregister if a previous test left it behind.
-        ProcessorStepRegistry.unregister("relative_actions_processor")
+        ProcessorStepRegistry.unregister(alias)
 
         runner.apply_processor_compat_aliases()
         try:
-            assert ProcessorStepRegistry.get("relative_actions_processor") is RelativeActionsProcessorStep
+            assert canonical in ProcessorStepRegistry.list()
+            assert ProcessorStepRegistry.get(alias) is step_cls
         finally:
             runner.restore_all_patches()
 
     def test_canonical_registry_name_preserved(self):
-        """_registry_name must stay 'delta_actions_processor' so checkpoints use the new name."""
+        """_registry_name must stay on the installed release's canonical name."""
         from lerobot.processor.pipeline import ProcessorStepRegistry
-        from lerobot.processor.relative_action_processor import RelativeActionsProcessorStep
 
+        canonical, alias, step_cls = self._canonical_and_alias()
         runner = self._make_runner()
-        ProcessorStepRegistry.unregister("relative_actions_processor")
+        ProcessorStepRegistry.unregister(alias)
 
         runner.apply_processor_compat_aliases()
         try:
-            assert RelativeActionsProcessorStep._registry_name == "delta_actions_processor"
+            assert step_cls._registry_name == canonical
         finally:
             runner.restore_all_patches()
 
     def test_alias_unregistered_after_restore(self):
-        """restore_all_patches must remove the alias and leave delta_actions_processor intact."""
+        """restore_all_patches must remove only the compat alias."""
         from lerobot.processor.pipeline import ProcessorStepRegistry
 
+        canonical, alias, _ = self._canonical_and_alias()
         runner = self._make_runner()
-        ProcessorStepRegistry.unregister("relative_actions_processor")
+        ProcessorStepRegistry.unregister(alias)
 
         runner.apply_processor_compat_aliases()
         runner.restore_all_patches()
 
-        assert "relative_actions_processor" not in ProcessorStepRegistry.list()
-        assert "delta_actions_processor" in ProcessorStepRegistry.list()
+        assert alias not in ProcessorStepRegistry.list()
+        assert canonical in ProcessorStepRegistry.list()
 
     def test_noop_when_already_registered(self):
         """Calling apply_processor_compat_aliases twice must not raise ValueError."""
         from lerobot.processor.pipeline import ProcessorStepRegistry
 
+        _, alias, _ = self._canonical_and_alias()
         runner = self._make_runner()
-        ProcessorStepRegistry.unregister("relative_actions_processor")
+        ProcessorStepRegistry.unregister(alias)
 
         runner.apply_processor_compat_aliases()
         try:

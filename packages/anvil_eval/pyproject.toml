@@ -22,8 +22,8 @@ classifiers = [
 ]
 
 dependencies = [
-    "lerobot~=0.5.1",
-    "torch>=2.2.1,<2.11.0",
+    "lerobot[dataset,diffusion]~=0.6.0",
+    "torch>=2.7",
     "numpy>=2.0.0,<2.3.0",
     "matplotlib>=3.8.0",
     "tqdm~=4.67",
@@ -36,9 +36,9 @@ dev = [
     "pytest-cov>=4.0.0",
     "ruff>=0.4.0",
 ]
-smolvla = ["lerobot[smolvla]~=0.5.1"]
-pi      = ["lerobot[pi]~=0.5.1"]
-all     = ["lerobot[smolvla,pi]~=0.5.1", "wandb~=0.24"]
+smolvla = ["lerobot[smolvla]~=0.6.0"]
+pi      = ["lerobot[pi]~=0.6.0"]
+all     = ["lerobot[smolvla,pi]~=0.6.0", "wandb~=0.24"]
 
 [project.scripts]
 anvil-eval = "anvil_eval.cli:main"

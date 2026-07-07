@@ -143,20 +143,12 @@ class TransformRunner:
                 self._registered_aliases.clear()
 
     def apply_processor_compat_aliases(self) -> None:
-        """Register backward-compatibility aliases for renamed ProcessorStep registry names.
+        """Register compatibility aliases for renamed action processor registry names.
 
-        Some lerobot Hub checkpoints (e.g. ``lerobot/pi05_base``) were published with
-        an older registry name ``relative_actions_processor`` that was later renamed to
-        ``delta_actions_processor`` in lerobot 0.5.x.  Loading those checkpoints fails
-        with an ImportError because the old name is no longer in the registry.
-
-        This method registers the old name as an alias pointing to the same class
-        (``RelativeActionsProcessorStep``) so that deserialization succeeds.  Crucially,
-        it restores the class's ``_registry_name`` attribute to the *canonical* new name
-        after registration, so that any checkpoints saved during this training run still
-        use ``delta_actions_processor`` rather than the legacy name.
-
-        The alias is unregistered automatically in :meth:`restore_all_patches`.
+        LeRobot releases have used both ``relative_actions_processor`` and
+        ``delta_actions_processor`` for the same processor class. Keep the
+        installed release's canonical name intact, but register the other name
+        as an alias so older checkpoints can still deserialize.
         """
         try:
             from lerobot.processor.pipeline import ProcessorStepRegistry
@@ -167,20 +159,34 @@ class TransformRunner:
             )
             return
 
-        if "relative_actions_processor" in ProcessorStepRegistry.list():
-            return  # Already registered — no-op.
+        canonical_name = getattr(
+            RelativeActionsProcessorStep,
+            "_registry_name",
+            "relative_actions_processor",
+        )
+        names = ProcessorStepRegistry.list()
+        compat_names = {"relative_actions_processor", "delta_actions_processor"}
 
-        canonical_name = getattr(RelativeActionsProcessorStep, "_registry_name", "delta_actions_processor")
         try:
-            ProcessorStepRegistry.register("relative_actions_processor")(RelativeActionsProcessorStep)
-            # register() overwrites _registry_name on the class; restore it so that checkpoints
-            # produced during this training run serialize with the current canonical name.
-            RelativeActionsProcessorStep._registry_name = canonical_name
-            self._registered_aliases.append("relative_actions_processor")
-            log.info(
-                "[anvil_trainer] Registered compat alias 'relative_actions_processor' → %s",
-                canonical_name,
-            )
+            if canonical_name not in names:
+                ProcessorStepRegistry.register(canonical_name)(RelativeActionsProcessorStep)
+                RelativeActionsProcessorStep._registry_name = canonical_name
+                names = ProcessorStepRegistry.list()
+
+            for alias in sorted(compat_names - {canonical_name}):
+                if alias in names:
+                    continue
+                ProcessorStepRegistry.register(alias)(RelativeActionsProcessorStep)
+                # register() overwrites _registry_name on the class; restore the
+                # installed release's canonical name so newly-saved checkpoints use it.
+                RelativeActionsProcessorStep._registry_name = canonical_name
+                self._registered_aliases.append(alias)
+                names = ProcessorStepRegistry.list()
+                log.info(
+                    "[anvil_trainer] Registered compat alias '%s' -> %s",
+                    alias,
+                    canonical_name,
+                )
         except Exception as e:  # pragma: no cover
             log.warning("[anvil_trainer] Failed to register processor compat alias: %s", e)
 
@@ -521,7 +527,22 @@ class TransformRunner:
             return train_dataset
 
         self._patch(factory_mod, "make_dataset", patched_make_dataset)
-        self._patch(lerobot_train_mod, "make_dataset", patched_make_dataset)
+        if hasattr(lerobot_train_mod, "make_dataset"):
+            self._patch(lerobot_train_mod, "make_dataset", patched_make_dataset)
+        if hasattr(lerobot_train_mod, "make_train_eval_datasets"):
+            def patched_make_train_eval_datasets(cfg):
+                return patched_make_dataset(cfg), None
+
+            self._patch(
+                lerobot_train_mod,
+                "make_train_eval_datasets",
+                patched_make_train_eval_datasets,
+            )
+            log.info(
+                "[split] LeRobot's native dataset eval is disabled while --split-ratio "
+                "is active (eval_steps/max_eval_samples are no-ops); anvil-trainer's "
+                "val/test loss hooks are used instead"
+            )
         log.info("[split] Patched make_dataset (split_ratio=%s, random=True)", s)
 
         # Capture preprocessor when it's created by lerobot
@@ -533,7 +554,8 @@ class TransformRunner:
             return preprocessor, postprocessor
 
         self._patch(policy_factory_mod, "make_pre_post_processors", capturing_make_processors)
-        self._patch(lerobot_train_mod, "make_pre_post_processors", capturing_make_processors)
+        if hasattr(lerobot_train_mod, "make_pre_post_processors"):
+            self._patch(lerobot_train_mod, "make_pre_post_processors", capturing_make_processors)
         log.info("[split] Patched make_pre_post_processors to capture preprocessor")
 
     def apply_checkpoint_patch(self) -> None:
@@ -541,12 +563,21 @@ class TransformRunner:
         1. Compute and log test loss (if test split is active) at save_freq.
         2. Write anvil_config.json (with split info) into each checkpoint's pretrained_model/ directory.
         """
+        import importlib
         import time
 
         import lerobot.scripts.lerobot_train as lerobot_train_mod
-        import lerobot.utils.train_utils as train_utils_mod
         import torch
-        from lerobot.utils.train_utils import save_checkpoint as original_save_checkpoint
+
+        train_utils_mod = None
+        with contextlib.suppress(ModuleNotFoundError):
+            train_utils_mod = importlib.import_module("lerobot.utils.train_utils")
+
+        original_save_checkpoint = getattr(
+            train_utils_mod,
+            "save_checkpoint",
+            lerobot_train_mod.save_checkpoint,
+        )
 
         anvil_cfg_base: dict = {
             "action_type": self.config.action_type,
@@ -564,12 +595,17 @@ class TransformRunner:
 
         val_state = self
 
-        def patched_save_checkpoint(checkpoint_dir, **kwargs):
+        def patched_save_checkpoint(checkpoint_dir, *args, **kwargs):
             # --- Test loss (computed at save_freq) ---
             if val_state._test_dataloader is not None:
                 policy = kwargs.get("policy")
-                preprocessor = kwargs.get("preprocessor") or val_state._preprocessor
-                step = kwargs.get("step", "?")
+                if policy is None and len(args) >= 3:
+                    policy = args[2]
+                preprocessor = kwargs.get("preprocessor")
+                if preprocessor is None and len(args) >= 6:
+                    preprocessor = args[5]
+                preprocessor = preprocessor or val_state._preprocessor
+                step = kwargs.get("step", args[0] if args else "?")
 
                 if policy is not None:
                     policy.eval()
@@ -613,7 +649,7 @@ class TransformRunner:
                         pass
 
             # --- Original save ---
-            original_save_checkpoint(checkpoint_dir, **kwargs)
+            original_save_checkpoint(checkpoint_dir, *args, **kwargs)
 
             # --- Save split_info.json and anvil_config.json ---
             pretrained_dir = checkpoint_dir / "pretrained_model"
@@ -627,8 +663,9 @@ class TransformRunner:
 
                 log.info("[anvil_trainer] Saved configs to %s", pretrained_dir)
 
-        # Patch both the module and the already-imported reference in lerobot_train
-        self._patch(train_utils_mod, "save_checkpoint", patched_save_checkpoint)
+        # Patch both the source module (when present) and the reference used by lerobot_train.
+        if train_utils_mod is not None and hasattr(train_utils_mod, "save_checkpoint"):
+            self._patch(train_utils_mod, "save_checkpoint", patched_save_checkpoint)
         self._patch(lerobot_train_mod, "save_checkpoint", patched_save_checkpoint)
         log.info("[anvil_trainer] Patched save_checkpoint for test loss + anvil_config.json")
 
@@ -643,15 +680,13 @@ class TransformRunner:
         val_state = self
         _counter = {"n": 0}
 
-        def patched_update_policy(
-            train_metrics, policy, batch, optimizer, grad_clip_norm,
-            accelerator=None, lr_scheduler=None, lock=None, rabc_weights_provider=None,
-        ):
-            result = original_update_policy(
-                train_metrics, policy, batch, optimizer, grad_clip_norm,
-                accelerator=accelerator, lr_scheduler=lr_scheduler,
-                lock=lock, rabc_weights_provider=rabc_weights_provider,
-            )
+        def patched_update_policy(*args, **kwargs):
+            result = original_update_policy(*args, **kwargs)
+
+            policy = args[1] if len(args) > 1 else kwargs.get("policy")
+            accelerator = kwargs.get("accelerator")
+            if accelerator is None and len(args) > 5:
+                accelerator = args[5]
 
             _counter["n"] += 1
             val_freq = val_state._val_freq
