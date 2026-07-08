@@ -25,14 +25,15 @@
 #   HF_CACHE      — host path to HuggingFace cache (default: ~/.cache/huggingface)
 #                   VLA models (pi0/pi05/smolvla) need the PaliGemma tokenizer from this cache.
 
+x-image-build: &image_build
+  context: .
+  dockerfile: docker/inference/Dockerfile
+  args:
+    LEROBOT_VERSION: ${LEROBOT_VERSION:-0.6.0}
+    LEROBOT_EXTRAS: ${LEROBOT_EXTRAS:-diffusion}
+
 x-base: &base
   image: ghcr.io/anvil-robotics/lerobot-inference:${IMAGE_TAG:-latest}
-  build:
-    context: .
-    dockerfile: docker/inference/Dockerfile
-    args:
-      LEROBOT_VERSION: ${LEROBOT_VERSION:-0.5.1}
-      LEROBOT_EXTRAS: ${LEROBOT_EXTRAS:-}
   networks:
     - ros2_test
   environment:
@@ -46,6 +47,7 @@ services:
 
   mock-robot:
     <<: *base
+    build: *image_build
     container_name: lerobot-fake-robot
     profiles: [monitor, inference]
     command: >
