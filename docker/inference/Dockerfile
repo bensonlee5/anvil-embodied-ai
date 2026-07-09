@@ -24,11 +24,11 @@ ENV PATH="/root/.local/bin:$PATH"
 WORKDIR /workspace
 
 # Base lerobot install — cached as long as version doesn't change.
-# transformers + scipy are required for VLA models (pi0, pi0.5, smolvla).
+# transformers + scipy are required for VLA/foundation policies.
 # LEROBOT_EXTRAS defaults to diffusion so diffusion checkpoints load out of the box.
 RUN pip3 install --break-system-packages --no-cache-dir --ignore-installed \
     numpy packaging "lerobot==${LEROBOT_VERSION}" matplotlib \
-    "transformers==5.3.0" "scipy>=1.14.0,<2.0.0" && \
+    "transformers>=5.4.0,<5.6.0" "scipy>=1.14.0,<2.0.0" && \
     pip3 install --break-system-packages --no-cache-dir "setuptools<80"
 
 # Extras — separate layer, only rebuilt when LEROBOT_EXTRAS changes

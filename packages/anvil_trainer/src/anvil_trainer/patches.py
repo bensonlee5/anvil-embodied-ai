@@ -367,7 +367,7 @@ class TransformRunner:
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
         # We must capture the original __getitem__ to use it in our patch.
-        # LeRobotDataset.__getitem__ in v0.5.1 does not perform index mapping,
+        # LeRobotDataset.__getitem__ does not perform Anvil split index mapping,
         # but EpisodeAwareSampler yields absolute indices. We add the mapping
         # logic here to support filtered datasets (splits).
         original_getitem = LeRobotDataset.__getitem__

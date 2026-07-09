@@ -60,7 +60,7 @@ class TrainingConfig:
         exclude_observs: Observation suffixes to DROP (None = keep all).
             Use the key suffix after "observation." — supports both image and non-image keys:
             e.g. ["images.chest", "images.wrist_l", "velocity", "effort"]
-        task_override: Override task string for all samples (for SmolVLA)
+        task_override: Override task string for all samples (language-conditioned policies)
         use_delta_actions: Convert actions to delta (action - observation.state)
         dataset_root: Path to local dataset (for validation)
         note: Free-text note attached to this run (stored in anvil_config.json and wandb)
@@ -83,7 +83,7 @@ class TrainingConfig:
     resume_checkpoint: str = "last"       # Checkpoint to resume from ("last" or e.g. "020000")
     split_ratio: list[float] = field(default_factory=lambda: [8.0, 1.0, 1.0])  # train/val/test episode split ratios
     max_episodes: int | None = None  # Randomly subsample N episodes before train/val/test split (None = use all)
-    # Vision backbone for ACT/Diffusion: resnet18 | resnet34 | resnet50 (VLA models ignore this)
+    # Vision backbone for ACT/Diffusion: resnet18 | resnet34 | resnet50
     backbone: str = "resnet18"
     note: str | None = None         # Free-text note for this run (also sent to wandb as run notes)
     note_append: str | None = None  # Append to existing note during --resume
@@ -334,10 +334,21 @@ class TrainingConfig:
             if has_policy_path:
                 sys.argv = [a for a in sys.argv if not a.startswith("--policy.type=")]
 
-            # Inject backbone settings for non-VLA policies (ACT, Diffusion).
-            # Pi0.5 / SmolVLA use their own vision encoders and ignore these flags.
-            _VLA_POLICIES = {"pi05", "smolvla", "pi0"}
-            if policy_type not in _VLA_POLICIES and not has_policy_path:
+            # Inject backbone settings only for policies that use LeRobot's ResNet-style
+            # vision backbone fields. Foundation policies define their own encoders and
+            # should not receive --policy.vision_backbone overrides.
+            _NO_BACKBONE_POLICIES = {
+                "pi05",
+                "smolvla",
+                "pi0",
+                "molmoact2",
+                "groot",
+                "multi_task_dit",
+                "evo1",
+                "fastwam",
+                "vla_jepa",
+            }
+            if policy_type not in _NO_BACKBONE_POLICIES and not has_policy_path:
                 _BACKBONE_MAP = {
                     "resnet18": ("resnet18", "ResNet18_Weights.IMAGENET1K_V1"),
                     "resnet34": ("resnet34", "ResNet34_Weights.IMAGENET1K_V1"),
