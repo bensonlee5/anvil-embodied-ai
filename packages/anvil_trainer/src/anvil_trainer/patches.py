@@ -48,6 +48,17 @@ log = logging.getLogger(__name__)
 _PATCHED_MARKER = object()
 
 
+def _normalize_uint8_camera_images(batch: dict[str, Any], camera_keys: tuple[str, ...]):
+    """Match LeRobot's training-loop camera conversion for custom eval hooks."""
+    import torch
+
+    for camera_key in camera_keys:
+        image = batch.get(camera_key)
+        if isinstance(image, torch.Tensor) and image.dtype == torch.uint8:
+            batch[camera_key] = image.to(dtype=torch.float32) / 255.0
+    return batch
+
+
 class TransformRunner:
     """
     Manages and applies dataset transforms.
@@ -75,6 +86,7 @@ class TransformRunner:
         self._test_dataloader = None  # set by apply_val_loss_patch when make_dataset is called
         self._split_info: dict = {}   # populated by patched_make_dataset
         self._preprocessor = None     # captured from make_pre_post_processors
+        self._camera_keys: tuple[str, ...] = ()  # captured from dataset metadata
         self._val_freq = 0            # set from cfg.log_freq * 5 inside patched_make_dataset
         self._resume_step = 0         # for absolute step tracking in wandb
         # List of (module, attr_name, original_value) — populated by _patch in
@@ -431,6 +443,7 @@ class TransformRunner:
             # Full dataset to determine total episode count
             full_dataset = original_make_dataset(cfg)
             total_ep = full_dataset.num_episodes
+            val_state._camera_keys = tuple(full_dataset.meta.camera_keys)
 
             # Compute delta action stats when DeltaActionTransform is active so
             # that lerobot's normalizer is built against delta statistics rather
@@ -622,6 +635,9 @@ class TransformRunner:
 
                     with torch.no_grad():
                         for batch in val_state._test_dataloader:
+                            batch = _normalize_uint8_camera_images(
+                                batch, val_state._camera_keys
+                            )
                             if preprocessor is not None:
                                 batch = preprocessor(batch)
                             else:
@@ -717,6 +733,9 @@ class TransformRunner:
 
             with torch.no_grad():
                 for val_batch in val_state._val_dataloader:
+                    val_batch = _normalize_uint8_camera_images(
+                        val_batch, val_state._camera_keys
+                    )
                     if preprocessor is not None:
                         val_batch = preprocessor(val_batch)
                     else:
