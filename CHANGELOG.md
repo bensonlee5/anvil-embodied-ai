@@ -22,6 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Rename `--exclude-observation` / `--exclude-cams` to `--exclude-observs` in `anvil-trainer`; adopt dot-suffix notation (`images.chest`, `state.velocity`) that mirrors feature key namespaces directly
 
 ### Fixed
+- Fix MolmoAct2 pretrained fine-tuning failing before training by remapping
+  LeRobot's generic normalizer overrides to MolmoAct2's masked processor steps
 - Fix `anvil-trainer` defaulting to wandb artifact uploads — `--wandb.disable_artifact=true` is now injected by default for both new and resumed runs; override with `--wandb.disable_artifact=false` to re-enable
 - Fix `mcap-to-video` failing silently on legacy MCAP files — schema names without the `/msg/` infix (`sensor_msgs/Image`, `sensor_msgs/CompressedImage`) are now recognised in both topic detection and frame decoding
 - Fix `--camera-filter` semantics: now discards listed cameras (was incorrectly keeping them)
