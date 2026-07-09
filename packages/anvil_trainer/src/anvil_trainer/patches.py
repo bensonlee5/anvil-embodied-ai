@@ -59,6 +59,33 @@ def _normalize_uint8_camera_images(batch: dict[str, Any], camera_keys: tuple[str
     return batch
 
 
+def _remap_molmoact2_processor_overrides(policy_cfg: Any, kwargs: dict[str, Any]):
+    """Use MolmoAct2's registered masked-normalizer step names for fine-tuning."""
+    if getattr(policy_cfg, "type", None) != "molmoact2":
+        return kwargs
+
+    remapped_kwargs = dict(kwargs)
+    for kwarg_name, generic_name, molmoact2_name in (
+        (
+            "preprocessor_overrides",
+            "normalizer_processor",
+            "molmoact2_masked_normalizer",
+        ),
+        (
+            "postprocessor_overrides",
+            "unnormalizer_processor",
+            "molmoact2_masked_unnormalizer",
+        ),
+    ):
+        overrides = remapped_kwargs.get(kwarg_name)
+        if not isinstance(overrides, dict) or generic_name not in overrides:
+            continue
+        overrides = dict(overrides)
+        overrides[molmoact2_name] = overrides.pop(generic_name)
+        remapped_kwargs[kwarg_name] = overrides
+    return remapped_kwargs
+
+
 class TransformRunner:
     """
     Manages and applies dataset transforms.
@@ -562,6 +589,8 @@ class TransformRunner:
         original_make_processors = policy_factory_mod.make_pre_post_processors
 
         def capturing_make_processors(*args, **kwargs):
+            policy_cfg = kwargs.get("policy_cfg", args[0] if args else None)
+            kwargs = _remap_molmoact2_processor_overrides(policy_cfg, kwargs)
             preprocessor, postprocessor = original_make_processors(*args, **kwargs)
             val_state._preprocessor = preprocessor
             return preprocessor, postprocessor
