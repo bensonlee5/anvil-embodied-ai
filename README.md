@@ -55,6 +55,7 @@ This repository is the embodied AI stack for the Anvil platform — data convers
 ## Table of Contents
 
 - [Installation](#installation)
+  - [Available Models](#available-models)
 - [Usage](#usage)
 - [Project Structure](#project-structure)
 
@@ -79,19 +80,25 @@ cd anvil-embodied-ai
 uv sync --all-packages
 ```
 
-ACT and Diffusion are included in the base install. For other policies:
+### Available Models
 
-| Extra | Policy |
-|-------|--------|
-| `smolvla` | SmolVLA |
-| `pi` | Pi0 / Pi0.5 |
-| `molmoact2` | MolmoAct2 |
-| `groot` | GR00T N1.7 |
-| `multi_task_dit` | Multitask DiT |
-| `evo1` | EVO1 |
-| `fastwam` | FastWAM |
-| `vla_jepa` | VLA-JEPA |
-| `all` | All optional LeRobot policies above |
+This repo supports these native LeRobot v0.6 policies for training, offline evaluation, and ROS2 inference:
+
+| Model | `--policy.type` | Install extra | Notes |
+|-------|----------------|---------------|-------|
+| ACT | `act` | Base install | Action-chunking baseline |
+| Diffusion | `diffusion` | Base install | Diffusion Policy baseline |
+| SmolVLA | `smolvla` | `smolvla` | Language-conditioned VLA; RTC chunk inference |
+| Pi0 | `pi0` | `pi` | Flow-matching VLA; RTC chunk inference |
+| Pi0.5 | `pi05` | `pi` | Larger Pi0 variant; RTC chunk inference |
+| MolmoAct2 | `molmoact2` | `molmoact2` | Language-conditioned foundation policy; RTC chunk inference |
+| GR00T N1.7 | `groot` | `groot` | Language-conditioned foundation policy; RTC chunk inference |
+| Multitask DiT | `multi_task_dit` | `multi_task_dit` | Language-conditioned foundation policy; synchronous chunk inference |
+| EVO1 | `evo1` | `evo1` | Language-conditioned foundation policy; RTC chunk inference |
+| FastWAM | `fastwam` | `fastwam` | Language-conditioned foundation policy; synchronous chunk inference |
+| VLA-JEPA | `vla_jepa` | `vla_jepa` | Language-conditioned foundation policy; synchronous chunk inference |
+
+Use `all` to install every optional policy extra:
 
 ```bash
 uv sync --all-packages --extra smolvla

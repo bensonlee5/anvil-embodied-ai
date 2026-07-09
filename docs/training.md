@@ -44,23 +44,23 @@ uv run anvil-trainer \
 
 ## Supported Policies
 
-| Policy | `--policy.type` | Notes |
-|--------|----------------|-------|
-| ACT | `act` | Action Chunking Transformer - fast, reliable baseline |
-| Diffusion | `diffusion` | Diffusion Policy - smooth, handles multimodal distributions |
-| SmolVLA | `smolvla` | Language-conditioned VLA; requires `--extra smolvla` |
-| Pi0 | `pi0` | Flow-matching VLA; PaliGemma-3B backbone; requires `--extra pi` |
-| Pi0.5 | `pi05` | Larger Pi0 variant (~4B params); higher VRAM; requires `--extra pi` |
-| MolmoAct2 | `molmoact2` | LeRobot-native foundation policy; requires `--extra molmoact2` |
-| GR00T N1.7 | `groot` | LeRobot-native foundation policy; requires `--extra groot` |
-| Multitask DiT | `multi_task_dit` | LeRobot-native synchronous foundation policy; requires `--extra multi_task_dit` |
-| EVO1 | `evo1` | LeRobot-native foundation policy; requires `--extra evo1` |
-| FastWAM | `fastwam` | LeRobot-native synchronous foundation policy; requires `--extra fastwam` |
-| VLA-JEPA | `vla_jepa` | LeRobot-native synchronous foundation policy; requires `--extra vla_jepa` |
+| Policy | `--policy.type` | Install extra | Inference mode | Notes |
+|--------|----------------|---------------|----------------|-------|
+| ACT | `act` | Base install | Standard chunk | Action Chunking Transformer baseline |
+| Diffusion | `diffusion` | Base install | Standard chunk | Diffusion Policy baseline |
+| SmolVLA | `smolvla` | `smolvla` | RTC chunk | Language-conditioned VLA |
+| Pi0 | `pi0` | `pi` | RTC chunk | Flow-matching VLA; PaliGemma-3B backbone |
+| Pi0.5 | `pi05` | `pi` | RTC chunk | Larger Pi0 variant (~4B params); higher VRAM |
+| MolmoAct2 | `molmoact2` | `molmoact2` | RTC chunk | Language-conditioned foundation policy |
+| GR00T N1.7 | `groot` | `groot` | RTC chunk | Language-conditioned foundation policy |
+| Multitask DiT | `multi_task_dit` | `multi_task_dit` | Synchronous chunk | Language-conditioned foundation policy |
+| EVO1 | `evo1` | `evo1` | RTC chunk | Language-conditioned foundation policy |
+| FastWAM | `fastwam` | `fastwam` | Synchronous chunk | Language-conditioned foundation policy |
+| VLA-JEPA | `vla_jepa` | `vla_jepa` | Synchronous chunk | Language-conditioned foundation policy |
 
 This branch intentionally includes only policies exposed as native LeRobot v0.6 policies. OpenVLA-OFT, RDT, TinyVLA, and MiniVLA are adapter/custom-integration work and are not included here.
 
-Checkpoints are saved to `model_zoo/<dataset>/<job_name>/`. Run `uv run anvil-trainer --help` for the full flag reference.
+Checkpoints are saved to `model_zoo/<dataset>/<job_name>/`. Use `uv sync --all-packages --extra all` to install every optional policy dependency, or install only the extras needed for your selected model. Run `uv run anvil-trainer --help` for the full flag reference.
 
 ---
 

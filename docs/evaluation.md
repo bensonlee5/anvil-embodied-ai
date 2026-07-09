@@ -44,6 +44,8 @@ Produces per-joint trajectory plots and a summary box plot.
 | `--task-description TEXT` | — | Task prompt for language-conditioned policies; overrides `anvil_config.json` |
 | `--seed N` | `42` | Random seed for episode sampling |
 
+Dataset replay supports the same policy types listed in [training](training.md#supported-policies). Install the matching optional extra before evaluating SmolVLA, Pi, MolmoAct2, GR00T, Multitask DiT, EVO1, FastWAM, or VLA-JEPA checkpoints.
+
 Use `--split all` to sample from across the full dataset:
 
 ```bash

@@ -30,6 +30,26 @@ cp .env.example .env
 
 For full descriptions and defaults, see [`.env.example`](../.env.example).
 
+### Supported Policy Types
+
+Docker inference uses `LEROBOT_EXTRAS` to decide which optional LeRobot policy dependencies are built into the image. Set multiple extras as a comma-separated list, then rebuild with `docker compose build`.
+
+| Model | Checkpoint `type` | `LEROBOT_EXTRAS` | Runtime path |
+|-------|-------------------|------------------|--------------|
+| ACT | `act` | empty | Standard chunk |
+| Diffusion | `diffusion` | `diffusion` | Standard chunk |
+| SmolVLA | `smolvla` | `smolvla` | RTC chunk |
+| Pi0 | `pi0` | `pi` | RTC chunk |
+| Pi0.5 | `pi05` | `pi` | RTC chunk |
+| MolmoAct2 | `molmoact2` | `molmoact2` | RTC chunk |
+| GR00T N1.7 | `groot` | `groot` | RTC chunk |
+| Multitask DiT | `multi_task_dit` | `multi_task_dit` | Synchronous chunk |
+| EVO1 | `evo1` | `evo1` | RTC chunk |
+| FastWAM | `fastwam` | `fastwam` | Synchronous chunk |
+| VLA-JEPA | `vla_jepa` | `vla_jepa` | Synchronous chunk |
+
+All language-conditioned policies use `model.task_description` from the inference config, falling back to `anvil_config.json` in the checkpoint when available.
+
 ### Script Flags
 
 The script flags are a lightweight way to override behaviour at the command line without editing `.env`:
