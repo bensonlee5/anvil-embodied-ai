@@ -6,7 +6,7 @@ import logging
 import os
 import sys
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -70,7 +70,10 @@ class EpisodeEvaluator:
         self.delta_exclude_joints = anvil_cfg.get("delta_exclude_joints", [])
         self.task_description = task_description
         self.joint_names = joint_names
-        self._is_vla = model_type in ("pi0", "pi05", "smolvla")
+        _ensure_model_loader_importable()
+        from lerobot_control.policy_registry import is_language_conditioned
+
+        self._is_language_conditioned = is_language_conditioned(model_type)
         self._exclude_indices: set[int] | None = None
         self._delta_ref_state: np.ndarray | None = None
         self._prev_gt_action: np.ndarray | None = None  # for delta_sequential GT computation
@@ -84,8 +87,8 @@ class EpisodeEvaluator:
     ) -> EpisodeResult:
         """Evaluate model predictions for a single episode."""
         _ensure_model_loader_importable()
-        from lerobot_control.model_loader import reset_model_state
         from lerobot_control.delta_restore import restore_delta_chunk
+        from lerobot_control.model_loader import reset_model_state
 
         predicted_actions: list[np.ndarray] = []
         ground_truth_actions: list[np.ndarray] = []
@@ -139,14 +142,7 @@ class EpisodeEvaluator:
 
             # Preprocess + inference
             with torch.inference_mode():
-                if self._is_vla:
-                    processed = self._preprocess_vla(obs)
-                else:
-                    if self.preprocessor:
-                        processed = self.preprocessor(dict(obs))
-                    else:
-                        processed = obs
-                    processed = self._move_to_device(processed)
+                processed = self._preprocess_policy_observation(obs)
 
                 action_raw = self.model.select_action(processed)  # normalized tensor
 
@@ -215,15 +211,14 @@ class EpisodeEvaluator:
             raw_ground_truth=np.stack(raw_gt_list) if raw_gt_list else None,
         )
 
-    def _preprocess_vla(self, obs: dict) -> dict:
-        """Preprocess observation for VLA models (pi0, pi05, smolvla)."""
+    def _preprocess_policy_observation(self, obs: dict) -> dict:
+        """Preprocess observation, adding a task prompt for language-conditioned policies."""
+        batch = dict(obs)
+        if self._is_language_conditioned and self.task_description:
+            batch["task"] = [self.task_description]
         if self.preprocessor:
-            batch = dict(obs)
-            if self.task_description:
-                batch["task"] = [self.task_description]
-            processed = self.preprocessor(batch)
-            return self._move_to_device(processed)
-        return self._move_to_device(obs)
+            batch = self.preprocessor(batch)
+        return self._move_to_device(batch)
 
     def _move_to_device(self, data):
         """Recursively move tensors to the configured device."""

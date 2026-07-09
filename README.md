@@ -15,14 +15,14 @@
 <p align="center">
   <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.12+-yellow?style=flat-square&logo=python&logoColor=white" alt="Python" /></a>
   <a href="https://docs.ros.org/en/jazzy/"><img src="https://img.shields.io/badge/ROS2-Jazzy-22314E?style=flat-square&logo=ros&logoColor=white" alt="ROS2" /></a>
-  <a href="https://github.com/huggingface/lerobot"><img src="https://img.shields.io/badge/LeRobot-v0.5.1-ff69b4?style=flat-square&logo=huggingface&logoColor=white" alt="LeRobot" /></a>
+  <a href="https://github.com/huggingface/lerobot"><img src="https://img.shields.io/badge/LeRobot-v0.6.0-ff69b4?style=flat-square&logo=huggingface&logoColor=white" alt="LeRobot" /></a>
 </p>
 
 ---
 
 ## 📢 News
 
-- **2026-05-08** — Upgraded to LeRobot v0.5.1.
+- **2026-07-09** — Upgraded to LeRobot v0.6.0 and added selected native foundation-policy support.
 
 _See full history in [CHANGELOG.md](CHANGELOG.md)._
 
@@ -44,7 +44,7 @@ This repository is the embodied AI stack for the Anvil platform — data convers
 |-------|-------------|
 | **0. Data Collection** | Record teleoperation demos as MCAP files via [Anvil Devbox](https://shop.anvil.bot/products/anvil-devbox) |
 | **1. Data Conversion** | Convert MCAP recordings to LeRobot v3.0 datasets → [docs/data-conversion.md](docs/data-conversion.md) |
-| **2. Model Training** | Train ACT, Diffusion, SmolVLA, Pi0, or Pi0.5 policies → [docs/training.md](docs/training.md) |
+| **2. Model Training** | Train ACT, Diffusion, Pi/SmolVLA, and selected LeRobot foundation policies → [docs/training.md](docs/training.md) |
 | **3. Offline Evaluation** | Validate model performance against ground-truth before deploying → [docs/evaluation.md](docs/evaluation.md) |
 | **4. Run Inference** | Deploy trained models on a GPU PC via ROS2 CycloneDDS → [docs/inference.md](docs/inference.md) |
 
@@ -55,6 +55,7 @@ This repository is the embodied AI stack for the Anvil platform — data convers
 ## Table of Contents
 
 - [Installation](#installation)
+  - [Available Models](#available-models)
 - [Usage](#usage)
 - [Project Structure](#project-structure)
 
@@ -79,20 +80,33 @@ cd anvil-embodied-ai
 uv sync --all-packages
 ```
 
-ACT and Diffusion are included in the base install. For other policies:
+### Available Models
 
-| Extra | Policy |
-|-------|--------|
-| `smolvla` | SmolVLA |
-| `pi` | Pi0 / Pi0.5 |
+This repo supports these native LeRobot v0.6 policies for training, offline evaluation, and ROS2 inference:
+
+| Model | `--policy.type` | Install extra | Notes |
+|-------|----------------|---------------|-------|
+| ACT | `act` | Base install | Action-chunking baseline |
+| Diffusion | `diffusion` | Base install | Diffusion Policy baseline |
+| SmolVLA | `smolvla` | `smolvla` | Language-conditioned VLA; RTC chunk inference |
+| Pi0 | `pi0` | `pi` | Flow-matching VLA; RTC chunk inference |
+| Pi0.5 | `pi05` | `pi` | Larger Pi0 variant; RTC chunk inference |
+| MolmoAct2 | `molmoact2` | `molmoact2` | Language-conditioned foundation policy; RTC chunk inference |
+| GR00T N1.7 | `groot` | `groot` | Language-conditioned foundation policy; RTC chunk inference |
+| Multitask DiT | `multi_task_dit` | `multi_task_dit` | Language-conditioned foundation policy; synchronous chunk inference |
+| EVO1 | `evo1` | `evo1` | Language-conditioned foundation policy; RTC chunk inference |
+| FastWAM | `fastwam` | `fastwam` | Language-conditioned foundation policy; synchronous chunk inference |
+| VLA-JEPA | `vla_jepa` | `vla_jepa` | Language-conditioned foundation policy; synchronous chunk inference |
+
+Use `all` to install every optional policy extra:
 
 ```bash
 uv sync --all-packages --extra smolvla
 uv sync --all-packages --extra smolvla --extra pi   # multiple
-uv sync --all-packages --extra all                  # all policies
+uv sync --all-packages --extra all                  # all optional policies
 ```
 
-> **GPU / CUDA note:** The root `pyproject.toml` pins torch to the `cu128` index. If your machine uses a different CUDA driver, change `pytorch-cu128` → `pytorch-cu126` (or `cu124`) in `pyproject.toml` before syncing.
+> **GPU / CUDA note:** The root `pyproject.toml` pins torch to the `cu132` index. If your machine uses a different CUDA driver, change `pytorch-cu132` to the matching PyTorch CUDA index before syncing.
 
 ---
 
@@ -108,7 +122,7 @@ Convert MCAP recordings into LeRobot v3.0 datasets. Pick the config that matches
 
 ### 2. Model Training ([doc](docs/training.md))
 
-Train ACT, Diffusion, SmolVLA, Pi0, or Pi0.5 policies. Checkpoints saved to `model_zoo/<dataset>/<job_name>/`.
+Train ACT, Diffusion, Pi/SmolVLA, and selected LeRobot-native foundation policies. Checkpoints saved to `model_zoo/<dataset>/<job_name>/`.
 
 ### 3. Offline Evaluation ([doc](docs/evaluation.md))
 

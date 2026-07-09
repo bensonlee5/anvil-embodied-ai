@@ -11,8 +11,8 @@
 # Model
 # -----------------------------------------------------------------------------
 model:
-  # VLA task prompt — required for SmolVLA / Pi0 / Pi0.5, ignored for ACT / Diffusion
-  # Set to the task the model was trained/finetuned for.
+  # Language task prompt - required for language-conditioned policies,
+  # ignored for ACT / Diffusion. Set to the task used for training/finetuning.
   task_description: "Pick up the block and place it on the target location"
 
 # -----------------------------------------------------------------------------
@@ -39,7 +39,11 @@ inference_tuning:
     #   Default (null) = num_train_timesteps (100). Set 10 for real-time (78ms vs 711ms).
     num_inference_steps: 10
 
-  # RTC — VLA models only (pi0, pi0.5, smolvla), always enabled
+  # Synchronous chunked foundation policies (multi_task_dit, fastwam, vla_jepa)
+  sync:
+    n_action_steps: null
+
+  # RTC chunk policies (pi0, pi0.5, smolvla, molmoact2, groot, evo1), always enabled
   #   Background thread runs inference continuously; control loop reads from ActionQueue.
   rtc:
     # inference_delay: fallback step-count for first inference before LatencyTracker kicks in.
