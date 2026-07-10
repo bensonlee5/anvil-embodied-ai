@@ -104,7 +104,7 @@ services:
               capabilities: [gpu]
     # MODEL_PATH is mounted at /workspace/model. HF cache structure (blobs/ + snapshots/)
     # is auto-detected by inference_node — no need for MODEL_SNAPSHOT_PATH.
-    command: ros2 launch lerobot_control inference.launch.py model_path:=/workspace/model config_file:=/workspace/config.yaml debug:=${DEBUG:-false} control_frequency:=${CONTROL_FREQ:-30.0}
+    command: ros2 launch lerobot_control inference.launch.py model_path:=/workspace/model config_file:=/workspace/config.yaml debug:=${DEBUG:-false} control_frequency:=${CONTROL_FREQ:-30.0} max_run_seconds:=${MAX_RUN_SECONDS:-0}
 
 networks:
   ros2_test:

@@ -19,6 +19,8 @@ Publishes:
 
 import json
 import math
+import os
+import signal
 import threading
 import time
 from collections import deque
@@ -144,6 +146,19 @@ class LeRobotInferenceNode(Node):
             callback_group=self._publish_callback_group if not self.echo_topic_only else MutuallyExclusiveCallbackGroup(),
         )
 
+        # Optional one-shot episode limit. Created after model loading so startup
+        # time does not reduce the active control window.
+        self._max_run_timer = None
+        if not self.echo_topic_only and self.max_run_seconds > 0:
+            self._max_run_timer = self.create_timer(
+                self.max_run_seconds,
+                self._on_max_run_elapsed,
+                callback_group=self._publish_callback_group,
+            )
+            self.get_logger().info(
+                f"Maximum run duration: {self.max_run_seconds:.1f}s (starts after model load)"
+            )
+
         # Windowed rate tracking
         self._prev_log_time: float | None = None
         self._prev_joint_count: int = 0
@@ -164,11 +179,13 @@ class LeRobotInferenceNode(Node):
         self.declare_parameter("debug", False)
         self.declare_parameter("debug_image_dir", "")
         self.declare_parameter("monitor_enable", False)
+        self.declare_parameter("max_run_seconds", 0)
 
         # Static fields from ROS2 params
         self.echo_topic_only = self.get_parameter("echo_topic_only").value
         self._debug = self.get_parameter("debug").value
         self._monitor_enable: bool = self.get_parameter("monitor_enable").value
+        self.max_run_seconds: float = float(self.get_parameter("max_run_seconds").value)
         _debug_image_dir = self.get_parameter("debug_image_dir").value
         self._debug_image_dir: str | None = _debug_image_dir if _debug_image_dir else None
         self.model_path = self.get_parameter("model_path").value
@@ -985,6 +1002,29 @@ class LeRobotInferenceNode(Node):
                 f" (threshold: {exp * 2 / 3:.0f} Hz, expected: {exp:.0f} Hz)"
             )
 
+    def _on_max_run_elapsed(self) -> None:
+        """Stop command publication and shut down when the episode limit expires."""
+        if self._shutting_down:
+            return
+
+        self.get_logger().warning(
+            f"Maximum run duration reached ({self.max_run_seconds:.1f}s); stopping inference"
+        )
+        self._shutting_down = True
+        for timer_name in ("_obs_timer", "_publish_timer", "_stats_timer", "_max_run_timer"):
+            timer = getattr(self, timer_name, None)
+            if timer:
+                timer.cancel()
+
+        if self._has_published:
+            self._publish_hold_position()
+            self._has_published = False
+
+        # Deliver SIGINT to the main thread so the existing KeyboardInterrupt/finally
+        # path shuts down the executor, workers, shared memory, and ROS context cleanly.
+        os.kill(os.getpid(), signal.SIGINT)
+
+
     def reset_policy(self) -> None:
         """Reset policy state."""
         if not hasattr(self, "model"):
@@ -1035,7 +1075,7 @@ class LeRobotInferenceNode(Node):
 
         # Cancel timers before stopping the inference thread so no new callbacks
         # are scheduled while we wait for the thread to join.
-        for timer_name in ("_obs_timer", "_publish_timer", "_stats_timer"):
+        for timer_name in ("_obs_timer", "_publish_timer", "_stats_timer", "_max_run_timer"):
             timer = getattr(self, timer_name, None)
             if timer:
                 timer.cancel()

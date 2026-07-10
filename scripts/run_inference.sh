@@ -22,6 +22,7 @@
 #   MODEL_PATH           Path to model checkpoint (required for production inference)
 #   CONFIG_FILE          Path to inference config YAML (default: ./configs/lerobot_control/inference_default.yaml)
 #   INFERENCE_ARM        Required for real-robot startup: left | right | bimanual
+#   MAX_RUN_SECONDS      Maximum active inference duration after model load (0 = unlimited)
 #   IMAGE_TAG            Docker image tag (default: latest)
 #   ROS_DOMAIN_ID        ROS domain ID
 #   HF_CACHE             HuggingFace cache dir (needed for VLA models)
