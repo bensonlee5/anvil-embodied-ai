@@ -91,22 +91,22 @@ joint_names:
   #   For bimanual Anvil robot: {l: left, r: right} → 2×8 = 16 DOF state
   #   For pi05_libero_finetuned (single-arm, 8 DOF): use only one arm below.
   arm_mapping:
-    # l: left
-    r: right
+    l: left
+    # r: right
 
   # Anvil bimanual model uses position + velocity + effort as state inputs
   state_features:
     - position
 
 # -----------------------------------------------------------------------------
-# Arm Configuration — Lego-in-cup VLA-JEPA (single right arm)
+# Arm Configuration — Lego-in-cup VLA-JEPA (single left arm)
 # -----------------------------------------------------------------------------
-# The checkpoint emits one 8-joint action vector for the right follower arm.
+# The checkpoint emits one 8-joint action vector for the left follower arm.
 
 arms:
-  right:
-    ros_prefix: "follower_r"
-    command_topic: "/follower_r_forward_position_controller/commands"
+  left:
+    ros_prefix: "follower_l"
+    command_topic: "/follower_l_forward_position_controller/commands"
     action_start: 0
     action_end: 8
 
