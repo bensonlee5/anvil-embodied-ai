@@ -96,6 +96,42 @@ def reconcile_vla_jepa_postprocessor(policy_cfg: Any, postprocessor: Any) -> lis
 
     postprocessor.steps = reconciled_steps
     return removed_steps
+def _normalize_uint8_camera_images(batch: dict[str, Any], camera_keys: tuple[str, ...]):
+    """Match LeRobot's training-loop camera conversion for custom eval hooks."""
+    import torch
+
+    for camera_key in camera_keys:
+        image = batch.get(camera_key)
+        if isinstance(image, torch.Tensor) and image.dtype == torch.uint8:
+            batch[camera_key] = image.to(dtype=torch.float32) / 255.0
+    return batch
+
+
+def _remap_molmoact2_processor_overrides(policy_cfg: Any, kwargs: dict[str, Any]):
+    """Use MolmoAct2's registered masked-normalizer step names for fine-tuning."""
+    if getattr(policy_cfg, "type", None) != "molmoact2":
+        return kwargs
+
+    remapped_kwargs = dict(kwargs)
+    for kwarg_name, generic_name, molmoact2_name in (
+        (
+            "preprocessor_overrides",
+            "normalizer_processor",
+            "molmoact2_masked_normalizer",
+        ),
+        (
+            "postprocessor_overrides",
+            "unnormalizer_processor",
+            "molmoact2_masked_unnormalizer",
+        ),
+    ):
+        overrides = remapped_kwargs.get(kwarg_name)
+        if not isinstance(overrides, dict) or generic_name not in overrides:
+            continue
+        overrides = dict(overrides)
+        overrides[molmoact2_name] = overrides.pop(generic_name)
+        remapped_kwargs[kwarg_name] = overrides
+    return remapped_kwargs
 
 
 class TransformRunner:
@@ -125,6 +161,7 @@ class TransformRunner:
         self._test_dataloader = None  # set by apply_val_loss_patch when make_dataset is called
         self._split_info: dict = {}   # populated by patched_make_dataset
         self._preprocessor = None     # captured from make_pre_post_processors
+        self._camera_keys: tuple[str, ...] = ()  # captured from dataset metadata
         self._val_freq = 0            # set from cfg.log_freq * 5 inside patched_make_dataset
         self._resume_step = 0         # for absolute step tracking in wandb
         # List of (module, attr_name, original_value) — populated by _patch in
@@ -481,6 +518,7 @@ class TransformRunner:
             # Full dataset to determine total episode count
             full_dataset = original_make_dataset(cfg)
             total_ep = full_dataset.num_episodes
+            val_state._camera_keys = tuple(full_dataset.meta.camera_keys)
 
             # Compute delta action stats when DeltaActionTransform is active so
             # that lerobot's normalizer is built against delta statistics rather
@@ -599,8 +637,9 @@ class TransformRunner:
         original_make_processors = policy_factory_mod.make_pre_post_processors
 
         def capturing_make_processors(*args, **kwargs):
+            policy_cfg = kwargs.get("policy_cfg", args[0] if args else None)
+            kwargs = _remap_molmoact2_processor_overrides(policy_cfg, kwargs)
             preprocessor, postprocessor = original_make_processors(*args, **kwargs)
-            policy_cfg = args[0] if args else kwargs.get("policy_cfg")
             if getattr(policy_cfg, "type", None) == "vla_jepa":
                 removed_steps = reconcile_vla_jepa_postprocessor(policy_cfg, postprocessor)
                 if removed_steps:
@@ -687,6 +726,9 @@ class TransformRunner:
 
                     with torch.no_grad():
                         for batch in val_state._test_dataloader:
+                            batch = _normalize_uint8_camera_images(
+                                batch, val_state._camera_keys
+                            )
                             if preprocessor is not None:
                                 batch = preprocessor(batch)
                             else:
@@ -782,6 +824,9 @@ class TransformRunner:
 
             with torch.no_grad():
                 for val_batch in val_state._val_dataloader:
+                    val_batch = _normalize_uint8_camera_images(
+                        val_batch, val_state._camera_keys
+                    )
                     if preprocessor is not None:
                         val_batch = preprocessor(val_batch)
                     else:
