@@ -107,6 +107,7 @@ read_dotenv_value() {
 }
 
 if [[ -f "${REPO_ROOT}/.env" ]]; then
+    MODEL_PATH="${MODEL_PATH:-$(read_dotenv_value MODEL_PATH)}"
     CONFIG_FILE="${CONFIG_FILE:-$(read_dotenv_value CONFIG_FILE)}"
     INFERENCE_ARM="${INFERENCE_ARM:-$(read_dotenv_value INFERENCE_ARM)}"
 fi

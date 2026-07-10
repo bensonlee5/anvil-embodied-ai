@@ -42,6 +42,13 @@ inference_tuning:
   # Synchronous chunked foundation policies (multi_task_dit, fastwam, vla_jepa)
   sync:
     n_action_steps: null
+    # Optional: predict complete chunks in a worker while publishing the current
+    # chunk. Keep disabled unless the policy supports predict_action_chunk.
+    async_prefetch: false
+    # Refill when this many actions remain. Size it to ceil(p95_latency * control_hz).
+    prefetch_threshold: 12
+    # Prefer the chunk predicted from the newer observation over an older queued tail.
+    replace_pending_actions: true
 
   # RTC chunk policies (pi0, pi0.5, smolvla, molmoact2, groot, evo1), always enabled
   #   Background thread runs inference continuously; control loop reads from ActionQueue.

@@ -39,7 +39,11 @@ from .action_limiter import ActionLimiter
 from .delta_restore import resolve_action_type, restore_delta_chunk
 from .metrics_tracker import MetricsTracker
 from .model_loader import ModelLoader, set_deterministic_mode
-from .policy_registry import is_language_conditioned, uses_rtc_inference
+from .policy_registry import (
+    is_language_conditioned,
+    uses_rtc_inference,
+    uses_sync_chunk_inference,
+)
 
 
 class LeRobotInferenceNode(Node):
@@ -71,8 +75,12 @@ class LeRobotInferenceNode(Node):
             debug_image_dir=self._debug_image_dir,
         )
 
-        # Non-RTC action buffer (ACT/Diffusion/sync policies put actions here from obs timer)
-        self._classic_action_deque: deque = deque(maxlen=10)
+        # Non-RTC action buffer. It is intentionally unbounded: deque(maxlen=10)
+        # silently discarded the beginning of chunks longer than ten actions.
+        # Sync-prefetch access is protected because inference and publication run
+        # in separate threads.
+        self._classic_action_deque: deque = deque()
+        self._classic_action_lock = threading.Lock()
         # Reference joint state captured at the moment each action chunk was
         # generated (in model/observation order).  All queued steps in the chunk
         # share this reference so delta restoration is consistent with training.
@@ -128,6 +136,8 @@ class LeRobotInferenceNode(Node):
         self._smooth_tracker = None
         self._queue_depths: deque[int] = deque(maxlen=300)
         self._rtc_skip_count: int = 0
+        self._sync_skip_count: int = 0
+        self._sync_replaced_actions: int = 0
         if self._debug and not self.echo_topic_only and hasattr(self, "model"):
             from .action_smooth_tracker import ActionSmoothTracker
 
@@ -258,6 +268,16 @@ class LeRobotInferenceNode(Node):
         return uses_rtc_inference(getattr(self, "model_type", None))
 
     @property
+    def _uses_sync_chunk_inference(self) -> bool:
+        """True for non-RTC policies that return a complete action chunk."""
+        return uses_sync_chunk_inference(getattr(self, "model_type", None))
+
+    @property
+    def _uses_sync_prefetch(self) -> bool:
+        """True when a synchronous chunk policy has background prefetch enabled."""
+        return self._uses_sync_chunk_inference and getattr(self, "_sync_prefetch_enabled", False)
+
+    @property
     def _is_language_conditioned(self) -> bool:
         """True if the loaded model consumes a natural-language task prompt."""
         return is_language_conditioned(getattr(self, "model_type", None))
@@ -352,6 +372,9 @@ class LeRobotInferenceNode(Node):
         tuning = self._tuning_config
         config_overrides = {}
 
+        self._sync_config_yaml = tuning.get("sync", {})
+        self._sync_prefetch_enabled = bool(self._sync_config_yaml.get("async_prefetch", False))
+
         if self._uses_rtc_inference:
             self.rtc_config_yaml = tuning.get("rtc", {})
         elif self.model_type == "diffusion":
@@ -372,7 +395,7 @@ class LeRobotInferenceNode(Node):
                     )
                     config_overrides["n_action_steps"] = 1
         else:
-            sync = tuning.get("sync", {})
+            sync = self._sync_config_yaml
             if sync.get("n_action_steps") is not None:
                 config_overrides["n_action_steps"] = sync["n_action_steps"]
 
@@ -401,10 +424,15 @@ class LeRobotInferenceNode(Node):
             self._setup_rtc_inference()
             self._start_inference_thread()
         else:
-            # Synchronous policies: initialise latency tracker
+            # Non-RTC policies share the lightweight latency tracker. Chunked
+            # foundation policies may additionally run their forward pass in a
+            # background thread so action publication never blocks on inference.
             from lerobot_control.latency_stats import LatencyStats
 
             self._latency_tracker = LatencyStats(maxlen=100)
+            if self._uses_sync_prefetch:
+                self._setup_sync_prefetch()
+                self._start_sync_prefetch_thread()
 
         if self._is_language_conditioned and not self.task_description:
             self.get_logger().warn(
@@ -490,6 +518,14 @@ class LeRobotInferenceNode(Node):
             logger.info(f"│  max_guidance_weight= {rtc.get('max_guidance_weight', 10.0):<6}                           │")
             logger.info(f"│  attention_schedule = {rtc.get('prefix_attention_schedule', 'EXP'):<6}                           │")
             logger.info(f"│  queue_threshold    = {rtc.get('queue_trigger_threshold', 30):<4}                             │")
+            logger.info("└─────────────────────────────────────────────────────────┘")
+
+        if not self.echo_topic_only and self._uses_sync_prefetch:
+            logger.info("┌─ Sync chunk prefetch ────────────────────────────────────┐")
+            logger.info("│  Status:              ENABLED                           │")
+            logger.info(f"│  refill threshold   = {self._sync_prefetch_threshold:<4} actions                     │")
+            logger.info(f"│  replace queued tail= {str(self._sync_replace_pending):<5}                            │")
+            logger.info("│  forward pass runs off the control/publish timers       │")
             logger.info("└─────────────────────────────────────────────────────────┘")
 
     def _setup_publishers(self) -> None:
@@ -598,6 +634,125 @@ class LeRobotInferenceNode(Node):
             self._action_queue.merge(original, processed, new_delay, idx_before)
             self.metrics.record_inference()
 
+    def _setup_sync_prefetch(self) -> None:
+        """Initialise background prefetch for non-RTC chunk policies.
+
+        These policies expose ``predict_action_chunk`` but their stock
+        ``select_action`` implementation does inference only after its private
+        queue is empty. Running that call from the observation timer guarantees
+        a publication gap whenever inference latency exceeds one control period.
+        The prefetch worker instead fills the node-owned action deque while the
+        publish timer continues consuming the previous chunk.
+        """
+        n_action_steps = int(
+            getattr(self.model.config, "n_action_steps", None)
+            or getattr(self.model.config, "chunk_size", 1)
+        )
+        configured_threshold = int(
+            self._sync_config_yaml.get("prefetch_threshold", n_action_steps)
+        )
+        if configured_threshold < 0:
+            raise ValueError("inference_tuning.sync.prefetch_threshold must be >= 0")
+
+        self._sync_prefetch_threshold = min(configured_threshold, n_action_steps)
+        self._sync_replace_pending = bool(
+            self._sync_config_yaml.get("replace_pending_actions", True)
+        )
+        if configured_threshold > n_action_steps:
+            self.get_logger().info(
+                "Sync prefetch threshold clamped to n_action_steps: "
+                f"{configured_threshold} -> {n_action_steps}"
+            )
+
+        self._sync_obs_lock = threading.Lock()
+        self._sync_model_lock = threading.Lock()
+        self._sync_latest_raw_obs: dict | None = None
+        self._sync_generation = 0
+        self._inference_stop = threading.Event()
+
+    def _start_sync_prefetch_thread(self) -> None:
+        """Start the background worker for synchronous chunk policies."""
+        self._inference_thread = threading.Thread(
+            target=self._sync_prefetch_loop,
+            name="sync-chunk-prefetch",
+            daemon=True,
+        )
+        self._inference_thread.start()
+
+    def _sync_prefetch_loop(self) -> None:
+        """Predict and enqueue complete chunks ahead of the publish cursor."""
+        while not self._inference_stop.is_set():
+            with self._classic_action_lock:
+                queue_depth = len(self._classic_action_deque)
+            if queue_depth > self._sync_prefetch_threshold:
+                time.sleep(0.005)
+                continue
+
+            with self._sync_obs_lock:
+                raw_obs = self._sync_latest_raw_obs
+                generation = self._sync_generation
+            if raw_obs is None:
+                time.sleep(0.005)
+                continue
+
+            try:
+                observation = self._preprocess_policy_observation(raw_obs)
+                t0 = time.monotonic()
+                with self._sync_model_lock, torch.inference_mode():
+                    chunk = self.model.predict_action_chunk(observation)
+                elapsed = time.monotonic() - t0
+                self._latency_tracker.add(elapsed)
+
+                if isinstance(chunk, torch.Tensor) and chunk.dim() == 3:
+                    chunk = chunk.squeeze(0)
+                if self.postprocessor:
+                    chunk = self.postprocessor.process_action(chunk)
+                if isinstance(chunk, torch.Tensor):
+                    chunk = chunk.detach().cpu().numpy()
+                chunk = np.asarray(chunk, dtype=np.float64)
+                if chunk.ndim == 1:
+                    chunk = chunk[np.newaxis, :]
+
+                n_action_steps = int(
+                    getattr(self.model.config, "n_action_steps", None) or len(chunk)
+                )
+                chunk = chunk[:n_action_steps]
+                if len(chunk) == 0:
+                    raise RuntimeError("predict_action_chunk returned no executable actions")
+
+                if self.use_delta_actions:
+                    state = raw_obs.get("observation.state")
+                    if state is None:
+                        raise RuntimeError(
+                            f"{self.action_type} requires observation.state for sync prefetch"
+                        )
+                    if isinstance(state, torch.Tensor):
+                        state = state.detach().cpu().numpy()
+                    state = np.asarray(state, dtype=np.float64).reshape(-1)
+                    chunk = restore_delta_chunk(
+                        chunk,
+                        state,
+                        self.action_type,
+                        self._delta_exclude_indices,
+                    )
+
+                # reset_policy may have invalidated this in-flight prediction.
+                with self._sync_obs_lock:
+                    if generation != self._sync_generation:
+                        continue
+                with self._classic_action_lock:
+                    if self._sync_replace_pending:
+                        self._sync_replaced_actions += len(self._classic_action_deque)
+                        self._classic_action_deque.clear()
+                    self._classic_action_deque.extend(np.copy(action) for action in chunk)
+                self.metrics.record_inference()
+            except Exception as e:
+                import traceback
+
+                self.get_logger().error(f"[sync-prefetch] predict_action_chunk failed: {e}")
+                self.get_logger().error(traceback.format_exc())
+                time.sleep(0.01)
+
     def _preprocess_policy_observation(self, observation: dict) -> dict:
         """Preprocess a raw observation, adding a task prompt when required.
 
@@ -629,6 +784,11 @@ class LeRobotInferenceNode(Node):
                 obs = self._preprocess_policy_observation(observation)
                 with self._obs_lock:
                     self._latest_obs = obs
+            elif self._uses_sync_prefetch:
+                # Keep only the newest raw observation. Preprocessing is performed
+                # once per chunk in the worker rather than at the 30 Hz timer rate.
+                with self._sync_obs_lock:
+                    self._sync_latest_raw_obs = dict(observation)
             else:
                 # Keep a reference to the raw (unnormalised) observation so we can
                 # capture the joint-state baseline when a new chunk is generated.
@@ -717,7 +877,8 @@ class LeRobotInferenceNode(Node):
                     elif not hasattr(self.model, "_queues") and self._delta_ref_state is not None:
                         action = restore_delta_chunk(action[np.newaxis], self._delta_ref_state, self.action_type, self._delta_exclude_indices)[0]
 
-                self._classic_action_deque.append(action)
+                with self._classic_action_lock:
+                    self._classic_action_deque.append(action)
                 if _will_run_forward:
                     self.metrics.record_inference()
 
@@ -748,9 +909,16 @@ class LeRobotInferenceNode(Node):
                     action = action.squeeze(0)
                 action = action.cpu().numpy()
         else:
-            if not self._classic_action_deque:
-                return
-            action = self._classic_action_deque.popleft()
+            with self._classic_action_lock:
+                if not self._classic_action_deque:
+                    if self._uses_sync_prefetch:
+                        self._sync_skip_count += 1
+                        if self._debug:
+                            self._queue_depths.append(0)
+                    return
+                action = self._classic_action_deque.popleft()
+                if self._uses_sync_prefetch and self._debug:
+                    self._queue_depths.append(len(self._classic_action_deque))
 
         try:
             self._publish_action(action)
@@ -986,6 +1154,37 @@ class LeRobotInferenceNode(Node):
         """Log synchronous policy stats."""
         self._log_stats_common(logger, inference_hz, action_output_hz, stats)
 
+        if self._uses_sync_prefetch and hasattr(self, "_latency_tracker"):
+            latency = self._latency_tracker.mean()
+            if latency > 0:
+                n_action_steps = int(
+                    getattr(self.model.config, "n_action_steps", None)
+                    or getattr(self.model.config, "chunk_size", 0)
+                )
+                capacity_hz = n_action_steps / latency if n_action_steps else 0.0
+                coverage_s = n_action_steps / self.control_freq if self.control_freq else 0.0
+                margin_s = coverage_s - latency
+                with self._classic_action_lock:
+                    queue_size = len(self._classic_action_deque)
+                logger.info(f"  Sync queue   {queue_size}")
+                logger.info(
+                    f"  Chunk supply {capacity_hz:.1f} action/s  "
+                    f"coverage={coverage_s * 1000:.0f}ms  margin={margin_s * 1000:+.0f}ms"
+                )
+
+        if self._debug and self._uses_sync_prefetch and self._queue_depths:
+            depths = np.array(self._queue_depths)
+            total_ticks = len(self._queue_depths)
+            skip_pct = self._sync_skip_count / max(total_ticks, 1) * 100
+            logger.info(
+                f"  [DEBUG] Queue depth min={depths.min()} mean={depths.mean():.0f} "
+                f"max={depths.max()} starved={skip_pct:.1f}% "
+                f"replaced={self._sync_replaced_actions}"
+            )
+            self._queue_depths.clear()
+            self._sync_skip_count = 0
+            self._sync_replaced_actions = 0
+
         if self._debug and self._smooth_tracker is not None:
             smooth = self._smooth_tracker.get_stats()
             if smooth:
@@ -1030,7 +1229,17 @@ class LeRobotInferenceNode(Node):
         if not hasattr(self, "model"):
             return
         self.get_logger().info("Resetting policy state...")
-        if hasattr(self.model, "reset"):
+        if self._uses_sync_prefetch:
+            with self._sync_obs_lock:
+                self._sync_generation += 1
+                self._sync_latest_raw_obs = None
+            with self._classic_action_lock:
+                self._classic_action_deque.clear()
+            with self._sync_model_lock:
+                if hasattr(self.model, "reset"):
+                    self.model.reset()
+            self._reset_delta_state()
+        elif hasattr(self.model, "reset"):
             self.model.reset()
         if self._uses_rtc_inference and hasattr(self, "_action_queue"):
             from lerobot.policies.rtc.action_queue import ActionQueue

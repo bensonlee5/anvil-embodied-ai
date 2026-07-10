@@ -31,6 +31,18 @@ POLICY_EXTRAS = {
     "vla_jepa": "vla_jepa",
 }
 
+MODEL_PROFILES = {
+    "lego-in-cup/act": {
+        "config_file": "./configs/lerobot_control/inference_lego_in_cup_act.yaml",
+        "inference_arm": "left",
+        "extras": "vla_jepa",
+    },
+    "lego-in-cup/vla-jepa": {
+        "config_file": "./configs/lerobot_control/inference_lego_in_cup_vla_jepa.yaml",
+        "inference_arm": "left",
+    },
+}
+
 
 @dataclass(frozen=True)
 class Checkpoint:
@@ -327,6 +339,9 @@ def command_set(args: argparse.Namespace) -> None:
         known = ", ".join(sorted(POLICY_EXTRAS))
         raise SystemExit(f"No LEROBOT_EXTRAS mapping for policy '{checkpoint.policy_type}'. Known: {known}")
 
+    selector_job = checkpoint.selector.rsplit(":", 1)[0]
+    profile = MODEL_PROFILES.get(selector_job, {})
+    configured_extras = profile.get("extras", extras or old_env.get("LEROBOT_EXTRAS", ""))
     CURRENT_LINK.parent.mkdir(parents=True, exist_ok=True)
     if CURRENT_LINK.exists() or CURRENT_LINK.is_symlink():
         CURRENT_LINK.unlink()
@@ -336,18 +351,22 @@ def command_set(args: argparse.Namespace) -> None:
 
     updates = {
         "MODEL_PATH": _format_env_path(checkpoint.path),
-        "LEROBOT_EXTRAS": extras,
+        "LEROBOT_EXTRAS": configured_extras,
+        "ACTION_TYPE": checkpoint.action_type,
     }
+    if profile:
+        updates["CONFIG_FILE"] = profile["config_file"]
+        updates["INFERENCE_ARM"] = profile["inference_arm"]
     _write_env(env_path, updates)
 
     print("Set inference model:")
-    print(f"  MODEL_PATH={updates['MODEL_PATH']}")
-    print(f"  LEROBOT_EXTRAS={updates['LEROBOT_EXTRAS'] or '<empty>'}")
+    for key, value in updates.items():
+        print(f"  {key}={value or '<empty>'}")
     print(f"  current -> {rel_target}")
     print("")
     _show_checkpoint(checkpoint.path, _read_env(env_path))
 
-    if old_env.get("LEROBOT_EXTRAS") != extras:
+    if old_env.get("LEROBOT_EXTRAS") != configured_extras:
         print("")
         print("LEROBOT_EXTRAS changed; rebuild the inference image before running:")
         print("  docker compose build")

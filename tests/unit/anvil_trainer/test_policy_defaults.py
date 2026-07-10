@@ -49,3 +49,43 @@ def test_sync_foundation_policy_skips_backbone_flags():
 
     assert not any(arg.startswith("--policy.vision_backbone=") for arg in argv)
     assert not any(arg.startswith("--policy.pretrained_backbone_weights=") for arg in argv)
+
+
+def test_yaml_config_values_are_not_replaced_by_cli_defaults(tmp_path):
+    recipe = tmp_path / "train.yaml"
+    recipe.write_text(
+        """
+dataset:
+  repo_id: local
+  root: /workspace/datasets/lego-in-cup
+  video_backend: pyav
+policy:
+  path: lerobot/VLA-JEPA-Pretrain
+  push_to_hub: false
+output_dir: model_zoo/lego-in-cup/chunk20
+job_name: lego-in-cup-chunk20
+steps: 30000
+env_eval_freq: 0
+save_freq: 2500
+wandb:
+  project: lego-in-cup
+  disable_artifact: true
+""".strip()
+    )
+
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = ["anvil-trainer", f"--config_path={recipe}"]
+        config = TrainingConfig.from_env_and_args()
+
+        assert config.dataset_root == "/workspace/datasets/lego-in-cup"
+        assert config.output_dir == "model_zoo/lego-in-cup/chunk20"
+        assert not any(arg.startswith("--output_dir=") for arg in sys.argv)
+        assert not any(arg.startswith("--job_name=") for arg in sys.argv)
+        assert "--steps=100000" not in sys.argv
+        assert "--save_freq=10000" not in sys.argv
+        assert "--policy.push_to_hub=false" not in sys.argv
+        assert "--wandb.disable_artifact=true" not in sys.argv
+        assert not any(arg.startswith("--policy.vision_backbone=") for arg in sys.argv)
+    finally:
+        sys.argv = original_argv

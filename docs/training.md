@@ -139,6 +139,7 @@ Additional delta flags:
 **Guidance by policy:**
 - **Diffusion** → `ACTION: MIN_MAX`. Diffusion clips denoised actions to ±1 at every step (`clip_sample=True`); `MEAN_STD` silently truncates extreme actions.
 - **ACT / SmolVLA / Pi0 / Pi0.5 / selected LeRobot foundation policies** → `ACTION: MEAN_STD` unless the specific pretrained checkpoint documents a different mapping
+- **VLA-JEPA** → `ACTION: MIN_MAX`. Its postprocessor clips normalized actions before unnormalizing, so the training range must map to [−1, 1].
 
 > **Pi0.5 note:** Pi0.5's default normalization is `QUANTILE10`, which requires `q01`/`q99` fields in `stats.json`. Datasets converted with `mcap-convert` do not include these. Use `MEAN_STD` instead (recommended), or see [Pi0.5](#pi05) for the quantile augmentation option.
 
@@ -497,10 +498,10 @@ These policies are supported through LeRobot v0.6 factory classes and optional d
 |---|---|---|
 | `molmoact2` | `--extra molmoact2` | RTC background chunking |
 | `groot` | `--extra groot` | RTC background chunking |
-| `multi_task_dit` | `--extra multi_task_dit` | Synchronous `select_action` chunking |
+| `multi_task_dit` | `--extra multi_task_dit` | Synchronous chunking; optional background prefetch |
 | `evo1` | `--extra evo1` | RTC background chunking |
-| `fastwam` | `--extra fastwam` | Synchronous `select_action` chunking |
-| `vla_jepa` | `--extra vla_jepa` | Synchronous `select_action` chunking |
+| `fastwam` | `--extra fastwam` | Synchronous chunking; optional background prefetch |
+| `vla_jepa` | `--extra vla_jepa` | Synchronous chunking; optional background prefetch |
 
 Use the same Anvil dataset flags as other policies, plus the model-specific LeRobot flags required by the pretrained checkpoint you choose. Always pass `--task-description`; it is saved into `anvil_config.json` and reused by offline evaluation and ROS2 inference.
 
@@ -512,6 +513,32 @@ uv run anvil-trainer \
   --task-description="Grab the gray doll and put it in the bucket" \
   --wandb.enable=false
 ```
+
+#### Lego-in-cup VLA-JEPA world model
+
+The checked-in recipe at
+`configs/training/lego_in_cup_vla_jepa_world_model.yaml` is the reproducible
+configuration for this task. It includes the left-arm feature layout, camera
+renames, continuous gripper index, world-model settings, and a 20-action
+training horizon:
+
+```bash
+uv run anvil-trainer \
+  --config_path=configs/training/lego_in_cup_vla_jepa_world_model.yaml \
+  --task-description="Pick up the Lego brick and place it in the cup." \
+  --action-type=absolute \
+  --split-ratio=8,1,1
+```
+
+At the 30 Hz robot control rate, 20 actions cover 667 ms. This is longer than
+the measured 566 ms p95 inference time, so `async_prefetch` can finish the next
+chunk before the current one is exhausted. Keep `n_action_steps: null` in the
+inference YAML so deployment inherits the horizon actually used during
+training.
+
+The existing seven-action checkpoint remains usable with prefetch, but it can
+supply only about 21 actions/s at 338 ms mean inference latency. The longer
+trained chunk is required for gap-free 30 Hz execution.
 
 ---
 

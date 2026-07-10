@@ -41,7 +41,20 @@ inference_tuning:
 
   # Synchronous chunked foundation policies (multi_task_dit, fastwam, vla_jepa)
   sync:
+    # Keep the checkpoint's trained execution horizon. The current model uses 7;
+    # the longer-horizon training preset uses 20.
     n_action_steps: null
+    # Run predict_action_chunk in a worker while the publish timer consumes the
+    # previous chunk. This raises the current 7-step model's supply from ~13 to
+    # ~21 actions/s and provides uninterrupted 30 Hz output for the 20-step model.
+    async_prefetch: true
+    # Begin the next forward pass with this many queued actions remaining.
+    # 18 actions = 600 ms at 30 Hz, above the measured ~566 ms p95.
+    # It is automatically clamped to n_action_steps for the existing 7-step model.
+    prefetch_threshold: 18
+    # A completed chunk was predicted from a newer observation than any actions
+    # still queued. Replace that older tail instead of growing command latency.
+    replace_pending_actions: true
 
   # RTC chunk policies (pi0, pi0.5, smolvla, molmoact2, groot, evo1), always enabled
   #   Background thread runs inference continuously; control loop reads from ActionQueue.
@@ -138,5 +151,5 @@ cameras:
 #   Commands are held at last published value until cumulative change exceeds this threshold.
 #   Default: disabled (null). Recommended starting value: 0.05.
 safety:
-  max_position_delta: 0.1
+  max_position_delta: 0.03
   min_position_delta: null

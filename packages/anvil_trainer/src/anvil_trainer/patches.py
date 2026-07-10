@@ -48,6 +48,56 @@ log = logging.getLogger(__name__)
 _PATCHED_MARKER = object()
 
 
+def reconcile_vla_jepa_postprocessor(policy_cfg: Any, postprocessor: Any) -> list[str]:
+    """Make inherited VLA-JEPA processor steps match the effective config.
+
+    LeRobot loads serialized processors from ``policy.path`` before applying the
+    fine-tuning config. Without reconciliation, a recipe that disables gripper
+    snapping can still save the base model's snapping steps. The upstream step
+    classes also omit their dimension/threshold from ``get_config``, so enabled
+    steps need explicit serialization metadata.
+
+    Returns the class names of disabled steps that were removed.
+    """
+    from lerobot.policies.vla_jepa.processor_vla_jepa import (
+        BinarizeGripperProcessorStep,
+        ClipActionsProcessorStep,
+        PreSnapGripperProcessorStep,
+    )
+
+    reconciled_steps = []
+    removed_steps = []
+    for step in postprocessor.steps:
+        if isinstance(step, ClipActionsProcessorStep):
+            if not policy_cfg.clip_normalized_actions:
+                removed_steps.append(type(step).__name__)
+                continue
+        elif isinstance(step, PreSnapGripperProcessorStep):
+            if not policy_cfg.pre_snap_gripper_action:
+                removed_steps.append(type(step).__name__)
+                continue
+            step.gripper_dim = policy_cfg.gripper_dim
+            step.threshold = policy_cfg.gripper_threshold
+            step.get_config = lambda cfg=policy_cfg: {
+                "gripper_dim": cfg.gripper_dim,
+                "threshold": cfg.gripper_threshold,
+            }
+        elif isinstance(step, BinarizeGripperProcessorStep):
+            if not policy_cfg.binarize_gripper_action:
+                removed_steps.append(type(step).__name__)
+                continue
+            step.gripper_dim = policy_cfg.gripper_dim
+            step.threshold = policy_cfg.gripper_threshold
+            step.get_config = lambda cfg=policy_cfg: {
+                "gripper_dim": cfg.gripper_dim,
+                "threshold": cfg.gripper_threshold,
+            }
+        reconciled_steps.append(step)
+
+    postprocessor.steps = reconciled_steps
+    return removed_steps
+
+
 class TransformRunner:
     """
     Manages and applies dataset transforms.
@@ -550,6 +600,21 @@ class TransformRunner:
 
         def capturing_make_processors(*args, **kwargs):
             preprocessor, postprocessor = original_make_processors(*args, **kwargs)
+            policy_cfg = args[0] if args else kwargs.get("policy_cfg")
+            if getattr(policy_cfg, "type", None) == "vla_jepa":
+                removed_steps = reconcile_vla_jepa_postprocessor(policy_cfg, postprocessor)
+                if removed_steps:
+                    log.info(
+                        "[vla_jepa] Removed disabled pretrained postprocessor steps: %s",
+                        ", ".join(removed_steps),
+                    )
+                log.info(
+                    "[vla_jepa] Reconciled postprocessor with effective config "
+                    "(gripper_dim=%d, pre_snap=%s, binarize=%s)",
+                    policy_cfg.gripper_dim,
+                    policy_cfg.pre_snap_gripper_action,
+                    policy_cfg.binarize_gripper_action,
+                )
             val_state._preprocessor = preprocessor
             return preprocessor, postprocessor
 

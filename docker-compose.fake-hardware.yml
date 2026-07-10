@@ -92,6 +92,8 @@ services:
       # ACT/Diffusion models are unaffected if this is empty.
       # HuggingFace needs write access to create lock files when loading tokenizers.
       - ${HF_CACHE:-.docker_empty_hf_cache}:/root/.cache/huggingface
+      # ACT needs torchvision's pretrained ResNet vision-backbone weights at runtime.
+      - ${TORCH_CACHE:-.docker_empty_torch_cache}:/root/.cache/torch
     depends_on:
       mock-robot:
         condition: service_healthy
