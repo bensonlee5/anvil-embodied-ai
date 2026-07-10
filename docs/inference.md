@@ -30,6 +30,24 @@ cp .env.example .env
 
 For full descriptions and defaults, see [`.env.example`](../.env.example).
 
+### Inference Model Helper
+
+Use `scripts/inference_model.py` to inspect local checkpoints and update `.env`:
+
+```bash
+./scripts/inference_model.py list
+./scripts/inference_model.py show
+./scripts/inference_model.py set lego-in-cup/act:last
+./scripts/inference_model.py set lego-in-cup/vla-jepa:last
+```
+
+`set` updates `MODEL_PATH`, sets the matching `LEROBOT_EXTRAS`, and refreshes
+`model_zoo/inference/current`. If `LEROBOT_EXTRAS` changes, rebuild the image:
+
+```bash
+docker compose build
+```
+
 ### Supported Policy Types
 
 Docker inference uses `LEROBOT_EXTRAS` to decide which optional LeRobot policy dependencies are built into the image. Set multiple extras as a comma-separated list, then rebuild with `docker compose build`.

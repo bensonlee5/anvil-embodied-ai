@@ -30,7 +30,7 @@ x-image-build: &image_build
   dockerfile: docker/inference/Dockerfile
   args:
     LEROBOT_VERSION: ${LEROBOT_VERSION:-0.6.0}
-    LEROBOT_EXTRAS: ${LEROBOT_EXTRAS:-diffusion}
+    LEROBOT_EXTRAS: ${LEROBOT_EXTRAS-diffusion}
 
 x-base: &base
   image: ghcr.io/anvil-robotics/lerobot-inference:${IMAGE_TAG:-latest}
