@@ -398,6 +398,12 @@ uv run anvil-trainer \
 
 Always fine-tune from `lerobot/smolvla_base` — training from scratch is not recommended. `--policy.load_vlm_weights=true` is required when loading from a SmolVLA checkpoint; without it only the VLM backbone loads and the action expert starts from random weights.
 
+For Lego-in-cup, use the checked-in
+`configs/training/lego_in_cup_smolvla.yaml` recipe. It fine-tunes the RoboTwin
+checkpoint with explicit 8D state/action features, freezes the vision encoder,
+trains the action expert and state projection, and preserves its native
+50-action (1.667 s at 30 Hz) training horizon.
+
 **Task description**
 
 A clear, specific description improves performance significantly. The description is saved to `anvil_config.json` in the checkpoint and auto-loaded at inference. Mirror it in your inference YAML:
@@ -519,7 +525,7 @@ uv run anvil-trainer \
 The checked-in recipe at
 `configs/training/lego_in_cup_vla_jepa_world_model.yaml` is the reproducible
 configuration for this task. It includes the left-arm feature layout, camera
-renames, continuous gripper index, world-model settings, and a 20-action
+renames, continuous gripper index, world-model settings, and a 32-action
 training horizon:
 
 ```bash
@@ -530,11 +536,10 @@ uv run anvil-trainer \
   --split-ratio=8,1,1
 ```
 
-At the 30 Hz robot control rate, 20 actions cover 667 ms. This is longer than
-the measured 566 ms p95 inference time, so `async_prefetch` can finish the next
-chunk before the current one is exhausted. Keep `n_action_steps: null` in the
-inference YAML so deployment inherits the horizon actually used during
-training.
+At the 30 Hz robot control rate, 32 actions cover 1.067 seconds. This is
+comfortably above the measured 566 ms p95 inference time while focusing the
+world-model objective on near-term dynamics. Async prefetch starts immediately
+and replaces the unconsumed tail when a fresh prediction completes.
 
 The existing seven-action checkpoint remains usable with prefetch, but it can
 supply only about 21 actions/s at 338 ms mean inference latency. The longer

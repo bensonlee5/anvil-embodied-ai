@@ -2,7 +2,7 @@
 
 ``TransformRunner`` owns:
     * The active list of :class:`~anvil_trainer.transforms.Transform` instances.
-    * Five monkey-patches on lerobot modules:
+    * Six monkey-patches on lerobot modules:
         - ``apply_dataset_patches`` — patches ``LeRobotDataset.__getitem__``.
         - ``apply_val_loss_patch`` — patches ``make_dataset`` (split creation),
           captures the preprocessor from ``make_pre_post_processors``, and
@@ -14,6 +14,8 @@
           loss computation.
         - ``apply_metadata_patches`` — runs ``Transform.patch_metadata`` hooks
           (currently used by ``ExcludeObservationTransform``).
+        - ``apply_vla_jepa_input_patch`` — keeps stacked proprioception aligned
+          with the current image instead of leaking the final future state.
 
 Patches are installed via :meth:`TransformRunner._patch` which tracks the
 original attribute so :meth:`restore_all_patches` can put everything back.
@@ -96,6 +98,8 @@ def reconcile_vla_jepa_postprocessor(policy_cfg: Any, postprocessor: Any) -> lis
 
     postprocessor.steps = reconciled_steps
     return removed_steps
+
+
 def _normalize_uint8_camera_images(batch: dict[str, Any], camera_keys: tuple[str, ...]):
     """Match LeRobot's training-loop camera conversion for custom eval hooks."""
     import torch
@@ -105,6 +109,13 @@ def _normalize_uint8_camera_images(batch: dict[str, Any], camera_keys: tuple[str
         if isinstance(image, torch.Tensor) and image.dtype == torch.uint8:
             batch[camera_key] = image.to(dtype=torch.float32) / 255.0
     return batch
+
+
+def _vla_jepa_current_state(state: Any):
+    """Return state at observation time t in LeRobot's [B, 1, D] policy shape."""
+    if state.ndim > 2:
+        state = state[:, 0, :]
+    return state.unsqueeze(1) if state.ndim == 2 else state
 
 
 def _remap_molmoact2_processor_overrides(policy_cfg: Any, kwargs: dict[str, Any]):
@@ -442,6 +453,30 @@ class TransformRunner:
         """Apply metadata patches before importing lerobot training."""
         for transform in self.active_transforms:
             transform.patch_metadata(self.config, runner=self)
+
+    def apply_vla_jepa_input_patch(self) -> None:
+        """Align VLA-JEPA proprioception with its current-frame visual input.
+
+        World-model training requests observations ``[t, ..., t+7]``. Upstream
+        LeRobot 0.6 correctly uses image ``t`` for action conditioning but takes
+        state ``t+7`` from the same stacked batch, leaking future information and
+        creating a train/inference mismatch. Preserve the future video stack for
+        JEPA loss while replacing only the action model's state input with state
+        ``t``.
+        """
+        from lerobot.policies.vla_jepa.modeling_vla_jepa import VLAJEPAPolicy
+
+        original_prepare = VLAJEPAPolicy._prepare_model_inputs
+
+        def patched_prepare(policy, batch, training=True):
+            inputs = original_prepare(policy, batch, training=training)
+            state = batch.get("observation.state")
+            if state is not None:
+                inputs["state"] = _vla_jepa_current_state(state).float()
+            return inputs
+
+        self._patch(VLAJEPAPolicy, "_prepare_model_inputs", patched_prepare)
+        log.info("[vla_jepa] Patched stacked state selection to use observation time t")
 
     def apply_dataset_patches(self) -> None:
         """Patch LeRobotDataset.__getitem__ to apply transforms and fix index mapping.
@@ -883,6 +918,7 @@ def patched_lerobot(config: TrainingConfig):
     runner = TransformRunner(config)
     runner.log_config()
     runner.apply_metadata_patches()
+    runner.apply_vla_jepa_input_patch()
     runner.apply_processor_compat_aliases()
     # Note: the dataset/val_loss/checkpoint patches need lerobot imported,
     # which apply_metadata_patches typically triggers indirectly via

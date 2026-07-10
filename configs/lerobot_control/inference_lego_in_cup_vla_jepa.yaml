@@ -41,17 +41,19 @@ inference_tuning:
 
   # Synchronous chunked foundation policies (multi_task_dit, fastwam, vla_jepa)
   sync:
-    # Keep the checkpoint's trained execution horizon. The current model uses 7;
-    # the longer-horizon training preset uses 20.
+    # Keep the checkpoint's trained chunk length. The current model uses 7;
+    # the world-model fine-tuning preset uses 32. With async
+    # replacement this is coverage capacity, not an open-loop commitment.
     n_action_steps: null
     # Run predict_action_chunk in a worker while the publish timer consumes the
     # previous chunk. This raises the current 7-step model's supply from ~13 to
-    # ~21 actions/s and provides uninterrupted 30 Hz output for the 20-step model.
+    # ~21 actions/s; the 32-step model has ample queue coverage at 30 Hz.
     async_prefetch: true
-    # Begin the next forward pass with this many queued actions remaining.
-    # 18 actions = 600 ms at 30 Hz, above the measured ~566 ms p95.
-    # It is automatically clamped to n_action_steps for the existing 7-step model.
-    prefetch_threshold: 18
+    # Begin the next forward pass immediately after a chunk is queued. The
+    # completed prediction replaces the unconsumed tail, so replanning follows
+    # inference cadence while each prediction still covers 32 future steps.
+    # Automatically clamped to n_action_steps for older, shorter checkpoints.
+    prefetch_threshold: 32
     # A completed chunk was predicted from a newer observation than any actions
     # still queued. Replace that older tail instead of growing command latency.
     replace_pending_actions: true
