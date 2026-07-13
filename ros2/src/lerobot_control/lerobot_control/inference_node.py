@@ -41,7 +41,7 @@ from .metrics_tracker import MetricsTracker
 from .model_loader import ModelLoader, set_deterministic_mode
 from .policy_registry import (
     is_language_conditioned,
-    uses_rtc_inference,
+    resolve_rtc_inference,
     uses_sync_chunk_inference,
 )
 
@@ -246,6 +246,16 @@ class LeRobotInferenceNode(Node):
         # model_type: from config.json, YAML overrides if explicitly set
         model_cfg = self.config.get("model", {})
         self.model_type = model_cfg.get("type") or meta.get("model_type")
+        rtc_requested = self._tuning_config.get("rtc", {}).get("enabled")
+        if rtc_requested is not None and not isinstance(rtc_requested, bool):
+            raise ValueError("inference_tuning.rtc.enabled must be true, false, or null")
+        if self.echo_topic_only:
+            self._rtc_enabled = False
+        else:
+            self._rtc_enabled = resolve_rtc_inference(
+                self.model_type,
+                rtc_requested,
+            )
 
         # action_type from anvil_config.json — must match training
         self.action_type: str = resolve_action_type(meta)
@@ -265,7 +275,7 @@ class LeRobotInferenceNode(Node):
     @property
     def _uses_rtc_inference(self) -> bool:
         """True if the loaded model uses RTC background chunk inference."""
-        return uses_rtc_inference(getattr(self, "model_type", None))
+        return getattr(self, "_rtc_enabled", False)
 
     @property
     def _uses_sync_chunk_inference(self) -> bool:
@@ -275,7 +285,11 @@ class LeRobotInferenceNode(Node):
     @property
     def _uses_sync_prefetch(self) -> bool:
         """True when a synchronous chunk policy has background prefetch enabled."""
-        return self._uses_sync_chunk_inference and getattr(self, "_sync_prefetch_enabled", False)
+        return (
+            not self._uses_rtc_inference
+            and self._uses_sync_chunk_inference
+            and getattr(self, "_sync_prefetch_enabled", False)
+        )
 
     @property
     def _is_language_conditioned(self) -> bool:
@@ -367,6 +381,11 @@ class LeRobotInferenceNode(Node):
             seed = self.get_parameter("deterministic_seed").value
             set_deterministic_mode(seed)
             self.get_logger().info(f"Deterministic mode enabled with seed={seed}")
+        if self.model_type == "vla_jepa" and self._uses_rtc_inference and self.use_delta_actions:
+            raise ValueError(
+                "VLA-JEPA RTC currently requires an absolute-action checkpoint; "
+                f"checkpoint action_type is '{self.action_type}'"
+            )
 
         # Resolve inference tuning per model type
         tuning = self._tuning_config
@@ -412,6 +431,7 @@ class LeRobotInferenceNode(Node):
             config_overrides=config_overrides,
             logger=self.get_logger(),
             rtc_config_yaml=getattr(self, "rtc_config_yaml", {}),
+            rtc_enabled=self._uses_rtc_inference,
         )
         self.model, self.preprocessor, self.postprocessor = loader.load_with_processors()
         self._loader = loader
@@ -558,6 +578,7 @@ class LeRobotInferenceNode(Node):
         self._inference_stop = threading.Event()
         self._rtc_threshold = self.rtc_config_yaml.get("queue_trigger_threshold", 30)
         self._rtc_delay_fallback = self.rtc_config_yaml.get("inference_delay", 4)
+        self._rtc_starvation_warned = False
 
     def _start_inference_thread(self) -> None:
         """Start the background RTC inference daemon thread."""
@@ -626,6 +647,17 @@ class LeRobotInferenceNode(Node):
             #   original = raw (for RTC guidance of the next chunk)
             #   processed = denormalized (ready for the robot)
             original = raw.squeeze(0).clone()
+            chunk_steps = len(original)
+            if new_delay >= chunk_steps:
+                if not self._rtc_starvation_warned:
+                    self.get_logger().error(
+                        "[RTC] Inference latency consumed the complete action chunk "
+                        f"(delay={new_delay}, chunk={chunk_steps}); holding the last command"
+                    )
+                self._rtc_starvation_warned = True
+            else:
+                self._rtc_starvation_warned = False
+
             if self.postprocessor:
                 processed = self.postprocessor.process_action(raw.squeeze(0))
             else:

@@ -56,7 +56,7 @@ uv run anvil-trainer \
 | Multitask DiT | `multi_task_dit` | `multi_task_dit` | Synchronous chunk | Language-conditioned foundation policy |
 | EVO1 | `evo1` | `evo1` | RTC chunk | Language-conditioned foundation policy |
 | FastWAM | `fastwam` | `fastwam` | Synchronous chunk | Language-conditioned foundation policy |
-| VLA-JEPA | `vla_jepa` | `vla_jepa` | Synchronous chunk | Language-conditioned foundation policy |
+| VLA-JEPA | `vla_jepa` | `vla_jepa` | Sync default / RTC opt-in | Language-conditioned foundation policy |
 
 This branch intentionally includes only policies exposed as native LeRobot v0.6 policies. OpenVLA-OFT, RDT, TinyVLA, and MiniVLA are adapter/custom-integration work and are not included here.
 
@@ -507,7 +507,7 @@ These policies are supported through LeRobot v0.6 factory classes and optional d
 | `multi_task_dit` | `--extra multi_task_dit` | Synchronous chunking; optional background prefetch |
 | `evo1` | `--extra evo1` | RTC background chunking |
 | `fastwam` | `--extra fastwam` | Synchronous chunking; optional background prefetch |
-| `vla_jepa` | `--extra vla_jepa` | Synchronous chunking; optional background prefetch |
+| `vla_jepa` | `--extra vla_jepa` | Synchronous by default; opt-in full RTC |
 
 Use the same Anvil dataset flags as other policies, plus the model-specific LeRobot flags required by the pretrained checkpoint you choose. Always pass `--task-description`; it is saved into `anvil_config.json` and reused by offline evaluation and ROS2 inference.
 

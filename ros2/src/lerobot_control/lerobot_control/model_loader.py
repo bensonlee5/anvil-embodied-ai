@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from .policy_registry import is_supported_policy, uses_rtc_inference
+from .policy_registry import is_supported_policy, supports_rtc_inference
 
 
 def set_deterministic_mode(seed: int = 42):
@@ -75,6 +75,7 @@ class ModelLoader:
         seed: int = 42,
         config_overrides: dict = None,
         rtc_config_yaml: dict = None,
+        rtc_enabled: bool = False,
     ):
         """
         Initialize model loader.
@@ -91,6 +92,7 @@ class ModelLoader:
             rtc_config_yaml: Dict from the ``rtc:`` YAML section. When set and
                 the model supports RTC chunk inference, RTCConfig is injected
                 after loading.
+            rtc_enabled: Whether the selected runtime should initialise RTC.
         """
         self.model_path = Path(model_path)
         self.device = device
@@ -100,6 +102,7 @@ class ModelLoader:
         self.seed = seed
         self.config_overrides = config_overrides or {}
         self.rtc_config_yaml = rtc_config_yaml or {}
+        self.rtc_enabled = rtc_enabled
         self._model = None
         self._pre_processor = None
         self._post_processor = None
@@ -264,10 +267,10 @@ class ModelLoader:
         Must be called *after* _apply_config_overrides so that any
         n_action_steps override is already in place before RTC initialisation.
         """
-        if not uses_rtc_inference(self.model_type):
+        if not self.rtc_enabled:
             return
-        if not self.rtc_config_yaml:
-            return
+        if not supports_rtc_inference(self.model_type):
+            raise ValueError(f"Policy '{self.model_type}' does not support RTC inference")
 
         try:
             from lerobot.configs.types import RTCAttentionSchedule
@@ -282,7 +285,11 @@ class ModelLoader:
                 max_guidance_weight=self.rtc_config_yaml.get("max_guidance_weight", 10.0),
                 prefix_attention_schedule=schedule,
             )
-            if hasattr(model, "init_rtc_processor"):
+            if self.model_type == "vla_jepa":
+                from .vla_jepa_rtc import install_vla_jepa_rtc
+
+                install_vla_jepa_rtc(model)
+            elif hasattr(model, "init_rtc_processor"):
                 model.init_rtc_processor()
             self._log(
                 "info",

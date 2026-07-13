@@ -76,7 +76,7 @@ def test_smolvla_config_preserves_pretrained_expert_and_freezes_vision() -> None
     assert policy["train_state_proj"] is True
 
 
-def test_vla_jepa_inference_continuously_prefetches_and_replaces_stale_tail() -> None:
+def test_vla_jepa_inference_uses_opt_in_full_rtc() -> None:
     config = yaml.safe_load(
         (
             REPO_ROOT
@@ -86,11 +86,14 @@ def test_vla_jepa_inference_continuously_prefetches_and_replaces_stale_tail() ->
         ).read_text()
     )
     sync = config["inference_tuning"]["sync"]
+    rtc = config["inference_tuning"]["rtc"]
 
     assert sync["n_action_steps"] is None
-    assert sync["async_prefetch"] is True
-    assert sync["prefetch_threshold"] == 32
-    assert sync["replace_pending_actions"] is True
+    assert sync["async_prefetch"] is False
+    assert rtc["enabled"] is True
+    assert rtc["queue_trigger_threshold"] == 32
+    assert rtc["execution_horizon"] == 12
+    assert rtc["prefix_attention_schedule"] == "EXP"
 
 
 def test_vla_jepa_stacked_state_uses_current_observation_not_future_state() -> None:

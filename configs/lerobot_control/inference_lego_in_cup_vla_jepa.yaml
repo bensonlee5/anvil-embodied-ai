@@ -39,34 +39,22 @@ inference_tuning:
     #   Default (null) = num_train_timesteps (100). Set 10 for real-time (78ms vs 711ms).
     num_inference_steps: 10
 
-  # Synchronous chunked foundation policies (multi_task_dit, fastwam, vla_jepa)
+  # Synchronous fallback for VLA-JEPA when rtc.enabled is false.
   sync:
-    # Keep the checkpoint's trained chunk length. The current model uses 7;
-    # the world-model fine-tuning preset uses 32. With async
-    # replacement this is coverage capacity, not an open-loop commitment.
     n_action_steps: null
-    # Run predict_action_chunk in a worker while the publish timer consumes the
-    # previous chunk. This raises the current 7-step model's supply from ~13 to
-    # ~21 actions/s; the 32-step model has ample queue coverage at 30 Hz.
-    async_prefetch: true
-    # Begin the next forward pass immediately after a chunk is queued. The
-    # completed prediction replaces the unconsumed tail, so replanning follows
-    # inference cadence while each prediction still covers 32 future steps.
-    # Automatically clamped to n_action_steps for older, shorter checkpoints.
-    prefetch_threshold: 32
-    # A completed chunk was predicted from a newer observation than any actions
-    # still queued. Replace that older tail instead of growing command latency.
-    replace_pending_actions: true
+    # RTC owns the worker and action queue for this deployment.
+    async_prefetch: false
 
-  # RTC chunk policies (pi0, pi0.5, smolvla, molmoact2, groot, evo1), always enabled
+  # Full RTC: overlapping-prefix guidance plus latency-aligned queue replacement.
   #   Background thread runs inference continuously; control loop reads from ActionQueue.
   rtc:
+    enabled: true
     # inference_delay: fallback step-count for first inference before LatencyTracker kicks in.
     #   Real-robot tuned: ceil(~330ms × 30Hz) ≈ 10. Auto-adjusted after first inference.
     inference_delay: 10
     # queue_trigger_threshold: re-trigger inference when queue depth ≤ this.
     #   Set equal to chunk_size for maximum RTC overlap.
-    queue_trigger_threshold: 50
+    queue_trigger_threshold: 32
     # execution_horizon: steps used from each chunk before re-inferring.
     #   Higher → less frequent inference, slower reaction. Lower → faster reaction.
     execution_horizon: 12

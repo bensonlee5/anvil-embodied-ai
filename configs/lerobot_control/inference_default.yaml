@@ -50,9 +50,11 @@ inference_tuning:
     # Prefer the chunk predicted from the newer observation over an older queued tail.
     replace_pending_actions: true
 
-  # RTC chunk policies (pi0, pi0.5, smolvla, molmoact2, groot, evo1), always enabled
+  # Native RTC policies default on; VLA-JEPA opts in with enabled: true.
   #   Background thread runs inference continuously; control loop reads from ActionQueue.
   rtc:
+    # null preserves the policy default; true opts RTC-capable policies in.
+    enabled: null
     # inference_delay: fallback step-count for first inference before LatencyTracker kicks in.
     #   Real-robot tuned: ceil(~330ms × 30Hz) ≈ 10. Auto-adjusted after first inference.
     inference_delay: 10
