@@ -39,28 +39,22 @@ inference_tuning:
     #   Default (null) = num_train_timesteps (100). Set 10 for real-time (78ms vs 711ms).
     num_inference_steps: 10
 
-  # Synchronous chunked foundation policies (multi_task_dit, fastwam, vla_jepa)
+  # Synchronous fallback for VLA-JEPA when rtc.enabled is false.
   sync:
     n_action_steps: null
-    # Optional: predict complete chunks in a worker while publishing the current
-    # chunk. Keep disabled unless the policy supports predict_action_chunk.
+    # RTC owns the worker and action queue for this deployment.
     async_prefetch: false
-    # Refill when this many actions remain. Size it to ceil(p95_latency * control_hz).
-    prefetch_threshold: 12
-    # Prefer the chunk predicted from the newer observation over an older queued tail.
-    replace_pending_actions: true
 
-  # Native RTC policies default on; VLA-JEPA opts in with enabled: true.
+  # Full RTC: overlapping-prefix guidance plus latency-aligned queue replacement.
   #   Background thread runs inference continuously; control loop reads from ActionQueue.
   rtc:
-    # null preserves the policy default; true opts RTC-capable policies in.
-    enabled: null
+    enabled: true
     # inference_delay: fallback step-count for first inference before LatencyTracker kicks in.
     #   Real-robot tuned: ceil(~330ms × 30Hz) ≈ 10. Auto-adjusted after first inference.
     inference_delay: 10
     # queue_trigger_threshold: re-trigger inference when queue depth ≤ this.
     #   Set equal to chunk_size for maximum RTC overlap.
-    queue_trigger_threshold: 50
+    queue_trigger_threshold: 32
     # execution_horizon: steps used from each chunk before re-inferring.
     #   Higher → less frequent inference, slower reaction. Lower → faster reaction.
     execution_horizon: 12
@@ -101,17 +95,16 @@ joint_names:
   #   For pi05_libero_finetuned (single-arm, 8 DOF): use only one arm below.
   arm_mapping:
     l: left
-    r: right
+    # r: right
 
   # Anvil bimanual model uses position + velocity + effort as state inputs
   state_features:
     - position
 
 # -----------------------------------------------------------------------------
-# Arm Configuration
+# Arm Configuration — Lego-in-cup VLA-JEPA (single left arm)
 # -----------------------------------------------------------------------------
-# ML model outputs: action = [left_joints..., right_joints...]
-# Split and publish to separate controller topics
+# The checkpoint emits one 8-joint action vector for the left follower arm.
 
 arms:
   left:
@@ -119,11 +112,6 @@ arms:
     command_topic: "/follower_l_forward_position_controller/commands"
     action_start: 0
     action_end: 8
-  right:
-    ros_prefix: "follower_r"
-    command_topic: "/follower_r_forward_position_controller/commands"
-    action_start: 8
-    action_end: 16
 
 # -----------------------------------------------------------------------------
 # Camera Configuration
@@ -137,8 +125,6 @@ cameras:
   # mapping: ROS topic -> ML model camera name (must match training config)
   mapping:
     "/cam_waist/image_raw/compressed": "waist"
-    "/cam_wrist_r/image_raw/compressed": "wrist_r"
-    "/cam_chest/image_raw/compressed": "chest"
     "/cam_wrist_l/image_raw/compressed": "wrist_l"
 
   # fps_overrides: per-topic overrides for cameras running at a different rate.
@@ -154,7 +140,6 @@ cameras:
 #   Use to overcome motor friction when model delta outputs are too small to move joints.
 #   Commands are held at last published value until cumulative change exceeds this threshold.
 #   Default: disabled (null). Recommended starting value: 0.05.
-# Uncomment to override defaults:
-# safety:
-#   max_position_delta: 0.1
-#   min_position_delta: 0.05
+safety:
+  max_position_delta: 0.03
+  min_position_delta: null

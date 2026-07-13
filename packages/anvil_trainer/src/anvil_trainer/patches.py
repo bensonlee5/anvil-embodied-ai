@@ -2,7 +2,7 @@
 
 ``TransformRunner`` owns:
     * The active list of :class:`~anvil_trainer.transforms.Transform` instances.
-    * Five monkey-patches on lerobot modules:
+    * Six monkey-patches on lerobot modules:
         - ``apply_dataset_patches`` — patches ``LeRobotDataset.__getitem__``.
         - ``apply_val_loss_patch`` — patches ``make_dataset`` (split creation),
           captures the preprocessor from ``make_pre_post_processors``, and
@@ -14,6 +14,8 @@
           loss computation.
         - ``apply_metadata_patches`` — runs ``Transform.patch_metadata`` hooks
           (currently used by ``ExcludeObservationTransform``).
+        - ``apply_vla_jepa_input_patch`` — keeps stacked proprioception aligned
+          with the current image instead of leaking the final future state.
 
 Patches are installed via :meth:`TransformRunner._patch` which tracks the
 original attribute so :meth:`restore_all_patches` can put everything back.
@@ -48,6 +50,56 @@ log = logging.getLogger(__name__)
 _PATCHED_MARKER = object()
 
 
+def reconcile_vla_jepa_postprocessor(policy_cfg: Any, postprocessor: Any) -> list[str]:
+    """Make inherited VLA-JEPA processor steps match the effective config.
+
+    LeRobot loads serialized processors from ``policy.path`` before applying the
+    fine-tuning config. Without reconciliation, a recipe that disables gripper
+    snapping can still save the base model's snapping steps. The upstream step
+    classes also omit their dimension/threshold from ``get_config``, so enabled
+    steps need explicit serialization metadata.
+
+    Returns the class names of disabled steps that were removed.
+    """
+    from lerobot.policies.vla_jepa.processor_vla_jepa import (
+        BinarizeGripperProcessorStep,
+        ClipActionsProcessorStep,
+        PreSnapGripperProcessorStep,
+    )
+
+    reconciled_steps = []
+    removed_steps = []
+    for step in postprocessor.steps:
+        if isinstance(step, ClipActionsProcessorStep):
+            if not policy_cfg.clip_normalized_actions:
+                removed_steps.append(type(step).__name__)
+                continue
+        elif isinstance(step, PreSnapGripperProcessorStep):
+            if not policy_cfg.pre_snap_gripper_action:
+                removed_steps.append(type(step).__name__)
+                continue
+            step.gripper_dim = policy_cfg.gripper_dim
+            step.threshold = policy_cfg.gripper_threshold
+            step.get_config = lambda cfg=policy_cfg: {
+                "gripper_dim": cfg.gripper_dim,
+                "threshold": cfg.gripper_threshold,
+            }
+        elif isinstance(step, BinarizeGripperProcessorStep):
+            if not policy_cfg.binarize_gripper_action:
+                removed_steps.append(type(step).__name__)
+                continue
+            step.gripper_dim = policy_cfg.gripper_dim
+            step.threshold = policy_cfg.gripper_threshold
+            step.get_config = lambda cfg=policy_cfg: {
+                "gripper_dim": cfg.gripper_dim,
+                "threshold": cfg.gripper_threshold,
+            }
+        reconciled_steps.append(step)
+
+    postprocessor.steps = reconciled_steps
+    return removed_steps
+
+
 def _normalize_uint8_camera_images(batch: dict[str, Any], camera_keys: tuple[str, ...]):
     """Match LeRobot's training-loop camera conversion for custom eval hooks."""
     import torch
@@ -57,6 +109,13 @@ def _normalize_uint8_camera_images(batch: dict[str, Any], camera_keys: tuple[str
         if isinstance(image, torch.Tensor) and image.dtype == torch.uint8:
             batch[camera_key] = image.to(dtype=torch.float32) / 255.0
     return batch
+
+
+def _vla_jepa_current_state(state: Any):
+    """Return state at observation time t in LeRobot's [B, 1, D] policy shape."""
+    if state.ndim > 2:
+        state = state[:, 0, :]
+    return state.unsqueeze(1) if state.ndim == 2 else state
 
 
 def _remap_molmoact2_processor_overrides(policy_cfg: Any, kwargs: dict[str, Any]):
@@ -395,6 +454,30 @@ class TransformRunner:
         for transform in self.active_transforms:
             transform.patch_metadata(self.config, runner=self)
 
+    def apply_vla_jepa_input_patch(self) -> None:
+        """Align VLA-JEPA proprioception with its current-frame visual input.
+
+        World-model training requests observations ``[t, ..., t+7]``. Upstream
+        LeRobot 0.6 correctly uses image ``t`` for action conditioning but takes
+        state ``t+7`` from the same stacked batch, leaking future information and
+        creating a train/inference mismatch. Preserve the future video stack for
+        JEPA loss while replacing only the action model's state input with state
+        ``t``.
+        """
+        from lerobot.policies.vla_jepa.modeling_vla_jepa import VLAJEPAPolicy
+
+        original_prepare = VLAJEPAPolicy._prepare_model_inputs
+
+        def patched_prepare(policy, batch, training=True):
+            inputs = original_prepare(policy, batch, training=training)
+            state = batch.get("observation.state")
+            if state is not None:
+                inputs["state"] = _vla_jepa_current_state(state).float()
+            return inputs
+
+        self._patch(VLAJEPAPolicy, "_prepare_model_inputs", patched_prepare)
+        log.info("[vla_jepa] Patched stacked state selection to use observation time t")
+
     def apply_dataset_patches(self) -> None:
         """Patch LeRobotDataset.__getitem__ to apply transforms and fix index mapping.
 
@@ -592,6 +675,20 @@ class TransformRunner:
             policy_cfg = kwargs.get("policy_cfg", args[0] if args else None)
             kwargs = _remap_molmoact2_processor_overrides(policy_cfg, kwargs)
             preprocessor, postprocessor = original_make_processors(*args, **kwargs)
+            if getattr(policy_cfg, "type", None) == "vla_jepa":
+                removed_steps = reconcile_vla_jepa_postprocessor(policy_cfg, postprocessor)
+                if removed_steps:
+                    log.info(
+                        "[vla_jepa] Removed disabled pretrained postprocessor steps: %s",
+                        ", ".join(removed_steps),
+                    )
+                log.info(
+                    "[vla_jepa] Reconciled postprocessor with effective config "
+                    "(gripper_dim=%d, pre_snap=%s, binarize=%s)",
+                    policy_cfg.gripper_dim,
+                    policy_cfg.pre_snap_gripper_action,
+                    policy_cfg.binarize_gripper_action,
+                )
             val_state._preprocessor = preprocessor
             return preprocessor, postprocessor
 
@@ -821,6 +918,7 @@ def patched_lerobot(config: TrainingConfig):
     runner = TransformRunner(config)
     runner.log_config()
     runner.apply_metadata_patches()
+    runner.apply_vla_jepa_input_patch()
     runner.apply_processor_compat_aliases()
     # Note: the dataset/val_loss/checkpoint patches need lerobot imported,
     # which apply_metadata_patches typically triggers indirectly via

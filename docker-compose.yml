@@ -6,7 +6,7 @@ services:
       dockerfile: docker/inference/Dockerfile
       args:
         LEROBOT_VERSION: ${LEROBOT_VERSION:-0.6.0}
-        LEROBOT_EXTRAS: ${LEROBOT_EXTRAS:-diffusion}
+        LEROBOT_EXTRAS: ${LEROBOT_EXTRAS-diffusion}
     container_name: lerobot-inference
     network_mode: host
     ipc: host
@@ -28,6 +28,9 @@ services:
       # HF_CACHE — VLA models (pi0/pi05/smolvla) need PaliGemma tokenizer at runtime.
       # HuggingFace needs write access to create lock files when loading tokenizers.
       - ${HF_CACHE:-.docker_empty_hf_cache}:/root/.cache/huggingface
+      # ACT initializes its vision backbone from torchvision's pretrained ResNet weights.
+      # Keep Torch Hub downloads across container recreation and model switching.
+      - ${TORCH_CACHE:-.docker_empty_torch_cache}:/root/.cache/torch
       # DEBUG=true: pre-model input frames saved here for training/inference comparison
       - ./debug_images:/workspace/debug_images
     deploy:
@@ -37,7 +40,7 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    command: ros2 launch lerobot_control inference.launch.py model_path:=/workspace/model config_file:=/workspace/config.yaml echo_topic_only:=${ECHO_TOPIC_ONLY:-false} debug:=${DEBUG:-false} monitor_enable:=${MONITOR_ENABLE:-false} control_frequency:=${CONTROL_FREQ:-30.0}
+    command: ros2 launch lerobot_control inference.launch.py model_path:=/workspace/model config_file:=/workspace/config.yaml echo_topic_only:=${ECHO_TOPIC_ONLY:-false} debug:=${DEBUG:-false} monitor_enable:=${MONITOR_ENABLE:-false} control_frequency:=${CONTROL_FREQ:-30.0} max_run_seconds:=${MAX_RUN_SECONDS:-0}
 
   inference-monitor:
     image: ghcr.io/anvil-robotics/lerobot-inference:${IMAGE_TAG:-latest}

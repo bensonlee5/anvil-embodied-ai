@@ -42,13 +42,6 @@ inference_tuning:
   # Synchronous chunked foundation policies (multi_task_dit, fastwam, vla_jepa)
   sync:
     n_action_steps: null
-    # Optional: predict complete chunks in a worker while publishing the current
-    # chunk. Keep disabled unless the policy supports predict_action_chunk.
-    async_prefetch: false
-    # Refill when this many actions remain. Size it to ceil(p95_latency * control_hz).
-    prefetch_threshold: 12
-    # Prefer the chunk predicted from the newer observation over an older queued tail.
-    replace_pending_actions: true
 
   # Native RTC policies default on; VLA-JEPA opts in with enabled: true.
   #   Background thread runs inference continuously; control loop reads from ActionQueue.
@@ -101,17 +94,16 @@ joint_names:
   #   For pi05_libero_finetuned (single-arm, 8 DOF): use only one arm below.
   arm_mapping:
     l: left
-    r: right
+    # r: right
 
   # Anvil bimanual model uses position + velocity + effort as state inputs
   state_features:
     - position
 
 # -----------------------------------------------------------------------------
-# Arm Configuration
+# Arm Configuration — Lego-in-cup ACT (single left arm)
 # -----------------------------------------------------------------------------
-# ML model outputs: action = [left_joints..., right_joints...]
-# Split and publish to separate controller topics
+# The checkpoint emits one 8-joint absolute action vector for the left follower arm.
 
 arms:
   left:
@@ -119,11 +111,6 @@ arms:
     command_topic: "/follower_l_forward_position_controller/commands"
     action_start: 0
     action_end: 8
-  right:
-    ros_prefix: "follower_r"
-    command_topic: "/follower_r_forward_position_controller/commands"
-    action_start: 8
-    action_end: 16
 
 # -----------------------------------------------------------------------------
 # Camera Configuration
@@ -137,14 +124,13 @@ cameras:
   # mapping: ROS topic -> ML model camera name (must match training config)
   mapping:
     "/cam_waist/image_raw/compressed": "waist"
-    "/cam_wrist_r/image_raw/compressed": "wrist_r"
-    "/cam_chest/image_raw/compressed": "chest"
     "/cam_wrist_l/image_raw/compressed": "wrist_l"
+    "/cam_chest/image_raw/compressed": "chest"
 
   # fps_overrides: per-topic overrides for cameras running at a different rate.
   #   Omit topics that match the global fps above.
   # fps_overrides:
-  #   "/cam_wrist_r/image_raw/compressed": 60.0
+  #   "/cam_wrist_l/image_raw/compressed": 60.0
 
 # -----------------------------------------------------------------------------
 # Safety Parameters
@@ -154,7 +140,6 @@ cameras:
 #   Use to overcome motor friction when model delta outputs are too small to move joints.
 #   Commands are held at last published value until cumulative change exceeds this threshold.
 #   Default: disabled (null). Recommended starting value: 0.05.
-# Uncomment to override defaults:
-# safety:
-#   max_position_delta: 0.1
-#   min_position_delta: 0.05
+safety:
+  max_position_delta: 0.1
+  min_position_delta: null

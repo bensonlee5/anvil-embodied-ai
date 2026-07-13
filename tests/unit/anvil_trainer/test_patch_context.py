@@ -4,6 +4,8 @@ from __future__ import annotations
 import sys
 import types
 
+import torch
+
 from anvil_trainer.config import TrainingConfig
 from anvil_trainer.patches import TransformRunner
 
@@ -69,6 +71,32 @@ class TestPatchInfrastructure:
         assert m1.x == "new1" and m2.x == "new2"
         runner.restore_all_patches()
         assert m1.x == "orig1" and m2.x == "orig2"
+
+
+class TestVLAJEPAInputPatch:
+    def test_stacked_state_is_replaced_with_current_timestep(self, monkeypatch):
+        from lerobot.policies.vla_jepa.modeling_vla_jepa import VLAJEPAPolicy
+
+        def upstream_prepare(_policy, batch, training=True):
+            del training
+            return {"state": batch["observation.state"][:, -1:, :].float()}
+
+        monkeypatch.setattr(VLAJEPAPolicy, "_prepare_model_inputs", upstream_prepare)
+        runner = TransformRunner(TrainingConfig())
+        runner.apply_vla_jepa_input_patch()
+        state = torch.arange(2 * 8 * 8, dtype=torch.float32).reshape(2, 8, 8)
+
+        result = VLAJEPAPolicy._prepare_model_inputs(
+            object(), {"observation.state": state}, training=True
+        )
+
+        assert torch.equal(result["state"][:, 0], state[:, 0])
+        assert not torch.equal(result["state"][:, 0], state[:, -1])
+        runner.restore_all_patches()
+        restored = VLAJEPAPolicy._prepare_model_inputs(
+            object(), {"observation.state": state}, training=True
+        )
+        assert torch.equal(restored["state"][:, 0], state[:, -1])
 
 
 # =============================================================================

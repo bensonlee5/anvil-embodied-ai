@@ -30,6 +30,24 @@ cp .env.example .env
 
 For full descriptions and defaults, see [`.env.example`](../.env.example).
 
+### Inference Model Helper
+
+Use `scripts/inference_model.py` to inspect local checkpoints and update `.env`:
+
+```bash
+./scripts/inference_model.py list
+./scripts/inference_model.py show
+./scripts/inference_model.py set lego-in-cup/act:last
+./scripts/inference_model.py set lego-in-cup/vla-jepa:last
+```
+
+`set` updates `MODEL_PATH`, sets the matching `LEROBOT_EXTRAS`, and refreshes
+`model_zoo/inference/current`. If `LEROBOT_EXTRAS` changes, rebuild the image:
+
+```bash
+docker compose build
+```
+
 ### Supported Policy Types
 
 Docker inference uses `LEROBOT_EXTRAS` to decide which optional LeRobot policy dependencies are built into the image. Set multiple extras as a comma-separated list, then rebuild with `docker compose build`.
@@ -46,7 +64,7 @@ Docker inference uses `LEROBOT_EXTRAS` to decide which optional LeRobot policy d
 | Multitask DiT | `multi_task_dit` | `multi_task_dit` | Synchronous chunk |
 | EVO1 | `evo1` | `evo1` | RTC chunk |
 | FastWAM | `fastwam` | `fastwam` | Synchronous chunk |
-| VLA-JEPA | `vla_jepa` | `vla_jepa` | Synchronous chunk |
+| VLA-JEPA | `vla_jepa` | `vla_jepa` | Synchronous by default; opt-in RTC |
 
 All language-conditioned policies use `model.task_description` from the inference config, falling back to `anvil_config.json` in the checkpoint when available.
 
@@ -138,11 +156,13 @@ inference_tuning:
 
   sync:
     n_action_steps: null
-    # Synchronous chunked foundation policies (multi_task_dit, fastwam, vla_jepa).
+    # Synchronous policies, including VLA-JEPA unless rtc.enabled is true.
     # null = use checkpoint value.
 
   rtc:
     # RTC chunk policies: SmolVLA, Pi0/Pi0.5, MolmoAct2, GR00T, EVO1.
+    # null preserves policy defaults; true opts an RTC-capable policy in.
+    enabled: null
     inference_delay: 10
     # Fallback step-count before LatencyTracker auto-calibrates.
     # Rule of thumb: ceil(first_inference_ms × control_freq / 1000)

@@ -96,7 +96,7 @@ This repo supports these native LeRobot v0.6 policies for training, offline eval
 | Multitask DiT | `multi_task_dit` | `multi_task_dit` | Language-conditioned foundation policy; synchronous chunk inference |
 | EVO1 | `evo1` | `evo1` | Language-conditioned foundation policy; RTC chunk inference |
 | FastWAM | `fastwam` | `fastwam` | Language-conditioned foundation policy; synchronous chunk inference |
-| VLA-JEPA | `vla_jepa` | `vla_jepa` | Language-conditioned foundation policy; synchronous chunk inference |
+| VLA-JEPA | `vla_jepa` | `vla_jepa` | Language-conditioned foundation policy; synchronous by default, RTC-capable |
 
 Use `all` to install every optional policy extra:
 

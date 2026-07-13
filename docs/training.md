@@ -56,7 +56,7 @@ uv run anvil-trainer \
 | Multitask DiT | `multi_task_dit` | `multi_task_dit` | Synchronous chunk | Language-conditioned foundation policy |
 | EVO1 | `evo1` | `evo1` | RTC chunk | Language-conditioned foundation policy |
 | FastWAM | `fastwam` | `fastwam` | Synchronous chunk | Language-conditioned foundation policy |
-| VLA-JEPA | `vla_jepa` | `vla_jepa` | Synchronous chunk | Language-conditioned foundation policy |
+| VLA-JEPA | `vla_jepa` | `vla_jepa` | Sync default / RTC opt-in | Language-conditioned foundation policy |
 
 This branch intentionally includes only policies exposed as native LeRobot v0.6 policies. OpenVLA-OFT, RDT, TinyVLA, and MiniVLA are adapter/custom-integration work and are not included here.
 
@@ -139,6 +139,7 @@ Additional delta flags:
 **Guidance by policy:**
 - **Diffusion** → `ACTION: MIN_MAX`. Diffusion clips denoised actions to ±1 at every step (`clip_sample=True`); `MEAN_STD` silently truncates extreme actions.
 - **ACT / SmolVLA / Pi0 / Pi0.5 / selected LeRobot foundation policies** → `ACTION: MEAN_STD` unless the specific pretrained checkpoint documents a different mapping
+- **VLA-JEPA** → `ACTION: MIN_MAX`. Its postprocessor clips normalized actions before unnormalizing, so the training range must map to [−1, 1].
 
 > **Pi0.5 note:** Pi0.5's default normalization is `QUANTILE10`, which requires `q01`/`q99` fields in `stats.json`. Datasets converted with `mcap-convert` do not include these. Use `MEAN_STD` instead (recommended), or see [Pi0.5](#pi05) for the quantile augmentation option.
 
@@ -397,6 +398,12 @@ uv run anvil-trainer \
 
 Always fine-tune from `lerobot/smolvla_base` — training from scratch is not recommended. `--policy.load_vlm_weights=true` is required when loading from a SmolVLA checkpoint; without it only the VLM backbone loads and the action expert starts from random weights.
 
+For Lego-in-cup, use the checked-in
+`configs/training/lego_in_cup_smolvla.yaml` recipe. It fine-tunes the RoboTwin
+checkpoint with explicit 8D state/action features, freezes the vision encoder,
+trains the action expert and state projection, and preserves its native
+50-action (1.667 s at 30 Hz) training horizon.
+
 **Task description**
 
 A clear, specific description improves performance significantly. The description is saved to `anvil_config.json` in the checkpoint and auto-loaded at inference. Mirror it in your inference YAML:
@@ -497,10 +504,10 @@ These policies are supported through LeRobot v0.6 factory classes and optional d
 |---|---|---|
 | `molmoact2` | `--extra molmoact2` | RTC background chunking |
 | `groot` | `--extra groot` | RTC background chunking |
-| `multi_task_dit` | `--extra multi_task_dit` | Synchronous `select_action` chunking |
+| `multi_task_dit` | `--extra multi_task_dit` | Synchronous chunking; optional background prefetch |
 | `evo1` | `--extra evo1` | RTC background chunking |
-| `fastwam` | `--extra fastwam` | Synchronous `select_action` chunking |
-| `vla_jepa` | `--extra vla_jepa` | Synchronous `select_action` chunking |
+| `fastwam` | `--extra fastwam` | Synchronous chunking; optional background prefetch |
+| `vla_jepa` | `--extra vla_jepa` | Synchronous by default; opt-in full RTC |
 
 Use the same Anvil dataset flags as other policies, plus the model-specific LeRobot flags required by the pretrained checkpoint you choose. Always pass `--task-description`; it is saved into `anvil_config.json` and reused by offline evaluation and ROS2 inference.
 
@@ -512,6 +519,31 @@ uv run anvil-trainer \
   --task-description="Grab the gray doll and put it in the bucket" \
   --wandb.enable=false
 ```
+
+#### Lego-in-cup VLA-JEPA world model
+
+The checked-in recipe at
+`configs/training/lego_in_cup_vla_jepa_world_model.yaml` is the reproducible
+configuration for this task. It includes the left-arm feature layout, camera
+renames, continuous gripper index, world-model settings, and a 32-action
+training horizon:
+
+```bash
+uv run anvil-trainer \
+  --config_path=configs/training/lego_in_cup_vla_jepa_world_model.yaml \
+  --task-description="Pick up the Lego brick and place it in the cup." \
+  --action-type=absolute \
+  --split-ratio=8,1,1
+```
+
+At the 30 Hz robot control rate, 32 actions cover 1.067 seconds. This is
+comfortably above the measured 566 ms p95 inference time while focusing the
+world-model objective on near-term dynamics. Async prefetch starts immediately
+and replaces the unconsumed tail when a fresh prediction completes.
+
+The existing seven-action checkpoint remains usable with prefetch, but it can
+supply only about 21 actions/s at 338 ms mean inference latency. The longer
+trained chunk is required for gap-free 30 Hz execution.
 
 ---
 
