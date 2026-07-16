@@ -145,6 +145,40 @@ def _remap_molmoact2_processor_overrides(policy_cfg: Any, kwargs: dict[str, Any]
     return remapped_kwargs
 
 
+def _make_pre_post_processors_with_compat(original_make_processors, *args, **kwargs):
+    """Load processors while bridging known serialized step-name migrations."""
+    policy_cfg = kwargs.get("policy_cfg", args[0] if args else None)
+    effective_kwargs = _remap_molmoact2_processor_overrides(policy_cfg, kwargs)
+    try:
+        return original_make_processors(*args, **effective_kwargs)
+    except KeyError as error:
+        message = str(error)
+        overrides = effective_kwargs.get("preprocessor_overrides")
+        is_legacy_delta_mismatch = (
+            isinstance(overrides, dict)
+            and "relative_actions_processor" in overrides
+            and "delta_actions_processor" not in overrides
+            and "Override keys" in message
+            and "Available step keys" in message
+            and "relative_actions_processor" in message
+            and "delta_actions_processor" in message
+        )
+        if not is_legacy_delta_mismatch:
+            raise
+
+        remapped_overrides = dict(overrides)
+        remapped_overrides["delta_actions_processor"] = remapped_overrides.pop(
+            "relative_actions_processor"
+        )
+        remapped_kwargs = dict(effective_kwargs)
+        remapped_kwargs["preprocessor_overrides"] = remapped_overrides
+        log.info(
+            "[anvil_trainer] Remapped relative_actions_processor override to "
+            "legacy delta_actions_processor checkpoint step"
+        )
+        return original_make_processors(*args, **remapped_kwargs)
+
+
 class TransformRunner:
     """
     Manages and applies dataset transforms.
@@ -673,8 +707,9 @@ class TransformRunner:
 
         def capturing_make_processors(*args, **kwargs):
             policy_cfg = kwargs.get("policy_cfg", args[0] if args else None)
-            kwargs = _remap_molmoact2_processor_overrides(policy_cfg, kwargs)
-            preprocessor, postprocessor = original_make_processors(*args, **kwargs)
+            preprocessor, postprocessor = _make_pre_post_processors_with_compat(
+                original_make_processors, *args, **kwargs
+            )
             if getattr(policy_cfg, "type", None) == "vla_jepa":
                 removed_steps = reconcile_vla_jepa_postprocessor(policy_cfg, postprocessor)
                 if removed_steps:
