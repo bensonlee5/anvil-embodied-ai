@@ -19,6 +19,8 @@ services:
       - DEBUG=${DEBUG:-false}
       - MONITOR_ENABLE=${MONITOR_ENABLE:-false}
       - DISPLAY=${DISPLAY}
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       # Both MODEL_PATH and CONFIG_FILE are host paths — tab-completion works naturally.

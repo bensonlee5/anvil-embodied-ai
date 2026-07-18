@@ -49,6 +49,7 @@ SYNC_CHUNK_POLICIES = {
     "multi_task_dit",
     "fastwam",
     "vla_jepa",
+    "pi05",
 }
 
 

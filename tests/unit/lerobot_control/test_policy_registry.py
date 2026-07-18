@@ -54,6 +54,8 @@ def test_language_and_runtime_capabilities_are_separate():
     assert registry.uses_sync_chunk_inference("fastwam")
     assert registry.uses_sync_chunk_inference("vla_jepa")
 
+    assert registry.uses_rtc_inference("pi05")
+    assert registry.uses_sync_chunk_inference("pi05")
     assert registry.uses_rtc_inference("molmoact2")
     assert registry.uses_rtc_inference("groot")
     assert registry.uses_rtc_inference("evo1")
