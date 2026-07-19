@@ -49,6 +49,19 @@ def _write_contract_fixture(root: Path, arm_mapping: dict[str, str]) -> tuple[Pa
             }
         )
     )
+    (checkpoint / "anvil_config.json").write_text(
+        json.dumps(
+            {
+                "normalization_contract": {
+                    "action_space": "relative_to_observation_state",
+                    "chunk_size": 30,
+                    "exclude_joints": [],
+                    "stats_source": "all_valid_dataset_chunks",
+                    "stats_sample_count": 100,
+                }
+            }
+        )
+    )
     (dataset / "meta" / "info.json").write_text(
         json.dumps(
             {
@@ -103,3 +116,28 @@ def test_contract_audit_rejects_left_first_runtime_vector(tmp_path: Path) -> Non
     report = audit_policy_contract(checkpoint, dataset, config)
 
     assert any("runtime/checkpoint arm order" in error for error in report["errors"])
+
+
+def test_contract_audit_rejects_missing_relative_normalization_contract(
+    tmp_path: Path,
+) -> None:
+    checkpoint, dataset, config = _write_contract_fixture(tmp_path, {"r": "right", "l": "left"})
+    (checkpoint / "pretrained_model" / "anvil_config.json").write_text("{}")
+
+    report = audit_policy_contract(checkpoint, dataset, config)
+
+    assert any("missing its normalization contract" in error for error in report["errors"])
+
+
+def test_contract_audit_rejects_relative_normalization_chunk_mismatch(
+    tmp_path: Path,
+) -> None:
+    checkpoint, dataset, config = _write_contract_fixture(tmp_path, {"r": "right", "l": "left"})
+    anvil_config_path = checkpoint / "pretrained_model" / "anvil_config.json"
+    anvil_config = json.loads(anvil_config_path.read_text())
+    anvil_config["normalization_contract"]["chunk_size"] = 50
+    anvil_config_path.write_text(json.dumps(anvil_config))
+
+    report = audit_policy_contract(checkpoint, dataset, config)
+
+    assert any("normalization/checkpoint chunk size" in error for error in report["errors"])

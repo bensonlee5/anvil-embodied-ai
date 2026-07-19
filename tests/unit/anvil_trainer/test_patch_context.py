@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 from pathlib import Path
@@ -9,7 +10,10 @@ from pathlib import Path
 import torch
 
 from anvil_trainer.config import TrainingConfig
-from anvil_trainer.patches import TransformRunner
+from anvil_trainer.patches import (
+    TransformRunner,
+    _apply_exact_pretrained_mapping_overrides,
+)
 
 # =============================================================================
 # _patch / restore_all_patches
@@ -76,6 +80,39 @@ class TestPatchInfrastructure:
 
 
 class TestConfigSequencePatch:
+    def test_complete_feature_mapping_replaces_inherited_checkpoint_keys(self):
+        state = types.SimpleNamespace(shape=(16,))
+        action = types.SimpleNamespace(shape=(16,))
+        legacy_base = types.SimpleNamespace(shape=(3, 224, 224))
+        left = types.SimpleNamespace(shape=(3, 270, 480))
+        right = types.SimpleNamespace(shape=(3, 270, 480))
+        base = types.SimpleNamespace(shape=(3, 270, 480))
+        policy = types.SimpleNamespace(
+            input_features={
+                "observation.images.base_0_rgb": legacy_base,
+                "observation.images.left_wrist": left,
+                "observation.images.right_wrist": right,
+                "observation.images.base": base,
+                "observation.state": state,
+            },
+            output_features={"action": action},
+        )
+        requested = {
+            "observation.images.left_wrist": {"type": "VISUAL", "shape": [3, 270, 480]},
+            "observation.images.right_wrist": {"type": "VISUAL", "shape": [3, 270, 480]},
+            "observation.images.base": {"type": "VISUAL", "shape": [3, 270, 480]},
+            "observation.state": {"type": "STATE", "shape": [16]},
+        }
+
+        removed = _apply_exact_pretrained_mapping_overrides(
+            policy,
+            [f"--input_features={json.dumps(requested, separators=(',', ':'))}"],
+        )
+
+        assert list(policy.input_features) == list(requested)
+        assert policy.input_features["observation.images.left_wrist"] is left
+        assert removed == {"input_features": ["observation.images.base_0_rgb"]}
+
     def test_ordered_lists_reach_lerobot_cli_and_patch_restores(self):
         import lerobot.configs.parser as parser
 

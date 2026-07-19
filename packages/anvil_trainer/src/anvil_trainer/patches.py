@@ -23,6 +23,7 @@ For the typical ``train()`` entry point, use the
 :func:`patched_lerobot` context manager which guarantees cleanup even when
 training raises.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -118,9 +119,7 @@ def _vla_jepa_current_state(state: Any):
     return state.unsqueeze(1) if state.ndim == 2 else state
 
 
-def _flatten_config_to_cli_args(
-    data: dict[str, Any], prefix: str = ""
-) -> list[str]:
+def _flatten_config_to_cli_args(data: dict[str, Any], prefix: str = "") -> list[str]:
     """Flatten config values without dropping ordered sequence overrides."""
     args: list[str] = []
     for key, value in data.items():
@@ -136,6 +135,53 @@ def _flatten_config_to_cli_args(
         elif value is not None:
             args.append(f"--{full_key}={value}")
     return args
+
+
+def _mapping_override_keys(cli_overrides: list[str], field_name: str) -> list[str] | None:
+    """Return the exact ordered keys requested for a pretrained mapping field."""
+    prefix = f"--{field_name}="
+    requested: list[str] | None = None
+    for override in cli_overrides:
+        if not override.startswith(prefix):
+            continue
+        try:
+            value = json.loads(override[len(prefix) :])
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON for pretrained --{field_name} override: {exc}") from exc
+        if not isinstance(value, dict):
+            raise ValueError(f"Pretrained --{field_name} override must be a JSON object")
+        requested = list(value)
+    return requested
+
+
+def _apply_exact_pretrained_mapping_overrides(
+    policy_cfg: Any,
+    cli_overrides: list[str],
+) -> dict[str, list[str]]:
+    """Make mapping-valued pretrained overrides replace instead of merge.
+
+    Draccus applies dictionary CLI overrides one key at a time.  For a loaded
+    checkpoint this retains keys that are absent from the new recipe, which can
+    silently add masked cameras to a policy.  A recipe that supplies an entire
+    ``input_features`` or ``output_features`` JSON object is an exact contract:
+    preserve its order and remove every inherited key not named by the recipe.
+    """
+    removed: dict[str, list[str]] = {}
+    for field_name in ("input_features", "output_features"):
+        requested = _mapping_override_keys(cli_overrides, field_name)
+        if requested is None:
+            continue
+        effective = getattr(policy_cfg, field_name, None)
+        if not isinstance(effective, dict):
+            raise ValueError(
+                f"Resolved policy {field_name} is not a mapping: {type(effective).__name__}"
+            )
+        missing = [key for key in requested if key not in effective]
+        if missing:
+            raise ValueError(f"Resolved policy {field_name} is missing requested keys: {missing}")
+        removed[field_name] = [key for key in effective if key not in requested]
+        setattr(policy_cfg, field_name, {key: effective[key] for key in requested})
+    return removed
 
 
 def _remap_molmoact2_processor_overrides(policy_cfg: Any, kwargs: dict[str, Any]):
@@ -222,13 +268,14 @@ class TransformRunner:
             DeltaActionTransform(),
         ]
         self.active_transforms = [t for t in transforms if t.is_enabled(config)]
-        self._val_dataloader = None   # set by apply_val_loss_patch when make_dataset is called
+        self._val_dataloader = None  # set by apply_val_loss_patch when make_dataset is called
         self._test_dataloader = None  # set by apply_val_loss_patch when make_dataset is called
-        self._split_info: dict = {}   # populated by patched_make_dataset
-        self._preprocessor = None     # captured from make_pre_post_processors
+        self._split_info: dict = {}  # populated by patched_make_dataset
+        self._preprocessor = None  # captured from make_pre_post_processors
         self._camera_keys: tuple[str, ...] = ()  # captured from dataset metadata
-        self._val_freq = 0            # set from cfg.log_freq * 5 inside patched_make_dataset
-        self._resume_step = 0         # for absolute step tracking in wandb
+        self._val_freq = 0  # set from cfg.log_freq * 5 inside patched_make_dataset
+        self._resume_step = 0  # for absolute step tracking in wandb
+        self._normalization_contract: dict[str, Any] = {}
         # List of (module, attr_name, original_value) — populated by _patch in
         # insertion order so restore_all_patches can revert in reverse.
         self._saved_originals: list[tuple[Any, str, Any]] = []
@@ -248,13 +295,12 @@ class TransformRunner:
         to put things back; the :func:`patched_lerobot` context manager does
         this automatically.
         """
-        already_patched = any(
-            m is module and n == attr_name for m, n, _ in self._saved_originals
-        )
+        already_patched = any(m is module and n == attr_name for m, n, _ in self._saved_originals)
         if already_patched:
             log.debug(
                 "[anvil_trainer] Skipping duplicate patch %s.%s",
-                getattr(module, "__name__", module), attr_name,
+                getattr(module, "__name__", module),
+                attr_name,
             )
             return
         original = getattr(module, attr_name)
@@ -276,7 +322,9 @@ class TransformRunner:
             except Exception as e:  # pragma: no cover — extremely defensive
                 log.warning(
                     "[anvil_trainer] Failed to restore %s.%s: %s",
-                    getattr(module, "__name__", module), attr_name, e,
+                    getattr(module, "__name__", module),
+                    attr_name,
+                    e,
                 )
         # Unregister processor registry aliases added by apply_processor_compat_aliases.
         if self._registered_aliases:
@@ -295,12 +343,35 @@ class TransformRunner:
                 self._registered_aliases.clear()
 
     def apply_config_sequence_patch(self) -> None:
-        """Preserve ordered list overrides in pretrained-policy config files."""
+        """Preserve ordered overrides and exact pretrained feature mappings."""
         import lerobot.configs.parser as parser
+        from lerobot.configs.train import TrainPipelineConfig
 
         self._patch(parser, "_flatten_to_cli_args", _flatten_config_to_cli_args)
+        original_resolve_pretrained = TrainPipelineConfig._resolve_pretrained_from_cli
+
+        def patched_resolve_pretrained(cfg):
+            original_resolve_pretrained(cfg)
+            overrides = parser.get_yaml_overrides("policy") + (
+                parser.get_cli_overrides("policy") or []
+            )
+            removed = _apply_exact_pretrained_mapping_overrides(cfg.policy, overrides)
+            for field_name, keys in removed.items():
+                if keys:
+                    log.info(
+                        "[anvil_trainer] Exact %s override removed inherited keys: %s",
+                        field_name,
+                        ", ".join(keys),
+                    )
+
+        self._patch(
+            TrainPipelineConfig,
+            "_resolve_pretrained_from_cli",
+            patched_resolve_pretrained,
+        )
         log.info(
-            "[anvil_trainer] Patched config flattening to preserve sequence overrides"
+            "[anvil_trainer] Patched pretrained config overrides to preserve ordered "
+            "sequences and replace complete feature mappings"
         )
 
     def apply_processor_compat_aliases(self) -> None:
@@ -411,6 +482,7 @@ class TransformRunner:
             return None
 
         import numpy as np  # numpy is not top-level; keep import local
+
         try:
             hf = full_dataset.hf_dataset
             actions_np = np.array(hf["action"], dtype=np.float64)
@@ -458,9 +530,7 @@ class TransformRunner:
                     )
                 return d[mask]
 
-            all_deltas = np.concatenate(
-                [_compute_deltas_for_k(k) for k in range(n_steps)], axis=0
-            )
+            all_deltas = np.concatenate([_compute_deltas_for_k(k) for k in range(n_steps)], axis=0)
 
             orig = full_dataset.meta.stats.get("action", {})
             orig_mean = np.array(orig.get("mean", all_deltas.mean(axis=0)))
@@ -495,8 +565,12 @@ class TransformRunner:
                 "[delta_stats] Computed delta action stats over %d samples "
                 "(n_steps=%d, %d frames, %d joints, %d kept absolute: %s). "
                 "j4 abs_mean=%.3f → delta_mean=%.4f, abs_std=%.3f → delta_std=%.4f",
-                len(all_deltas), n_steps, len(actions_np), d_action,
-                len(exclude_indices), self.config.delta_exclude_joints or [],
+                len(all_deltas),
+                n_steps,
+                len(actions_np),
+                d_action,
+                len(exclude_indices),
+                self.config.delta_exclude_joints or [],
                 orig_mean[4] if len(orig_mean) > 4 else float("nan"),
                 delta_mean[4] if len(delta_mean) > 4 else float("nan"),
                 orig_std[4] if len(orig_std) > 4 else float("nan"),
@@ -508,9 +582,162 @@ class TransformRunner:
         except Exception as e:
             log.warning(
                 "[delta_stats] Failed to compute delta action stats: %s — "
-                "falling back to absolute stats (training may be suboptimal)", e
+                "falling back to absolute stats (training may be suboptimal)",
+                e,
             )
             return None
+
+    @staticmethod
+    def _validate_pi05_dataset_contract(policy_cfg: Any, full_dataset: Any) -> None:
+        """Fail before training when Pi0.5 vector or camera contracts diverge."""
+        if getattr(policy_cfg, "type", None) != "pi05":
+            return
+
+        features = full_dataset.meta.features
+        action_feature = features.get("action", {})
+        state_feature = features.get("observation.state", {})
+        action_names = list(action_feature.get("names") or [])
+        state_names = list(state_feature.get("names") or [])
+        policy_names = list(getattr(policy_cfg, "action_feature_names", None) or [])
+
+        if not action_names or action_names != state_names:
+            raise DataIntegrityError(
+                "[pi05_contract] Dataset action/state feature names must be present and identical"
+            )
+        if policy_names != action_names:
+            raise DataIntegrityError(
+                "[pi05_contract] Policy action_feature_names do not exactly match the dataset: "
+                f"policy={policy_names}, dataset={action_names}"
+            )
+
+        action_shape = tuple(action_feature.get("shape") or ())
+        state_shape = tuple(state_feature.get("shape") or ())
+        if not action_shape or action_shape != state_shape or len(action_names) != action_shape[0]:
+            raise DataIntegrityError(
+                "[pi05_contract] Dataset action/state shapes and named dimensions must match: "
+                f"action={action_shape}, state={state_shape}, names={len(action_names)}"
+            )
+
+        policy_state_shape = tuple(policy_cfg.input_features["observation.state"].shape)
+        if policy_state_shape != state_shape:
+            raise DataIntegrityError(
+                "[pi05_contract] Policy/dataset state shapes differ: "
+                f"policy={policy_state_shape}, dataset={state_shape}"
+            )
+
+        policy_cameras = list(policy_cfg.image_features)
+        dataset_cameras = list(full_dataset.meta.camera_keys)
+        if set(policy_cameras) != set(dataset_cameras):
+            raise DataIntegrityError(
+                "[pi05_contract] Policy/dataset camera keys differ: "
+                f"policy={policy_cameras}, dataset={dataset_cameras}"
+            )
+
+        for key in dataset_cameras:
+            policy_shape = tuple(policy_cfg.input_features[key].shape)
+            dataset_shape = tuple(features[key]["shape"])
+            if policy_shape != dataset_shape:
+                raise DataIntegrityError(
+                    f"[pi05_contract] Camera shape mismatch for {key}: "
+                    f"policy={policy_shape}, dataset={dataset_shape}"
+                )
+
+        policy_action_shape = tuple(policy_cfg.output_features["action"].shape)
+        if policy_action_shape != action_shape:
+            raise DataIntegrityError(
+                "[pi05_contract] Policy/dataset action shapes differ: "
+                f"policy={policy_action_shape}, dataset={action_shape}"
+            )
+        log.info(
+            "[pi05_contract] Validated %d named action/state dimensions and cameras=%s",
+            action_shape[0],
+            dataset_cameras,
+        )
+
+    def _compute_native_relative_action_stats(
+        self,
+        full_dataset: Any,
+        policy_cfg: Any,
+        *,
+        num_workers: int,
+    ) -> dict | None:
+        """Compute chunk-aware stats for LeRobot's native relative processor."""
+        if not getattr(policy_cfg, "use_relative_actions", False):
+            return None
+        if any(isinstance(t, DeltaActionTransform) for t in self.active_transforms):
+            raise DataIntegrityError(
+                "[relative_stats] Native relative actions and Anvil delta actions cannot both be enabled"
+            )
+
+        import numpy as np
+        from lerobot.datasets.compute_stats import compute_relative_action_stats
+
+        chunk_size = int(getattr(policy_cfg, "chunk_size", 0))
+        if chunk_size < 1:
+            raise DataIntegrityError(f"[relative_stats] Invalid policy chunk_size={chunk_size}")
+        exclude_joints = list(getattr(policy_cfg, "relative_exclude_joints", None) or [])
+
+        try:
+            stats = compute_relative_action_stats(
+                hf_dataset=full_dataset.hf_dataset,
+                features=full_dataset.meta.features,
+                chunk_size=chunk_size,
+                exclude_joints=exclude_joints,
+                num_workers=max(0, int(num_workers)),
+            )
+        except Exception as exc:
+            raise DataIntegrityError(
+                f"[relative_stats] Failed to compute native relative-action stats: {exc}"
+            ) from exc
+
+        required = {"mean", "std", "min", "max", "q01", "q99", "count"}
+        missing = sorted(required - set(stats))
+        if missing:
+            raise DataIntegrityError(
+                f"[relative_stats] Computed stats are missing required fields: {missing}"
+            )
+        action_shape = tuple(full_dataset.meta.features["action"]["shape"])
+        for name, values in stats.items():
+            array = np.asarray(values)
+            if name == "count":
+                if array.size != 1 or int(array.reshape(-1)[0]) <= 0:
+                    raise DataIntegrityError(
+                        "[relative_stats] Computed action stats have an invalid sample count"
+                    )
+                continue
+            if array.shape != action_shape:
+                raise DataIntegrityError(
+                    f"[relative_stats] Computed {name} shape {array.shape} "
+                    f"does not match action shape {action_shape}"
+                )
+            if not np.isfinite(array).all():
+                raise DataIntegrityError(
+                    f"[relative_stats] Computed action stats contain non-finite {name} values"
+                )
+
+        full_dataset.meta.stats["action"] = stats
+        count = np.asarray(stats.get("count", 0)).reshape(-1)
+        self._normalization_contract.update(
+            {
+                "action_space": "relative_to_observation_state",
+                "chunk_size": chunk_size,
+                "exclude_joints": exclude_joints,
+                "stats_source": "all_valid_dataset_chunks",
+                "stats_sample_count": int(count[0]) if len(count) else 0,
+            }
+        )
+        q01 = np.asarray(stats["q01"])
+        q99 = np.asarray(stats["q99"])
+        log.info(
+            "[relative_stats] Computed native Pi0.5 action stats over %d-step chunks "
+            "(%d dimensions, excluded=%s, mean q01=%.4f, mean q99=%.4f)",
+            chunk_size,
+            len(q01),
+            exclude_joints,
+            float(q01.mean()),
+            float(q99.mean()),
+        )
+        return stats
 
     def apply_metadata_patches(self) -> None:
         """Apply metadata patches before importing lerobot training."""
@@ -566,7 +793,10 @@ class TransformRunner:
             # 0..N-1) and must NOT be remapped — doing so would corrupt reads when
             # relative indices overlap with the absolute frame index space.
             reader = self._ensure_reader()
-            if getattr(self, '_anvil_uses_abs_sampler', False) and reader._absolute_to_relative_idx is not None:
+            if (
+                getattr(self, "_anvil_uses_abs_sampler", False)
+                and reader._absolute_to_relative_idx is not None
+            ):
                 # Map from absolute HF frame index to relative filtered index
                 idx = reader._absolute_to_relative_idx.get(idx, idx)
 
@@ -579,14 +809,15 @@ class TransformRunner:
             return item
 
         self._patch(LeRobotDataset, "__getitem__", patched_getitem)
-        log.info("[anvil_trainer] Patched LeRobotDataset.__getitem__ (%d transform(s))", len(transforms))
+        log.info(
+            "[anvil_trainer] Patched LeRobotDataset.__getitem__ (%d transform(s))", len(transforms)
+        )
 
     def apply_val_loss_patch(self) -> None:
-        """Monkey-patch make_dataset to create train/val/test splits, and capture preprocessor."""
+        """Patch dataset construction for contracts, stats, splits, and eval."""
         s = self.config.split_ratio
         total_r = sum(s)
-        if total_r <= 0 or (s[1] <= 0 and (len(s) < 3 or s[2] <= 0)):
-            return  # no val or test, skip patching
+        has_holdout = total_r > 0 and (s[1] > 0 or (len(s) >= 3 and s[2] > 0))
 
         import lerobot.datasets.factory as factory_mod
         import lerobot.policies.factory as policy_factory_mod
@@ -617,17 +848,41 @@ class TransformRunner:
             full_dataset = original_make_dataset(cfg)
             total_ep = full_dataset.num_episodes
             val_state._camera_keys = tuple(full_dataset.meta.camera_keys)
+            policy_cfg = cfg.trainable_config
+            val_state._validate_pi05_dataset_contract(policy_cfg, full_dataset)
 
-            # Compute delta action stats when DeltaActionTransform is active so
-            # that lerobot's normalizer is built against delta statistics rather
-            # than the absolute-action stats stored in meta/stats.json.  The
-            # helper patches full_dataset.meta.stats in place for the early-
-            # return path and returns the dict so we can re-apply it to the
-            # filtered train_dataset below.
-            _patched_action_stats = val_state._compute_delta_action_stats(full_dataset)
+            # Build action stats in the same representation consumed by the
+            # processor. Native Pi0.5 relative actions use every valid future
+            # action in the configured chunk; Anvil's legacy transform retains
+            # its existing delta-stat path.
+            _patched_action_stats = val_state._compute_native_relative_action_stats(
+                full_dataset,
+                policy_cfg,
+                num_workers=cfg.num_workers,
+            )
+            if _patched_action_stats is None:
+                _patched_action_stats = val_state._compute_delta_action_stats(full_dataset)
+
+            if not has_holdout:
+                full_dataset._anvil_uses_abs_sampler = True
+                val_state._split_info = {
+                    "split_ratio": list(s),
+                    "total_episodes": total_ep,
+                    "train_episodes": list(range(total_ep)),
+                    "val_episodes": [],
+                    "test_episodes": [],
+                }
+                log.info("[split] Holdout evaluation disabled; using all %d episodes", total_ep)
+                return full_dataset
 
             # Check if split_info.json already exists in last checkpoint (for resume)
-            split_info_path = Path(cfg.output_dir) / "checkpoints" / "last" / "pretrained_model" / "split_info.json"
+            split_info_path = (
+                Path(cfg.output_dir)
+                / "checkpoints"
+                / "last"
+                / "pretrained_model"
+                / "split_info.json"
+            )
             loaded_split = load_split_info(split_info_path)
             if loaded_split is not None:
                 train_ep = loaded_split.get("train_episodes", [])
@@ -640,12 +895,15 @@ class TransformRunner:
             if train_ep is None:
                 # Optional: subsample N episodes before splitting
                 import random as _random
+
                 pool = list(range(total_ep))
                 max_ep = val_state.config.max_episodes
                 if max_ep is not None and max_ep < total_ep:
                     _rng = _random.Random(cfg.seed)
                     pool = sorted(_rng.sample(pool, max_ep))
-                    log.info("[split] Subsampled %d / %d episodes (--max-episodes)", len(pool), total_ep)
+                    log.info(
+                        "[split] Subsampled %d / %d episodes (--max-episodes)", len(pool), total_ep
+                    )
 
                 # Random three-way split via shared helper (seeded for reproducibility)
                 splits = compute_split_episodes(len(pool), s, seed=cfg.seed)
@@ -654,7 +912,11 @@ class TransformRunner:
                 test_ep = [pool[i] for i in splits["test"]]
 
                 if len(train_ep) < 1:
-                    log.warning("[split] Not enough episodes (%d) for split %s, using all for training", total_ep, s)
+                    log.warning(
+                        "[split] Not enough episodes (%d) for split %s, using all for training",
+                        total_ep,
+                        s,
+                    )
                     # full_dataset already has patched action stats if _patched_action_stats is set
                     return full_dataset
                 log.info("[split] Generated random splits")
@@ -666,7 +928,11 @@ class TransformRunner:
                 "train_episodes": train_ep,
                 "val_episodes": val_ep,
                 "test_episodes": test_ep,
-                **({"max_episodes": val_state.config.max_episodes} if val_state.config.max_episodes is not None else {}),
+                **(
+                    {"max_episodes": val_state.config.max_episodes}
+                    if val_state.config.max_episodes is not None
+                    else {}
+                ),
             }
 
             def _make_dataloader(dataset):
@@ -686,14 +952,22 @@ class TransformRunner:
                 cfg.dataset.episodes = val_ep
                 val_dataset = original_make_dataset(cfg)
                 val_state._val_dataloader = _make_dataloader(val_dataset)
-                log.info("[split] val=%d ep (randomly selected, %d frames)", len(val_ep), val_dataset.num_frames)
+                log.info(
+                    "[split] val=%d ep (randomly selected, %d frames)",
+                    len(val_ep),
+                    val_dataset.num_frames,
+                )
 
             # Test dataloader
             if test_ep:
                 cfg.dataset.episodes = test_ep
                 test_dataset = original_make_dataset(cfg)
                 val_state._test_dataloader = _make_dataloader(test_dataset)
-                log.info("[split] test=%d ep (randomly selected, %d frames)", len(test_ep), test_dataset.num_frames)
+                log.info(
+                    "[split] test=%d ep (randomly selected, %d frames)",
+                    len(test_ep),
+                    test_dataset.num_frames,
+                )
 
             # Train dataset
             cfg.dataset.episodes = train_ep
@@ -703,19 +977,22 @@ class TransformRunner:
             # frame indices; val/test dataloaders use relative indices and must NOT
             # be remapped.
             train_dataset._anvil_uses_abs_sampler = True
-            # Inject delta action stats so lerobot's normalizer uses the correct
-            # distribution.  train_dataset is a fresh LeRobotDataset instance that
-            # re-reads stats.json, so we must patch it explicitly here.
+            # The train dataset is a fresh instance that re-reads stats.json,
+            # so re-apply the in-memory transformed-action statistics.
             if _patched_action_stats is not None:
                 train_dataset.meta.stats["action"] = _patched_action_stats
-                log.info("[delta_stats] Patched train_dataset.meta.stats['action'] with delta stats")
+                log.info(
+                    "[anvil_trainer] Patched train_dataset.meta.stats['action'] "
+                    "with transformed-action stats"
+                )
             log.info("[split] train=%d ep (randomly selected)", len(train_ep))
             return train_dataset
 
         self._patch(factory_mod, "make_dataset", patched_make_dataset)
         if hasattr(lerobot_train_mod, "make_dataset"):
             self._patch(lerobot_train_mod, "make_dataset", patched_make_dataset)
-        if hasattr(lerobot_train_mod, "make_train_eval_datasets"):
+        if has_holdout and hasattr(lerobot_train_mod, "make_train_eval_datasets"):
+
             def patched_make_train_eval_datasets(cfg):
                 return patched_make_dataset(cfg), None
 
@@ -729,7 +1006,11 @@ class TransformRunner:
                 "is active (eval_steps/max_eval_samples are no-ops); anvil-trainer's "
                 "val/test loss hooks are used instead"
             )
-        log.info("[split] Patched make_dataset (split_ratio=%s, random=True)", s)
+        log.info(
+            "[anvil_trainer] Patched make_dataset (split_ratio=%s, holdout=%s)",
+            s,
+            has_holdout,
+        )
 
         # Capture preprocessor when it's created by lerobot
         original_make_processors = policy_factory_mod.make_pre_post_processors
@@ -787,6 +1068,10 @@ class TransformRunner:
             # Backward compat: old inference nodes read use_delta_actions
             "use_delta_actions": self.config.use_delta_actions,
             "delta_sequential": self.config.delta_sequential,
+            # This dict is populated after the dataset is loaded.  Keep the
+            # shared reference so checkpoint writes capture the resolved
+            # normalization representation and statistics source.
+            "normalization_contract": self._normalization_contract,
             **git_provenance(),
         }
         if self.config.delta_exclude_joints:
@@ -825,9 +1110,7 @@ class TransformRunner:
 
                     with torch.no_grad():
                         for batch in val_state._test_dataloader:
-                            batch = _normalize_uint8_camera_images(
-                                batch, val_state._camera_keys
-                            )
+                            batch = _normalize_uint8_camera_images(batch, val_state._camera_keys)
                             if preprocessor is not None:
                                 batch = preprocessor(batch)
                             else:
@@ -849,6 +1132,7 @@ class TransformRunner:
 
                     try:
                         import wandb as _wandb
+
                         if _wandb.run is not None:
                             _wandb.log({"eval/test_loss": test_loss}, step=int(step))
                     except Exception:
@@ -861,7 +1145,9 @@ class TransformRunner:
             pretrained_dir = checkpoint_dir / "pretrained_model"
             if pretrained_dir.exists():
                 # 1. anvil_config.json: only non-split flags
-                (pretrained_dir / "anvil_config.json").write_text(json.dumps(anvil_cfg_base, indent=2))
+                (pretrained_dir / "anvil_config.json").write_text(
+                    json.dumps(anvil_cfg_base, indent=2)
+                )
 
                 # 2. split_info.json: all split metadata
                 if val_state._split_info:
@@ -923,9 +1209,7 @@ class TransformRunner:
 
             with torch.no_grad():
                 for val_batch in val_state._val_dataloader:
-                    val_batch = _normalize_uint8_camera_images(
-                        val_batch, val_state._camera_keys
-                    )
+                    val_batch = _normalize_uint8_camera_images(val_batch, val_state._camera_keys)
                     if preprocessor is not None:
                         val_batch = preprocessor(val_batch)
                     else:
@@ -947,6 +1231,7 @@ class TransformRunner:
 
             try:
                 import wandb as _wandb
+
                 if _wandb.run is not None:
                     _wandb.log({"eval/val_loss": val_loss}, step=abs_step)
             except Exception:

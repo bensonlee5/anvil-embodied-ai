@@ -33,6 +33,8 @@ def audit_policy_contract(
     model_config = _load_json(model_dir / "config.json")
     preprocessor = _load_json(model_dir / "policy_preprocessor.json")
     postprocessor = _load_json(model_dir / "policy_postprocessor.json")
+    anvil_config_path = model_dir / "anvil_config.json"
+    anvil_config = _load_json(anvil_config_path) if anvil_config_path.exists() else {}
     dataset_info = _load_json(dataset_path / "meta" / "info.json")
     inference_config = yaml.safe_load(inference_config_path.read_text())
     conversion_path = dataset_path / "conversion_config.yaml"
@@ -141,6 +143,38 @@ def audit_policy_contract(
     if relative_enabled and not absolute_enabled:
         errors.append("Relative preprocessor is enabled but absolute postprocessor is disabled")
 
+    normalization_contract = anvil_config.get("normalization_contract") or {}
+    if model_config.get("use_relative_actions"):
+        if not normalization_contract:
+            errors.append("Relative-action checkpoint is missing its normalization contract")
+        else:
+            _expect_equal(
+                errors,
+                "normalization action space",
+                normalization_contract.get("action_space"),
+                "relative_to_observation_state",
+            )
+            _expect_equal(
+                errors,
+                "normalization/checkpoint chunk size",
+                normalization_contract.get("chunk_size"),
+                model_config.get("chunk_size"),
+            )
+            _expect_equal(
+                errors,
+                "normalization/processor excluded joints",
+                normalization_contract.get("exclude_joints"),
+                (relative_step or {}).get("config", {}).get("exclude_joints", []),
+            )
+            _expect_equal(
+                errors,
+                "normalization stats source",
+                normalization_contract.get("stats_source"),
+                "all_valid_dataset_chunks",
+            )
+            if int(normalization_contract.get("stats_sample_count") or 0) <= 0:
+                errors.append("Relative-action normalization sample count must be positive")
+
     conversion_order = conversion.get("robot_order")
     if conversion_order:
         _expect_equal(
@@ -177,6 +211,7 @@ def audit_policy_contract(
                 "preprocessor_enabled": relative_enabled,
                 "postprocessor_enabled": absolute_enabled,
                 "exclude_joints": (relative_step or {}).get("config", {}).get("exclude_joints", []),
+                "normalization_contract": normalization_contract,
             },
             "scheduler": {
                 "chunk_size": model_config.get("chunk_size"),
