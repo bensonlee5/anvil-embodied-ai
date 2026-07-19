@@ -479,7 +479,12 @@ class LeRobotInferenceNode(Node):
         logger.info(f"Device:     {self.device}")
         logger.info(f"Frequency:  {self.control_freq} Hz")
         if not self.echo_topic_only:
-            logger.info(f"Max delta:  {self.max_position_delta} rad")
+            max_delta = (
+                f"{self.max_position_delta} rad"
+                if self.max_position_delta is not None
+                else "disabled (delegated to robot controller)"
+            )
+            logger.info(f"Max delta:  {max_delta}")
 
         h, w, _ = self.image_shape
         res_note = "auto-detected from checkpoint" if self.model_path else "default"

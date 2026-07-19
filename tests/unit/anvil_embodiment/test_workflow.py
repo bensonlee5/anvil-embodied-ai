@@ -55,7 +55,9 @@ def test_train_and_evaluate_synthetic_cache(tmp_path: Path) -> None:
     )
 
     assert (output / WEIGHTS_NAME).is_file()
+    assert (output / "offline_evaluation.json").is_file()
     assert provenance["best_step"] in {1, 2, 3}
+    assert all("quality_gate_pass" in item for item in provenance["history"])
     assert set(report["splits"]) == {"train", "val", "test"}
     assert set(report["splits"]["test"]) == {
         "hold",

@@ -67,6 +67,14 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--pose-weight", type=float, default=0.25)
     train.add_argument("--velocity-weight", type=float, default=0.05)
     train.add_argument("--residual-weight", type=float, default=0.01)
+    train.add_argument("--wandb-project")
+    train.add_argument("--wandb-entity")
+    train.add_argument("--wandb-run-name")
+    train.add_argument(
+        "--wandb-mode",
+        choices=("online", "offline", "disabled"),
+        default="online",
+    )
 
     evaluate = commands.add_parser(
         "evaluate", help="compare hold, bridge, trained adapter, and optional 5k baseline"
@@ -120,6 +128,10 @@ def main(argv: list[str] | None = None) -> int:
                 velocity=args.velocity_weight,
                 residual=args.residual_weight,
             ),
+            wandb_project=args.wandb_project,
+            wandb_entity=args.wandb_entity,
+            wandb_run_name=args.wandb_run_name,
+            wandb_mode=args.wandb_mode,
         )
     else:
         result = evaluate_adapter_cache(

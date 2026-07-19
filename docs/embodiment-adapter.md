@@ -136,8 +136,22 @@ uv run anvil-adapter train \
   --cache adapter_cache/shirt-fold-frozen-hf.npz \
   --output model_zoo/adapters/hf-folding-to-openarm2-v1 \
   --steps 5000 \
-  --device cuda
+  --device cuda \
+  --wandb-project shirt-fold \
+  --wandb-run-name hf-folding-to-openarm2-v1-seed-42 \
+  --wandb-mode online
 ```
+
+Authenticate first with `uv run wandb login`. If credentials are unavailable during
+training, use `--wandb-mode offline`; the complete run can later be uploaded with
+`uv run wandb sync wandb/offline-run-*`.
+
+Every validation interval logs loss terms plus bridge-relative normalized joint,
+shoulder, TCP position/orientation, commanded-motion, and residual-bound metrics.
+The quality gate passes only when joint, shoulder, and TCP position errors improve,
+motion does not collapse, and fewer than 5% of residual values reach 95% of their
+safety bound. The pinned manifest/cache and final adapter/evaluation are stored as
+W&B artifacts.
 
 Compare hold, deterministic bridge, learned adapter, and the optional current
 5k baseline on train/validation/test episodes:

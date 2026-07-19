@@ -1,6 +1,7 @@
 # OpenArm 2.0 shadow evaluation for the shirt-fold Pi0.5 fine-tune.
 # Launch at control_frequency:=30.0 with echo_topic_only:=false. Commands are
-# intentionally published only to disconnected /eval topics.
+# intentionally published only to disconnected /eval topics. Software limiting
+# is disabled so shadow evaluation observes the raw policy trajectory.
 
 model:
   task_description: "Fold the T-shirt properly"
@@ -73,4 +74,5 @@ cameras:
     "/cam_wrist_r/image_raw/compressed": "right_wrist"
 
 safety:
-  max_position_delta: 0.02
+  max_position_delta: null
+  min_position_delta: null

@@ -150,6 +150,7 @@ cameras:
 # Safety Parameters
 # -----------------------------------------------------------------------------
 # max_position_delta: maximum joint position change per step (radians).
+#   Set explicitly to null to disable; omission retains the legacy 0.1-rad limit.
 # min_position_delta: minimum per-joint change required to publish a new command (radians).
 #   Use to overcome motor friction when model delta outputs are too small to move joints.
 #   Commands are held at last published value until cumulative change exceeds this threshold.

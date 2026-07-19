@@ -50,7 +50,16 @@ def test_shirt_fold_pi05_shadow_contract_is_right_first_and_disconnected() -> No
     }
     assert config["inference_tuning"]["rtc"]["queue_trigger_threshold"] == 30
     assert config["inference_tuning"]["rtc"]["execution_horizon"] == 20
-    assert config["safety"]["max_position_delta"] == 0.02
+    assert config["safety"] == {
+        "max_position_delta": None,
+        "min_position_delta": None,
+    }
+
+    live_config = yaml.safe_load(LIVE_CONFIG_PATH.read_text())
+    assert live_config["safety"] == {
+        "max_position_delta": None,
+        "min_position_delta": None,
+    }
 
 
 def test_multi_process_strategy_honors_yaml_arm_insertion_order(monkeypatch) -> None:

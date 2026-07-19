@@ -7,7 +7,7 @@ import random
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -50,7 +50,27 @@ def _pretrained_dir(path: str | Path) -> Path:
     raise FileNotFoundError(f"no pretrained_model config under {candidate}")
 
 
+def _register_processor_compat_aliases() -> None:
+    """Allow pinned LeRobot checkpoints to load across processor renames."""
+    from lerobot.processor.pipeline import ProcessorStepRegistry
+    from lerobot.processor.relative_action_processor import RelativeActionsProcessorStep
+
+    names = ProcessorStepRegistry.list()
+    if "delta_actions_processor" in names:
+        return
+    canonical_name = getattr(
+        RelativeActionsProcessorStep,
+        "_registry_name",
+        "relative_actions_processor",
+    )
+    ProcessorStepRegistry.register("delta_actions_processor")(RelativeActionsProcessorStep)
+    # Registration annotates the shared class. Keep new artifacts on the
+    # installed LeRobot release's canonical registry name.
+    RelativeActionsProcessorStep._registry_name = canonical_name
+
+
 def _load_policy(path: str | Path, device: str) -> tuple[Any, Any, Any]:
+    _register_processor_compat_aliases()
     model, preprocessor, postprocessor, _ = load_model(str(_pretrained_dir(path)), device)
     if preprocessor is None or postprocessor is None:
         raise EmbodimentError(f"policy at {path} is missing processor pipelines")
@@ -282,14 +302,22 @@ def train_residual_adapter(
     eval_every: int = 100,
     seed: int = 42,
     loss_weights: AdapterLossWeights = AdapterLossWeights(),
+    wandb_project: str | None = None,
+    wandb_entity: str | None = None,
+    wandb_run_name: str | None = None,
+    wandb_mode: Literal["online", "offline", "disabled"] = "online",
 ) -> dict[str, Any]:
     """Train only the bounded target-space residual; the VLA remains frozen."""
     if min(steps, batch_size, eval_every) < 1:
         raise ValueError("steps, batch_size, and eval_every must be positive")
+    if wandb_mode not in {"online", "offline", "disabled"}:
+        raise ValueError("wandb_mode must be online, offline, or disabled")
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    arrays = _cache_arrays(cache)
+    cache_path = Path(cache)
+    cache_hash = sha256_file(cache_path)
+    arrays = _cache_arrays(cache_path)
     train_indices = np.flatnonzero(arrays["split"] == "train")
     val_indices = np.flatnonzero(arrays["split"] == "val")
     if not len(train_indices):
@@ -316,6 +344,49 @@ def train_residual_adapter(
     best_step = 0
     best_state: dict[str, Tensor] | None = None
     history: list[dict[str, float]] = []
+    wandb_run: Any | None = None
+    if wandb_project is not None and wandb_mode != "disabled":
+        import wandb
+
+        wandb_run = wandb.init(
+            project=wandb_project,
+            entity=wandb_entity,
+            name=wandb_run_name or f"{artifact.spec.adapter_id}-seed-{seed}",
+            job_type="embodiment-adapter",
+            mode=wandb_mode,
+            tags=["embodiment-adapter", "shirt-fold", "offline-only"],
+            config={
+                "adapter_id": artifact.spec.adapter_id,
+                "deployment_status": artifact.spec.deployment_status,
+                "manifest": str(Path(manifest).resolve()),
+                "cache": str(cache_path.resolve()),
+                "cache_sha256": cache_hash,
+                "train_samples": int(len(train_indices)),
+                "val_samples": int(len(val_indices)),
+                "steps": steps,
+                "batch_size": batch_size,
+                "learning_rate": learning_rate,
+                "weight_decay": weight_decay,
+                "eval_every": eval_every,
+                "seed": seed,
+                "loss_weights": asdict(loss_weights),
+                "residual_contract": asdict(artifact.spec.residual),
+            },
+        )
+        input_artifact = wandb.Artifact(
+            f"{artifact.spec.adapter_id}-inputs-{cache_hash[:8]}",
+            type="embodiment-adapter-inputs",
+            metadata={
+                "cache_sha256": cache_hash,
+                "deployment_status": artifact.spec.deployment_status,
+            },
+        )
+        input_artifact.add_file(str(Path(manifest).resolve()), name="manifest.json")
+        input_artifact.add_file(str(cache_path.resolve()), name="cache.npz")
+        cache_report = cache_path.with_suffix(cache_path.suffix + ".json")
+        if cache_report.is_file():
+            input_artifact.add_file(str(cache_report.resolve()), name="cache-report.json")
+        wandb_run.log_artifact(input_artifact)
 
     def evaluate(indices: np.ndarray) -> tuple[float, dict[str, float]]:
         residual.eval()
@@ -345,6 +416,79 @@ def train_residual_adapter(
         metrics = {name: value / count for name, value in totals.items()}
         return metrics["loss"], metrics
 
+    def evaluate_quality(indices: np.ndarray) -> dict[str, float]:
+        residual.eval()
+        corrected_rows: list[np.ndarray] = []
+        correction_rows: list[np.ndarray] = []
+        with torch.no_grad():
+            for start in range(0, len(indices), batch_size):
+                selected = indices[start : start + batch_size]
+                corrected, correction = residual(
+                    current[selected].to(device_value),
+                    bridge[selected].to(device_value),
+                )
+                corrected_rows.append(_numpy(corrected))
+                correction_rows.append(_numpy(correction))
+        residual.train()
+
+        corrected_values = np.concatenate(corrected_rows)
+        correction_values = np.concatenate(correction_rows)
+        selected_current = arrays["current_state"][indices]
+        selected_bridge = arrays["bridge_chunk"][indices]
+        selected_target = arrays["target_chunk"][indices]
+        adapter_metrics = _prediction_metrics(
+            corrected_values,
+            selected_target,
+            selected_current,
+            artifact,
+        )
+        bridge_metrics = _prediction_metrics(
+            selected_bridge,
+            selected_target,
+            selected_current,
+            artifact,
+        )
+        active = np.asarray(ACTIVE_JOINT_INDICES)
+        active_bounds = _numpy(correction_bounds)[active]
+        bound_fraction = np.abs(correction_values[..., active]) / np.maximum(
+            active_bounds,
+            1e-8,
+        )
+        quality: dict[str, float] = {
+            "residual_mean_bound_fraction": float(np.mean(bound_fraction)),
+            "residual_max_bound_fraction": float(np.max(bound_fraction)),
+            "residual_saturation_fraction": float(np.mean(bound_fraction >= 0.95)),
+        }
+        for name, value in adapter_metrics.items():
+            quality[f"adapter_{name}"] = value
+        for name, value in bridge_metrics.items():
+            quality[f"bridge_{name}"] = value
+        error_metrics = (
+            "normalized_joint_mae",
+            "joint_rmse_rad",
+            "shoulder_mae_rad",
+            "tcp_position_mae_m",
+            "tcp_orientation_mae_deg",
+        )
+        for name in error_metrics:
+            quality[f"improvement_{name}"] = bridge_metrics[name] - adapter_metrics[name]
+        quality["improvement_motion_ratio"] = abs(bridge_metrics["motion_ratio"] - 1.0) - abs(
+            adapter_metrics["motion_ratio"] - 1.0
+        )
+        quality["quality_gate_joint"] = float(quality["improvement_normalized_joint_mae"] > 0.0)
+        quality["quality_gate_shoulder"] = float(quality["improvement_shoulder_mae_rad"] > 0.0)
+        quality["quality_gate_tcp"] = float(quality["improvement_tcp_position_mae_m"] > 0.0)
+        quality["quality_gate_motion"] = float(quality["improvement_motion_ratio"] >= 0.0)
+        quality["quality_gate_residual"] = float(quality["residual_saturation_fraction"] <= 0.05)
+        quality["quality_gate_pass"] = float(
+            quality["quality_gate_joint"]
+            and quality["quality_gate_shoulder"]
+            and quality["quality_gate_tcp"]
+            and quality["quality_gate_motion"]
+            and quality["quality_gate_residual"]
+        )
+        return quality
+
     for step in range(1, steps + 1):
         sampled = train_indices[
             torch.randint(len(train_indices), (batch_size,), generator=generator).numpy()
@@ -353,7 +497,7 @@ def train_residual_adapter(
         bridge_batch = bridge[sampled].to(device_value)
         target_batch = target[sampled].to(device_value)
         corrected, correction = residual(state_batch, bridge_batch)
-        loss, _ = compute_adapter_loss(
+        loss, train_terms = compute_adapter_loss(
             corrected=corrected,
             residual=correction,
             target=target_batch,
@@ -369,7 +513,31 @@ def train_residual_adapter(
 
         if step == 1 or step % eval_every == 0 or step == steps:
             val_loss, metrics = evaluate(val_indices)
-            history.append({"step": float(step), **metrics})
+            quality = evaluate_quality(val_indices)
+            record = {"step": float(step), **metrics, **quality}
+            history.append(record)
+            print(
+                json.dumps(
+                    {
+                        "event": "adapter_validation",
+                        "step": step,
+                        "train_loss": float(train_terms["loss"]),
+                        **record,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            if wandb_run is not None:
+                wandb_run.log(
+                    {
+                        **{f"train/{name}": float(value) for name, value in train_terms.items()},
+                        **{f"val/{name}": value for name, value in metrics.items()},
+                        **{f"quality/val/{name}": value for name, value in quality.items()},
+                        "optimizer/learning_rate": optimizer.param_groups[0]["lr"],
+                    },
+                    step=step,
+                )
             if val_loss < best_loss:
                 best_loss = val_loss
                 best_step = step
@@ -384,8 +552,8 @@ def train_residual_adapter(
     artifact.residual.eval()
     provenance = {
         "schema_version": 1,
-        "cache": str(Path(cache).resolve()),
-        "cache_sha256": sha256_file(Path(cache)),
+        "cache": str(cache_path.resolve()),
+        "cache_sha256": cache_hash,
         "seed": seed,
         "steps": steps,
         "batch_size": batch_size,
@@ -395,8 +563,61 @@ def train_residual_adapter(
         "best_val_loss": best_loss,
         "loss_weights": asdict(loss_weights),
         "history": history,
+        "wandb": (
+            {
+                "project": wandb_project,
+                "entity": wandb_entity,
+                "run_id": wandb_run.id,
+                "run_name": wandb_run.name,
+                "run_path": wandb_run.path,
+                "mode": wandb_mode,
+            }
+            if wandb_run is not None
+            else None
+        ),
     }
-    artifact.save(Path(output), training_provenance=provenance)
+    output_path = Path(output)
+    artifact.save(output_path, training_provenance=provenance)
+    evaluation_path = output_path / "offline_evaluation.json"
+    final_report = evaluate_adapter_cache(
+        adapter=output_path,
+        cache=cache_path,
+        device=device,
+        output=evaluation_path,
+    )
+    if wandb_run is not None:
+        final_metrics: dict[str, float] = {}
+        for split, split_values in final_report["splits"].items():
+            for policy_name, policy_values in split_values.items():
+                if isinstance(policy_values, dict):
+                    for metric_name, value in policy_values.items():
+                        final_metrics[f"final/{split}/{policy_name}/{metric_name}"] = float(value)
+                else:
+                    final_metrics[f"final/{split}/{policy_name}"] = float(policy_values)
+        wandb_run.log(final_metrics, step=steps)
+        best_record = next(item for item in history if int(item["step"]) == best_step)
+        wandb_run.summary["best_step"] = best_step
+        wandb_run.summary["best_val_loss"] = best_loss
+        wandb_run.summary["quality_gate_pass"] = best_record["quality_gate_pass"]
+        for name, value in best_record.items():
+            if name.startswith(("adapter_", "bridge_", "improvement_", "residual_")):
+                wandb_run.summary[f"best/{name}"] = value
+
+        import wandb
+
+        model_artifact = wandb.Artifact(
+            f"{artifact.spec.adapter_id}-model-{wandb_run.id}",
+            type="model",
+            metadata={
+                "cache_sha256": cache_hash,
+                "best_step": best_step,
+                "best_val_loss": best_loss,
+                "deployment_status": artifact.spec.deployment_status,
+            },
+        )
+        model_artifact.add_dir(str(output_path.resolve()))
+        wandb_run.log_artifact(model_artifact)
+        wandb_run.finish()
     return provenance
 
 

@@ -118,6 +118,26 @@ def _vla_jepa_current_state(state: Any):
     return state.unsqueeze(1) if state.ndim == 2 else state
 
 
+def _flatten_config_to_cli_args(
+    data: dict[str, Any], prefix: str = ""
+) -> list[str]:
+    """Flatten config values without dropping ordered sequence overrides."""
+    args: list[str] = []
+    for key, value in data.items():
+        if key in {"path", "type"}:
+            continue
+        full_key = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, bool):
+            value = str(value).lower()
+        if isinstance(value, dict):
+            args.extend(_flatten_config_to_cli_args(value, full_key))
+        elif isinstance(value, list):
+            args.append(f"--{full_key}={json.dumps(value, separators=(',', ':'))}")
+        elif value is not None:
+            args.append(f"--{full_key}={value}")
+    return args
+
+
 def _remap_molmoact2_processor_overrides(policy_cfg: Any, kwargs: dict[str, Any]):
     """Use MolmoAct2's registered masked-normalizer step names for fine-tuning."""
     if getattr(policy_cfg, "type", None) != "molmoact2":
@@ -273,6 +293,15 @@ class TransformRunner:
                 log.warning("[anvil_trainer] Failed to unregister processor aliases: %s", e)
             finally:
                 self._registered_aliases.clear()
+
+    def apply_config_sequence_patch(self) -> None:
+        """Preserve ordered list overrides in pretrained-policy config files."""
+        import lerobot.configs.parser as parser
+
+        self._patch(parser, "_flatten_to_cli_args", _flatten_config_to_cli_args)
+        log.info(
+            "[anvil_trainer] Patched config flattening to preserve sequence overrides"
+        )
 
     def apply_processor_compat_aliases(self) -> None:
         """Register compatibility aliases for renamed action processor registry names.
@@ -952,6 +981,7 @@ def patched_lerobot(config: TrainingConfig):
     """
     runner = TransformRunner(config)
     runner.log_config()
+    runner.apply_config_sequence_patch()
     runner.apply_metadata_patches()
     runner.apply_vla_jepa_input_patch()
     runner.apply_processor_compat_aliases()

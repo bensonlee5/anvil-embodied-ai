@@ -1,6 +1,7 @@
 # OpenArm 2.0 live control for the shirt-fold Pi0.5 fine-tune.
 # Commands publish to the physical bimanual follower controllers. Full chunks
 # are prefetched and executed in order; RTC tail-action clamping is disabled.
+# Command limiting is delegated to anvil-loader on the robot-control PC.
 
 model:
   task_description: "Fold the T-shirt properly"
@@ -73,4 +74,5 @@ cameras:
     "/cam_wrist_r/image_raw/compressed": "right_wrist"
 
 safety:
-  max_position_delta: 0.05
+  max_position_delta: null
+  min_position_delta: null
