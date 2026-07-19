@@ -141,5 +141,5 @@ cameras:
 #   Commands are held at last published value until cumulative change exceeds this threshold.
 #   Default: disabled (null). Recommended starting value: 0.05.
 safety:
-  max_position_delta: 0.03
+  max_position_delta: 0.20
   min_position_delta: null

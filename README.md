@@ -44,7 +44,7 @@ This repository is the embodied AI stack for the Anvil platform — data convers
 |-------|-------------|
 | **0. Data Collection** | Record teleoperation demos as MCAP files via [Anvil Devbox](https://shop.anvil.bot/products/anvil-devbox) |
 | **1. Data Conversion** | Convert MCAP recordings to LeRobot v3.0 datasets → [docs/data-conversion.md](docs/data-conversion.md) |
-| **2. Model Training** | Train ACT, Diffusion, Pi/SmolVLA, and selected LeRobot foundation policies → [docs/training.md](docs/training.md) |
+| **2. Model Training** | Train ACT, Diffusion, Pi/SmolVLA, and selected LeRobot foundation policies → [docs/training.md](docs/training.md); [OpenArm 2 shirt-fold A/B runbook](docs/shirt-fold-training.md) |
 | **3. Offline Evaluation** | Validate model performance against ground-truth before deploying → [docs/evaluation.md](docs/evaluation.md) |
 | **4. Run Inference** | Deploy trained models on a GPU PC via ROS2 CycloneDDS → [docs/inference.md](docs/inference.md) |
 

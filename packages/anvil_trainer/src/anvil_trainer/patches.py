@@ -118,6 +118,26 @@ def _vla_jepa_current_state(state: Any):
     return state.unsqueeze(1) if state.ndim == 2 else state
 
 
+def _flatten_config_to_cli_args(
+    data: dict[str, Any], prefix: str = ""
+) -> list[str]:
+    """Flatten config values without dropping ordered sequence overrides."""
+    args: list[str] = []
+    for key, value in data.items():
+        if key in {"path", "type"}:
+            continue
+        full_key = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, bool):
+            value = str(value).lower()
+        if isinstance(value, dict):
+            args.extend(_flatten_config_to_cli_args(value, full_key))
+        elif isinstance(value, list):
+            args.append(f"--{full_key}={json.dumps(value, separators=(',', ':'))}")
+        elif value is not None:
+            args.append(f"--{full_key}={value}")
+    return args
+
+
 def _remap_molmoact2_processor_overrides(policy_cfg: Any, kwargs: dict[str, Any]):
     """Use MolmoAct2's registered masked-normalizer step names for fine-tuning."""
     if getattr(policy_cfg, "type", None) != "molmoact2":
@@ -143,6 +163,40 @@ def _remap_molmoact2_processor_overrides(policy_cfg: Any, kwargs: dict[str, Any]
         overrides[molmoact2_name] = overrides.pop(generic_name)
         remapped_kwargs[kwarg_name] = overrides
     return remapped_kwargs
+
+
+def _make_pre_post_processors_with_compat(original_make_processors, *args, **kwargs):
+    """Load processors while bridging known serialized step-name migrations."""
+    policy_cfg = kwargs.get("policy_cfg", args[0] if args else None)
+    effective_kwargs = _remap_molmoact2_processor_overrides(policy_cfg, kwargs)
+    try:
+        return original_make_processors(*args, **effective_kwargs)
+    except KeyError as error:
+        message = str(error)
+        overrides = effective_kwargs.get("preprocessor_overrides")
+        is_legacy_delta_mismatch = (
+            isinstance(overrides, dict)
+            and "relative_actions_processor" in overrides
+            and "delta_actions_processor" not in overrides
+            and "Override keys" in message
+            and "Available step keys" in message
+            and "relative_actions_processor" in message
+            and "delta_actions_processor" in message
+        )
+        if not is_legacy_delta_mismatch:
+            raise
+
+        remapped_overrides = dict(overrides)
+        remapped_overrides["delta_actions_processor"] = remapped_overrides.pop(
+            "relative_actions_processor"
+        )
+        remapped_kwargs = dict(effective_kwargs)
+        remapped_kwargs["preprocessor_overrides"] = remapped_overrides
+        log.info(
+            "[anvil_trainer] Remapped relative_actions_processor override to "
+            "legacy delta_actions_processor checkpoint step"
+        )
+        return original_make_processors(*args, **remapped_kwargs)
 
 
 class TransformRunner:
@@ -239,6 +293,15 @@ class TransformRunner:
                 log.warning("[anvil_trainer] Failed to unregister processor aliases: %s", e)
             finally:
                 self._registered_aliases.clear()
+
+    def apply_config_sequence_patch(self) -> None:
+        """Preserve ordered list overrides in pretrained-policy config files."""
+        import lerobot.configs.parser as parser
+
+        self._patch(parser, "_flatten_to_cli_args", _flatten_config_to_cli_args)
+        log.info(
+            "[anvil_trainer] Patched config flattening to preserve sequence overrides"
+        )
 
     def apply_processor_compat_aliases(self) -> None:
         """Register compatibility aliases for renamed action processor registry names.
@@ -673,8 +736,9 @@ class TransformRunner:
 
         def capturing_make_processors(*args, **kwargs):
             policy_cfg = kwargs.get("policy_cfg", args[0] if args else None)
-            kwargs = _remap_molmoact2_processor_overrides(policy_cfg, kwargs)
-            preprocessor, postprocessor = original_make_processors(*args, **kwargs)
+            preprocessor, postprocessor = _make_pre_post_processors_with_compat(
+                original_make_processors, *args, **kwargs
+            )
             if getattr(policy_cfg, "type", None) == "vla_jepa":
                 removed_steps = reconcile_vla_jepa_postprocessor(policy_cfg, postprocessor)
                 if removed_steps:
@@ -917,6 +981,7 @@ def patched_lerobot(config: TrainingConfig):
     """
     runner = TransformRunner(config)
     runner.log_config()
+    runner.apply_config_sequence_patch()
     runner.apply_metadata_patches()
     runner.apply_vla_jepa_input_patch()
     runner.apply_processor_compat_aliases()

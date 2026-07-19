@@ -185,6 +185,10 @@ inference_tuning:
 #   # overcoming motor dead zones / friction. Default: disabled (null).
 ```
 
+Set both fields explicitly to `null` to disable inference-side rate limiting
+and deadband. Omitting `max_position_delta` retains the backward-compatible
+0.1-radian software limit.
+
 ## DDS Middleware Selection
 
 Both Fast DDS and CycloneDDS are supported. **CycloneDDS is the default** (faster in our tests).

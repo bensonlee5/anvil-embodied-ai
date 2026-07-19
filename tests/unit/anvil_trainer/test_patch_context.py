@@ -1,8 +1,10 @@
 """Tests for the patched_lerobot context manager + patch restoration."""
+
 from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 
 import torch
 
@@ -40,10 +42,10 @@ class TestPatchInfrastructure:
         runner._patch(mod, "foo", 2)
         # Second call MUST NOT re-wrap / save the wrapped value as "original"
         runner._patch(mod, "foo", 3)
-        assert mod.foo == 2            # second patch was skipped
+        assert mod.foo == 2  # second patch was skipped
         assert len(runner._saved_originals) == 1
         runner.restore_all_patches()
-        assert mod.foo == 1            # restored to the true original
+        assert mod.foo == 1  # restored to the true original
 
     def test_restore_is_lifo(self):
         runner = self._make_runner()
@@ -71,6 +73,70 @@ class TestPatchInfrastructure:
         assert m1.x == "new1" and m2.x == "new2"
         runner.restore_all_patches()
         assert m1.x == "orig1" and m2.x == "orig2"
+
+
+class TestConfigSequencePatch:
+    def test_ordered_lists_reach_lerobot_cli_and_patch_restores(self):
+        import lerobot.configs.parser as parser
+
+        original = parser._flatten_to_cli_args
+        runner = TransformRunner(TrainingConfig())
+        runner.apply_config_sequence_patch()
+        try:
+            args = parser._flatten_to_cli_args(
+                {
+                    "path": "ignored/checkpoint",
+                    "action_feature_names": [
+                        "right_joint_2.pos",
+                        "right_joint_1.pos",
+                        "left_joint_1.pos",
+                    ],
+                    "relative_exclude_joints": ["gripper"],
+                    "optimizer_betas": [0.9, 0.95],
+                }
+            )
+            assert args == [
+                '--action_feature_names=["right_joint_2.pos","right_joint_1.pos","left_joint_1.pos"]',
+                '--relative_exclude_joints=["gripper"]',
+                "--optimizer_betas=[0.9,0.95]",
+            ]
+        finally:
+            runner.restore_all_patches()
+
+        assert parser._flatten_to_cli_args is original
+
+    def test_pretrained_yaml_lists_survive_path_extraction(self, tmp_path):
+        import lerobot.configs.parser as parser
+
+        recipe = tmp_path / "recipe.yaml"
+        recipe.write_text(
+            """
+policy:
+  path: example/checkpoint
+  action_feature_names: [right_joint_2.pos, right_joint_1.pos, left_joint_1.pos]
+  relative_exclude_joints: [gripper]
+  optimizer_betas: [0.9, 0.95]
+""".lstrip()
+        )
+        runner = TransformRunner(TrainingConfig())
+        runner.apply_config_sequence_patch()
+        cleaned_path = None
+        parser._config_path_args.clear()
+        parser._config_yaml_overrides.clear()
+        try:
+            cleaned_path = Path(parser.extract_path_fields_from_config(str(recipe), ["policy"]))
+            assert parser.get_path_arg("policy") == "example/checkpoint"
+            assert parser.get_yaml_overrides("policy") == [
+                '--action_feature_names=["right_joint_2.pos","right_joint_1.pos","left_joint_1.pos"]',
+                '--relative_exclude_joints=["gripper"]',
+                "--optimizer_betas=[0.9,0.95]",
+            ]
+        finally:
+            runner.restore_all_patches()
+            parser._config_path_args.clear()
+            parser._config_yaml_overrides.clear()
+            if cleaned_path is not None:
+                cleaned_path.unlink(missing_ok=True)
 
 
 class TestVLAJEPAInputPatch:

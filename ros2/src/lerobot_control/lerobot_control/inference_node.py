@@ -479,7 +479,12 @@ class LeRobotInferenceNode(Node):
         logger.info(f"Device:     {self.device}")
         logger.info(f"Frequency:  {self.control_freq} Hz")
         if not self.echo_topic_only:
-            logger.info(f"Max delta:  {self.max_position_delta} rad")
+            max_delta = (
+                f"{self.max_position_delta} rad"
+                if self.max_position_delta is not None
+                else "disabled (delegated to robot controller)"
+            )
+            logger.info(f"Max delta:  {max_delta}")
 
         h, w, _ = self.image_shape
         res_note = "auto-detected from checkpoint" if self.model_path else "default"
@@ -573,11 +578,15 @@ class LeRobotInferenceNode(Node):
 
         self._action_queue = ActionQueue(self.model.config.rtc_config)
         self._latency_tracker = LatencyStats(maxlen=100)
-        self._latest_obs = None
-        self._obs_lock = threading.Lock()
+        self._rtc_acquire_latency = LatencyStats(maxlen=100)
+        self._rtc_preprocess_latency = LatencyStats(maxlen=100)
+        self._rtc_model_latency = LatencyStats(maxlen=100)
         self._inference_stop = threading.Event()
         self._rtc_threshold = self.rtc_config_yaml.get("queue_trigger_threshold", 30)
         self._rtc_delay_fallback = self.rtc_config_yaml.get("inference_delay", 4)
+        self._rtc_allow_latency_overrun = bool(
+            self.rtc_config_yaml.get("allow_latency_overrun", False)
+        )
         self._rtc_starvation_warned = False
 
     def _start_inference_thread(self) -> None:
@@ -603,11 +612,13 @@ class LeRobotInferenceNode(Node):
                 time.sleep(0.005)
                 continue
 
-            # Read latest preprocessed observation (non-blocking)
-            with self._obs_lock:
-                obs = self._latest_obs
-
-            if obs is None:
+            # Acquire and materialize exactly one newest observation per prediction.
+            # Reading shared images here avoids copying and converting three full
+            # resolution frames on every 30 Hz observation timer tick.
+            t0 = time.monotonic()
+            raw_obs = self.strategy.get_observation(self.camera_names)
+            acquire_elapsed = time.monotonic() - t0
+            if raw_obs is None:
                 time.sleep(0.005)
                 continue
 
@@ -624,14 +635,18 @@ class LeRobotInferenceNode(Node):
             # Run inference — do NOT use torch.inference_mode():
             # RTCProcessor calls torch.enable_grad() internally for guidance gradients.
             # inference_mode() cannot be overridden and would silently zero all gradients.
-            t0 = time.monotonic()
             try:
+                preprocess_start = time.monotonic()
+                obs = self._preprocess_policy_observation(raw_obs)
+                preprocess_elapsed = time.monotonic() - preprocess_start
+                model_start = time.monotonic()
                 raw = self.model.predict_action_chunk(
                     obs,
                     inference_delay=inference_delay,
                     prev_chunk_left_over=prev_actions,
                     execution_horizon=self.model.config.rtc_config.execution_horizon,
                 )
+                model_elapsed = time.monotonic() - model_start
             except Exception as e:
                 import traceback
                 self.get_logger().error(f"[RTC] predict_action_chunk failed: {e}")
@@ -641,6 +656,9 @@ class LeRobotInferenceNode(Node):
 
             elapsed = time.monotonic() - t0
             self._latency_tracker.add(elapsed)
+            self._rtc_acquire_latency.add(acquire_elapsed)
+            self._rtc_preprocess_latency.add(preprocess_elapsed)
+            self._rtc_model_latency.add(model_elapsed)
             new_delay = math.ceil(elapsed * self.control_freq)
 
             # Postprocess in inference thread (official pattern from eval_with_real_robot.py):
@@ -648,8 +666,17 @@ class LeRobotInferenceNode(Node):
             #   processed = denormalized (ready for the robot)
             original = raw.squeeze(0).clone()
             chunk_steps = len(original)
+            merge_delay = new_delay
             if new_delay >= chunk_steps:
-                if not self._rtc_starvation_warned:
+                if self._rtc_allow_latency_overrun:
+                    merge_delay = max(chunk_steps - 1, 0)
+                    if not self._rtc_starvation_warned:
+                        self.get_logger().warning(
+                            "[RTC] Latency overrun override active: "
+                            f"clamping delay {new_delay} -> {merge_delay} "
+                            "to execute the final available action"
+                        )
+                elif not self._rtc_starvation_warned:
                     self.get_logger().error(
                         "[RTC] Inference latency consumed the complete action chunk "
                         f"(delay={new_delay}, chunk={chunk_steps}); holding the last command"
@@ -663,7 +690,7 @@ class LeRobotInferenceNode(Node):
             else:
                 processed = original
 
-            self._action_queue.merge(original, processed, new_delay, idx_before)
+            self._action_queue.merge(original, processed, merge_delay, idx_before)
             self.metrics.record_inference()
 
     def _setup_sync_prefetch(self) -> None:
@@ -698,7 +725,6 @@ class LeRobotInferenceNode(Node):
 
         self._sync_obs_lock = threading.Lock()
         self._sync_model_lock = threading.Lock()
-        self._sync_latest_raw_obs: dict | None = None
         self._sync_generation = 0
         self._inference_stop = threading.Event()
 
@@ -720,9 +746,11 @@ class LeRobotInferenceNode(Node):
                 time.sleep(0.005)
                 continue
 
+            # Materialize one newest observation per chunk instead of copying and
+            # converting all full-resolution frames on every 30 Hz timer tick.
             with self._sync_obs_lock:
-                raw_obs = self._sync_latest_raw_obs
                 generation = self._sync_generation
+            raw_obs = self.strategy.get_observation(self.camera_names)
             if raw_obs is None:
                 time.sleep(0.005)
                 continue
@@ -802,26 +830,21 @@ class LeRobotInferenceNode(Node):
     def _obs_update(self) -> None:
         """Observation update timer (unified for all models).
 
-        RTC: preprocess and update shared snapshot for background inference thread.
+        RTC observations are acquired directly by the background inference thread.
         Synchronous policies: preprocess, run select_action, push result to deque.
         """
         if self._shutting_down:
+            return
+        if self._uses_rtc_inference:
+            return
+        if self._uses_sync_prefetch:
             return
         observation = self.strategy.get_observation(self.camera_names)
         if observation is None:
             return
 
         try:
-            if self._uses_rtc_inference:
-                obs = self._preprocess_policy_observation(observation)
-                with self._obs_lock:
-                    self._latest_obs = obs
-            elif self._uses_sync_prefetch:
-                # Keep only the newest raw observation. Preprocessing is performed
-                # once per chunk in the worker rather than at the 30 Hz timer rate.
-                with self._sync_obs_lock:
-                    self._sync_latest_raw_obs = dict(observation)
-            else:
+            if not self._uses_sync_prefetch:
                 # Keep a reference to the raw (unnormalised) observation so we can
                 # capture the joint-state baseline when a new chunk is generated.
                 _raw_obs = observation
@@ -1150,6 +1173,13 @@ class LeRobotInferenceNode(Node):
             if lat_mean > 0 and hasattr(self, "_action_queue"):
                 queue_size = self._action_queue.qsize()
                 logger.info(f"  RTC queue    {queue_size}")
+                acquire_ms = self._rtc_acquire_latency.mean() * 1000
+                preprocess_ms = self._rtc_preprocess_latency.mean() * 1000
+                model_ms = self._rtc_model_latency.mean() * 1000
+                logger.info(
+                    f"  RTC stages   acquire={acquire_ms:.1f}ms  "
+                    f"preprocess={preprocess_ms:.1f}ms  model={model_ms:.1f}ms"
+                )
 
             # Debug: Action FPS, effective control Hz, queue depth stats, smoothness
             if self._debug and lat_mean > 0:
@@ -1264,7 +1294,6 @@ class LeRobotInferenceNode(Node):
         if self._uses_sync_prefetch:
             with self._sync_obs_lock:
                 self._sync_generation += 1
-                self._sync_latest_raw_obs = None
             with self._classic_action_lock:
                 self._classic_action_deque.clear()
             with self._sync_model_lock:
@@ -1276,10 +1305,15 @@ class LeRobotInferenceNode(Node):
         if self._uses_rtc_inference and hasattr(self, "_action_queue"):
             from lerobot.policies.rtc.action_queue import ActionQueue
             self._action_queue = ActionQueue(self.model.config.rtc_config)
-            with self._obs_lock:
-                self._latest_obs = None
         if hasattr(self, "_latency_tracker"):
             self._latency_tracker.reset()
+        for tracker_name in (
+            "_rtc_acquire_latency",
+            "_rtc_preprocess_latency",
+            "_rtc_model_latency",
+        ):
+            if hasattr(self, tracker_name):
+                getattr(self, tracker_name).reset()
         self.get_logger().info("Policy state reset complete")
 
     def get_input_stats(self) -> dict:

@@ -86,6 +86,34 @@ class EpisodeEvaluator:
         split_label: str,
     ) -> EpisodeResult:
         """Evaluate model predictions for a single episode."""
+        from .sanity import evaluate_native_relative_episode, find_native_relative_step
+
+        native_relative_step = find_native_relative_step(self.preprocessor)
+        if native_relative_step is not None and hasattr(self.model, "predict_action_chunk"):
+            self.action_type = "native_relative"
+            native_result = evaluate_native_relative_episode(
+                model=self.model,
+                preprocessor=self.preprocessor,
+                postprocessor=self.postprocessor,
+                dataset=dataset,
+                frame_indices=frame_indices,
+                episode_idx=episode_idx,
+                split_label=split_label,
+                device=self.device,
+                task_description=self.task_description,
+                joint_names=self.joint_names,
+            )
+            return EpisodeResult(
+                episode_idx=episode_idx,
+                split_label=split_label,
+                predicted=native_result.predicted,
+                ground_truth=native_result.ground_truth,
+                joint_names=self.joint_names,
+                raw_output=native_result.relative_output,
+                obs_states=native_result.observation_states,
+                raw_ground_truth=native_result.relative_ground_truth,
+            )
+
         _ensure_model_loader_importable()
         from lerobot_control.delta_restore import restore_delta_chunk
         from lerobot_control.model_loader import reset_model_state

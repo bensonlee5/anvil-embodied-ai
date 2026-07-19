@@ -53,6 +53,7 @@ members = [
     "packages/anvil_eval",
     "packages/anvil_eval_ros",
     "packages/anvil_shared",
+    "packages/anvil_embodiment",
 ]
 
 # PyTorch index — required for torch+cu* packages with bundled CUDA libs.
