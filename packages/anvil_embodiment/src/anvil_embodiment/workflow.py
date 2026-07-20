@@ -171,6 +171,32 @@ def cache_policy_predictions(
     split_rows: list[str] = []
     rejected: list[dict[str, Any]] = []
     start_time = time.perf_counter()
+    attempted_samples = 0
+    total_samples = sum(
+        (len(dataset_wrapper.get_episode_frames(episode)) + stride - 1) // stride
+        for episode in range(dataset_wrapper.total_episodes)
+    )
+
+    def log_progress() -> None:
+        if attempted_samples != 1 and attempted_samples % 10 and attempted_samples != total_samples:
+            return
+        elapsed = time.perf_counter() - start_time
+        seconds_per_sample = elapsed / max(attempted_samples, 1)
+        print(
+            json.dumps(
+                {
+                    "event": "adapter_cache_progress",
+                    "attempted": attempted_samples,
+                    "accepted": len(current_rows),
+                    "rejected": len(rejected),
+                    "total": total_samples,
+                    "elapsed_seconds": elapsed,
+                    "eta_seconds": seconds_per_sample * (total_samples - attempted_samples),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
 
     for episode in range(dataset_wrapper.total_episodes):
         frames = dataset_wrapper.get_episode_frames(episode)
@@ -178,6 +204,7 @@ def cache_policy_predictions(
         if baseline is not None and callable(getattr(baseline[0], "reset", None)):
             baseline[0].reset()
         for offset in range(0, len(frames), stride):
+            attempted_samples += 1
             frame = frames[offset]
             item = dataset[frame]
             observation = {
@@ -218,6 +245,7 @@ def cache_policy_predictions(
                     baseline_rows.append(direct[: artifact.spec.residual.chunk_size])
             except Exception as exc:
                 rejected.append({"episode": episode, "frame": frame, "error": str(exc)})
+                log_progress()
                 continue
             current_rows.append(_numpy(item["observation.state"]).astype(np.float32))
             bridge_rows.append(bridge_chunk.astype(np.float32))
@@ -225,6 +253,7 @@ def cache_policy_predictions(
             episode_rows.append(episode)
             frame_rows.append(int(_numpy(item["frame_index"])))
             split_rows.append(episode_splits[episode])
+            log_progress()
 
     if not current_rows:
         raise EmbodimentError("every cache sample was rejected")

@@ -16,6 +16,14 @@ import torch
 from .policy_registry import is_supported_policy, supports_rtc_inference
 
 
+def _processor_device_overrides(config_path: Path, device: str) -> dict[str, dict[str, str]]:
+    """Return a device override only when the serialized pipeline has that step."""
+    payload = json.loads(config_path.read_text())
+    if any(step.get("registry_name") == "device_processor" for step in payload.get("steps", [])):
+        return {"device_processor": {"device": device}}
+    return {}
+
+
 def set_deterministic_mode(seed: int = 42):
     """
     Set PyTorch to deterministic mode for reproducible inference.
@@ -151,6 +159,13 @@ class ModelLoader:
         cfg = PreTrainedConfig.from_pretrained(str(self.model_path))
         if hasattr(cfg, "compile_model"):
             cfg.compile_model = False
+        # LeRobot resolves an unavailable checkpoint device during config
+        # construction (for example cuda -> mps on macOS). The caller's
+        # explicit runtime device must win before the policy is instantiated;
+        # moving the module afterwards is too late because policies allocate
+        # helper tensors from config.device in __init__ and inference.
+        if hasattr(cfg, "device"):
+            cfg.device = self.device
         return cfg
 
     @property
@@ -336,9 +351,18 @@ class ModelLoader:
             post_config = self.model_path / "policy_postprocessor.json"
 
             if pre_config.exists() and post_config.exists():
+                # Device is an execution-time choice, not checkpoint semantics.
+                # Override only the serialized device steps so the saved
+                # normalization and every other processor remain authoritative.
                 pre_processor, post_processor = make_pre_post_processors(
                     model.config,
                     pretrained_path=str(self.model_path),
+                    preprocessor_overrides=_processor_device_overrides(
+                        pre_config, self.device
+                    ),
+                    postprocessor_overrides=_processor_device_overrides(
+                        post_config, self.device
+                    ),
                 )
                 self._pre_processor = pre_processor
                 self._post_processor = post_processor
