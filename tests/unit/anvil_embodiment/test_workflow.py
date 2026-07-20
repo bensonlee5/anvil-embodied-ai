@@ -4,6 +4,7 @@ import numpy as np
 from anvil_embodiment.artifact import WEIGHTS_NAME
 from anvil_embodiment.workflow import (
     _fit_horizon_action_statistics,
+    _numeric_metric_leaves,
     _resample_cached_motion_intensity,
     evaluate_adapter_cache,
     train_residual_adapter,
@@ -11,6 +12,25 @@ from anvil_embodiment.workflow import (
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MANIFEST = REPO_ROOT / "configs" / "embodiment_adapters" / "hf_folding_to_anvil_openarm2.json"
+
+
+def test_numeric_metric_leaves_flattens_actuators_and_skips_labels() -> None:
+    assert _numeric_metric_leaves(
+        "final/test/adapter",
+        {
+            "failure_rate": np.float32(0.25),
+            "per_actuator": {
+                "right_gripper.pos": {
+                    "kind": "gripper",
+                    "native_unit": "meter",
+                    "mae": 0.01,
+                }
+            },
+        },
+    ) == {
+        "final/test/adapter/failure_rate": 0.25,
+        "final/test/adapter/per_actuator/right_gripper.pos/mae": 0.01,
+    }
 
 
 def _synthetic_cache(path: Path) -> None:

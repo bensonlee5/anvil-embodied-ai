@@ -510,6 +510,18 @@ def _cache_arrays(path: str | Path) -> dict[str, np.ndarray]:
     return arrays
 
 
+def _numeric_metric_leaves(prefix: str, values: dict[str, Any]) -> dict[str, float]:
+    """Flatten numeric report leaves for metric backends; retain strings in JSON only."""
+    flattened: dict[str, float] = {}
+    for name, value in values.items():
+        key = f"{prefix}/{name}"
+        if isinstance(value, dict):
+            flattened.update(_numeric_metric_leaves(key, value))
+        elif isinstance(value, (int, float, np.integer, np.floating)):
+            flattened[key] = float(value)
+    return flattened
+
+
 def train_residual_adapter(
     *,
     manifest: str | Path,
@@ -867,8 +879,9 @@ def train_residual_adapter(
         for split, split_values in final_report["splits"].items():
             for policy_name, policy_values in split_values.items():
                 if isinstance(policy_values, dict):
-                    for metric_name, value in policy_values.items():
-                        final_metrics[f"final/{split}/{policy_name}/{metric_name}"] = float(value)
+                    final_metrics.update(
+                        _numeric_metric_leaves(f"final/{split}/{policy_name}", policy_values)
+                    )
                 else:
                     final_metrics[f"final/{split}/{policy_name}"] = float(policy_values)
         wandb_run.log(final_metrics, step=steps)
