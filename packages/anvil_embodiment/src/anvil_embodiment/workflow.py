@@ -125,6 +125,46 @@ def _target_chunk(dataset: Any, frame_indices: list[int], offset: int, size: int
     return np.stack(rows)
 
 
+def _align_cached_motion_intensity(
+    arrays: dict[str, np.ndarray],
+    target_joint_ranges: np.ndarray,
+) -> dict[str, Any]:
+    """Match bridge displacement scale using target data from the train split only."""
+    train = arrays["split"] == "train"
+    if not np.any(train):
+        raise EmbodimentError("motion alignment requires training samples")
+    active = np.asarray(ACTIVE_JOINT_INDICES)
+    current = arrays["current_state"][:, None, active]
+    raw = arrays["bridge_chunk"][..., active]
+    target = arrays["target_chunk"][..., active]
+    raw_motion = float(np.mean(np.abs(raw[train] - current[train])))
+    target_motion = float(np.mean(np.abs(target[train] - current[train])))
+    if raw_motion <= 1e-8:
+        raise EmbodimentError("bridge motion is zero on the training split")
+    scale = target_motion / raw_motion
+
+    raw_bridge = arrays["bridge_chunk"].copy()
+    aligned = raw_bridge.copy()
+    proposed = current + scale * (raw - current)
+    lower = np.asarray(target_joint_ranges, dtype=np.float32)[active, 0]
+    upper = np.asarray(target_joint_ranges, dtype=np.float32)[active, 1]
+    clipped = (proposed < lower) | (proposed > upper)
+    aligned[..., active] = np.clip(proposed, lower, upper)
+    arrays["raw_bridge_chunk"] = raw_bridge
+    arrays["bridge_chunk"] = aligned.astype(np.float32)
+    return {
+        "enabled": True,
+        "method": "global_active_joint_mean_absolute_displacement_ratio",
+        "stats_source": "train_split_only",
+        "scale": scale,
+        "train_raw_motion_rad": raw_motion,
+        "train_target_motion_rad": target_motion,
+        "clipped_fraction": float(np.mean(clipped)),
+        "active_joint_indices": active.tolist(),
+        "grippers_scaled": False,
+    }
+
+
 def cache_policy_predictions(
     *,
     manifest: str | Path,
@@ -138,6 +178,7 @@ def cache_policy_predictions(
     seed: int = 42,
     video_backend: str = "pyav",
     baseline_policy: str | Path | None = None,
+    align_motion_intensity: bool = False,
 ) -> dict[str, Any]:
     """Cache frozen folding predictions after deterministic kinematic bridging."""
     if stride < 1:
@@ -267,31 +308,17 @@ def cache_policy_predictions(
     }
     if baseline_rows:
         arrays["baseline_chunk"] = np.stack(baseline_rows).astype(np.float32)
+    motion_alignment: dict[str, Any] = {"enabled": False}
+    if align_motion_intensity:
+        motion_alignment = _align_cached_motion_intensity(
+            arrays,
+            artifact.bridge.target_joint_ranges,
+        )
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if baseline_rows:
-        np.savez_compressed(
-            output_path,
-            current_state=arrays["current_state"],
-            bridge_chunk=arrays["bridge_chunk"],
-            target_chunk=arrays["target_chunk"],
-            episode_index=arrays["episode_index"],
-            frame_index=arrays["frame_index"],
-            split=arrays["split"],
-            baseline_chunk=arrays["baseline_chunk"],
-        )
-    else:
-        np.savez_compressed(
-            output_path,
-            current_state=arrays["current_state"],
-            bridge_chunk=arrays["bridge_chunk"],
-            target_chunk=arrays["target_chunk"],
-            episode_index=arrays["episode_index"],
-            frame_index=arrays["frame_index"],
-            split=arrays["split"],
-        )
+    np.savez_compressed(output_path, **arrays)
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "samples": len(current_rows),
         "rejected_samples": len(rejected),
         "rejected": rejected,
@@ -300,6 +327,7 @@ def cache_policy_predictions(
         "seconds": time.perf_counter() - start_time,
         "base_policy": str(_pretrained_dir(base_policy)),
         "baseline_policy": str(_pretrained_dir(baseline_policy)) if baseline_policy else None,
+        "motion_alignment": motion_alignment,
     }
     output_path.with_suffix(output_path.suffix + ".json").write_text(
         json.dumps(report, indent=2, sort_keys=True)
@@ -369,9 +397,12 @@ def train_residual_adapter(
     )
     correction_bounds = artifact.residual.correction_bounds.to(device_value)
     generator = torch.Generator(device="cpu").manual_seed(seed)
-    best_loss = float("inf")
-    best_step = 0
-    best_state: dict[str, Tensor] | None = None
+    fallback_loss = float("inf")
+    fallback_step = 0
+    fallback_state: dict[str, Tensor] | None = None
+    passing_loss = float("inf")
+    passing_step = 0
+    passing_state: dict[str, Tensor] | None = None
     history: list[dict[str, float]] = []
     wandb_run: Any | None = None
     if wandb_project is not None and wandb_mode != "disabled":
@@ -464,7 +495,8 @@ def train_residual_adapter(
         corrected_values = np.concatenate(corrected_rows)
         correction_values = np.concatenate(correction_rows)
         selected_current = arrays["current_state"][indices]
-        selected_bridge = arrays["bridge_chunk"][indices]
+        selected_aligned_bridge = arrays["bridge_chunk"][indices]
+        selected_bridge = arrays.get("raw_bridge_chunk", arrays["bridge_chunk"])[indices]
         selected_target = arrays["target_chunk"][indices]
         adapter_metrics = _prediction_metrics(
             corrected_values,
@@ -474,6 +506,12 @@ def train_residual_adapter(
         )
         bridge_metrics = _prediction_metrics(
             selected_bridge,
+            selected_target,
+            selected_current,
+            artifact,
+        )
+        aligned_bridge_metrics = _prediction_metrics(
+            selected_aligned_bridge,
             selected_target,
             selected_current,
             artifact,
@@ -493,6 +531,9 @@ def train_residual_adapter(
             quality[f"adapter_{name}"] = value
         for name, value in bridge_metrics.items():
             quality[f"bridge_{name}"] = value
+        if "raw_bridge_chunk" in arrays:
+            for name, value in aligned_bridge_metrics.items():
+                quality[f"aligned_bridge_{name}"] = value
         error_metrics = (
             "normalized_joint_mae",
             "joint_rmse_rad",
@@ -569,16 +610,26 @@ def train_residual_adapter(
                     },
                     step=step,
                 )
-            if val_loss < best_loss:
-                best_loss = val_loss
-                best_step = step
-                best_state = {
-                    name: value.detach().cpu().clone()
-                    for name, value in residual.state_dict().items()
+            state = {
+                name: value.detach().cpu().clone() for name, value in residual.state_dict().items()
+            }
+            if val_loss < fallback_loss:
+                fallback_loss = val_loss
+                fallback_step = step
+                fallback_state = state
+            if quality["quality_gate_pass"] and val_loss < passing_loss:
+                passing_loss = val_loss
+                passing_step = step
+                passing_state = {
+                    name: value.detach().cpu().clone() for name, value in state.items()
                 }
 
-    if best_state is None:
+    if fallback_state is None:
         raise RuntimeError("adapter training produced no checkpoint")
+    selected_passing_checkpoint = passing_state is not None
+    best_loss = passing_loss if selected_passing_checkpoint else fallback_loss
+    best_step = passing_step if selected_passing_checkpoint else fallback_step
+    best_state = passing_state if selected_passing_checkpoint else fallback_state
     residual.load_state_dict(best_state)
     artifact.residual.eval()
     provenance = {
@@ -592,6 +643,14 @@ def train_residual_adapter(
         "weight_decay": weight_decay,
         "best_step": best_step,
         "best_val_loss": best_loss,
+        "selection_contract": (
+            "lowest_validation_loss_among_quality_gate_passing_checkpoints_"
+            "else_lowest_validation_loss"
+        ),
+        "gate_passing_evaluations": sum(int(item["quality_gate_pass"]) for item in history),
+        "selected_quality_gate_pass": selected_passing_checkpoint,
+        "fallback_best_step": fallback_step,
+        "fallback_best_val_loss": fallback_loss,
         "loss_weights": asdict(loss_weights),
         "history": history,
         "wandb": (
@@ -631,7 +690,9 @@ def train_residual_adapter(
         wandb_run.summary["best_val_loss"] = best_loss
         wandb_run.summary["quality_gate_pass"] = best_record["quality_gate_pass"]
         for name, value in best_record.items():
-            if name.startswith(("adapter_", "bridge_", "improvement_", "residual_")):
+            if name.startswith(
+                ("adapter_", "bridge_", "aligned_bridge_", "improvement_", "residual_")
+            ):
                 wandb_run.summary[f"best/{name}"] = value
 
         import wandb
@@ -720,9 +781,11 @@ def evaluate_adapter_cache(
         corrected, _ = artifact.residual(current, bridge)
     predictions = {
         "hold": np.repeat(arrays["current_state"][:, None, :], bridge.shape[1], axis=1),
-        "bridge": arrays["bridge_chunk"],
+        "bridge": arrays.get("raw_bridge_chunk", arrays["bridge_chunk"]),
         "adapter": corrected.cpu().numpy(),
     }
+    if "raw_bridge_chunk" in arrays:
+        predictions["aligned_bridge"] = arrays["bridge_chunk"]
     if "baseline_chunk" in arrays:
         predictions["current_5k"] = arrays["baseline_chunk"]
     report: dict[str, Any] = {

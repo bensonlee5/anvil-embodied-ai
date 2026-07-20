@@ -211,6 +211,14 @@ noise seeds. Rejected IK samples are listed next to the cache in a JSON report.
 The bridge column is produced with a zero-initialized residual, so it is the
 required bridge-only sanity baseline.
 
+For a cross-embodiment transfer run, add `--align-motion-intensity`. This stores
+the untouched bridge chunk as `raw_bridge_chunk`, computes one global active-arm
+displacement scale from training episodes only, applies it to the residual's
+bridge input, and clips the result to the buffered target command envelope.
+Validation and test rows never contribute to the scale, and grippers are not
+scaled. Quality gates continue to compare the trained adapter with the untouched
+raw bridge; the aligned bridge is reported separately.
+
 The residual is supervised only by target OpenArm 2.0 episodes. The much larger
 and more diverse source corpus is not discarded: it is already represented in
 the frozen `folding_final` policy weights and pinned processors. Mixing
@@ -249,6 +257,10 @@ The quality gate passes only when joint, shoulder, and TCP position errors impro
 motion does not collapse, and fewer than 5% of residual values reach 95% of their
 safety bound. The pinned manifest/cache and final adapter/evaluation are stored as
 W&B artifacts.
+When at least one evaluated checkpoint passes every quality gate, packaging
+selects the lowest-validation-loss passing checkpoint. Only when no checkpoint
+passes does it fall back to the unconstrained lowest-validation-loss checkpoint;
+the fallback and selection outcome are both recorded in provenance.
 
 Compare hold, deterministic bridge, learned adapter, and the optional current
 5k baseline on train/validation/test episodes:
