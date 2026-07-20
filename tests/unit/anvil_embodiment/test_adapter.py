@@ -213,6 +213,7 @@ def test_adapter_loss_is_zero_for_exact_target() -> None:
     target[..., 11] = 1.2
     residual = torch.zeros_like(target)
     loss, terms = compute_adapter_loss(
+        current_state=torch.zeros(2, 16, dtype=torch.float64),
         corrected=target,
         residual=residual,
         target=target,
@@ -224,6 +225,33 @@ def test_adapter_loss_is_zero_for_exact_target() -> None:
 
     assert float(loss) == pytest.approx(0.0, abs=1e-12)
     assert all(float(value) == pytest.approx(0.0, abs=1e-12) for value in terms.values())
+
+
+def test_adapter_motion_loss_penalizes_damped_displacement() -> None:
+    from anvil_embodiment.artifact import load_adapter_artifact
+
+    artifact = load_adapter_artifact(MANIFEST, require_weights=False)
+    current = torch.zeros(2, 16, dtype=torch.float64)
+    current[:, 3] = 1.2
+    current[:, 11] = 1.2
+    target = current[:, None, :].repeat(1, 4, 1)
+    target[..., 0] = 0.2
+    target[..., 8] = -0.2
+    corrected = current[:, None, :].repeat(1, 4, 1)
+    residual = corrected - target
+
+    _, terms = compute_adapter_loss(
+        current_state=current,
+        corrected=corrected,
+        residual=residual,
+        target=target,
+        target_ranges=torch.tensor(artifact.bridge.target_joint_ranges, dtype=torch.float64),
+        target_model=artifact.bridge.target_spec,
+        correction_bounds=torch.tensor(artifact.bridge.residual_bounds, dtype=torch.float64),
+        weights=AdapterLossWeights(motion=1.0),
+    )
+
+    assert float(terms["motion_loss"]) > 0.0
 
 
 def test_base_policy_verification_pins_processor_state(tmp_path: Path) -> None:

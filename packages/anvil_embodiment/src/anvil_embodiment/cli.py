@@ -66,6 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--joint-weight", type=float, default=1.0)
     train.add_argument("--pose-weight", type=float, default=0.25)
     train.add_argument("--velocity-weight", type=float, default=0.05)
+    train.add_argument("--motion-weight", type=float, default=0.0)
     train.add_argument("--residual-weight", type=float, default=0.01)
     train.add_argument("--wandb-project")
     train.add_argument("--wandb-entity")
@@ -126,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
                 joint=args.joint_weight,
                 pose=args.pose_weight,
                 velocity=args.velocity_weight,
+                motion=args.motion_weight,
                 residual=args.residual_weight,
             ),
             wandb_project=args.wandb_project,

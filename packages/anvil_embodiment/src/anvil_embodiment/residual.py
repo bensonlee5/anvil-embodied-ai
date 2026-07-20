@@ -94,6 +94,7 @@ class AdapterLossWeights:
     joint: float = 1.0
     pose: float = 0.25
     velocity: float = 0.05
+    motion: float = 0.0
     residual: float = 0.01
     huber_beta: float = 0.05
     position_scale_m: float = 0.05
@@ -125,6 +126,7 @@ def _geodesic_angle(predicted: Tensor, target: Tensor) -> Tensor:
 
 def compute_adapter_loss(
     *,
+    current_state: Tensor,
     corrected: Tensor,
     residual: Tensor,
     target: Tensor,
@@ -138,6 +140,8 @@ def compute_adapter_loss(
         raise ValueError("corrected, residual, and target shapes must match")
     if corrected.ndim != 3 or corrected.shape[-1] != 16:
         raise ValueError("adapter loss expects [B, T, 16] chunks")
+    if current_state.shape != (corrected.shape[0], corrected.shape[-1]):
+        raise ValueError("current_state must have shape [B, 16]")
 
     active = torch.tensor(ACTIVE_JOINT_INDICES, device=corrected.device)
     widths = (target_ranges[:, 1] - target_ranges[:, 0]).clamp_min(1e-6)
@@ -177,12 +181,23 @@ def compute_adapter_loss(
     else:
         velocity_loss = corrected.new_zeros(())
 
+    current = current_state[:, None, :]
+    predicted_motion = torch.abs(corrected - current)
+    target_motion = torch.abs(target - current)
+    motion_error = (predicted_motion - target_motion) / widths
+    motion_loss = F.smooth_l1_loss(
+        motion_error[..., active],
+        torch.zeros_like(motion_error[..., active]),
+        beta=weights.huber_beta,
+    )
+
     safe_bounds = correction_bounds.clamp_min(1e-6)
     residual_loss = torch.mean((residual[..., active] / safe_bounds[active]) ** 2)
     total = (
         weights.joint * joint_loss
         + weights.pose * pose_loss
         + weights.velocity * velocity_loss
+        + weights.motion * motion_loss
         + weights.residual * residual_loss
     )
     return total, {
@@ -190,5 +205,6 @@ def compute_adapter_loss(
         "joint_loss": joint_loss.detach(),
         "pose_loss": pose_loss.detach(),
         "velocity_loss": velocity_loss.detach(),
+        "motion_loss": motion_loss.detach(),
         "residual_loss": residual_loss.detach(),
     }

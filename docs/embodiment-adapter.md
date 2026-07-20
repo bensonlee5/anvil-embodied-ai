@@ -118,18 +118,32 @@ where `b` is at most 0.15 rad and at most 10% of each target joint range. Grippe
 corrections are always zero. Training minimizes
 
 ```text
-L = L_joint + 0.25 L_pose + 0.05 L_velocity + 0.01 L_residual
+L = L_joint + 0.25 L_pose + 0.05 L_velocity
+    + lambda_motion L_motion + lambda_residual L_residual
 ```
 
 - `L_joint`: Smooth L1 on OpenArm 2 joint errors normalized by each joint range.
 - `L_pose`: differentiable OpenArm 2 FK position error scaled by 5 cm plus TCP
   geodesic orientation error scaled by 0.25 rad.
 - `L_velocity`: Smooth L1 on consecutive target-side joint deltas.
+- `L_motion`: Smooth L1 on commanded displacement magnitude from the measured
+  current state. This guards against a residual that lowers pointwise error by
+  damping the action chunk.
 - `L_residual`: squared residual as a fraction of its safety bound.
 
 The pose term handles link-length geometry. The joint and velocity terms select
 the demonstrator's shoulder/elbow posture among redundant IK solutions and keep
-chunks temporally coherent.
+chunks temporally coherent. The motion term is enabled explicitly for transfer
+runs after validation establishes that source and target motion intensity differ;
+its weight and the residual weight are recorded in training provenance.
+
+For a production policy, loss weighting is not a substitute for an explicit
+temporal contract. Calibrate source-specific control rates before chunking,
+normalize action deltas per horizon timestep, execute only a short prefix before
+re-planning, and overlap adjacent chunks with a soft continuity anchor. These
+principles follow the transfer and inference findings in Larchenko's LeHome 2026
+folding system; they must be validated on this embodiment rather than copied as
+fixed constants.
 
 ## Pinned inputs
 
@@ -206,9 +220,10 @@ regression tests of the reference side of the bridge.
 
 The target rows must come from the pinned phase-aligned trim, not the full raw
 33 sessions. Its `meta/trim_manifest.json` reduces 43,625 source frames to
-34,850 by removing 8,775 setup/final-idle frames, and records non-zero start and
-end removals for every episode. The saved train/validation/test assignment must
-come from that same dataset revision.
+34,850 by removing 8,775 setup/final-idle frames. All 33 episodes have a non-zero
+start trim; 27 have a non-zero final-idle trim, while six have no detected final
+idle window to remove. The saved train/validation/test assignment must come from
+that same dataset revision.
 
 Train only the residual:
 

@@ -429,6 +429,7 @@ def train_residual_adapter(
                 target_batch = target[selected].to(device_value)
                 corrected, correction = residual(state_batch, bridge_batch)
                 loss, terms = compute_adapter_loss(
+                    current_state=state_batch,
                     corrected=corrected,
                     residual=correction,
                     target=target_batch,
@@ -527,6 +528,7 @@ def train_residual_adapter(
         target_batch = target[sampled].to(device_value)
         corrected, correction = residual(state_batch, bridge_batch)
         loss, train_terms = compute_adapter_loss(
+            current_state=state_batch,
             corrected=corrected,
             residual=correction,
             target=target_batch,
