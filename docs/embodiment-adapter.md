@@ -229,6 +229,13 @@ show the valid-row metrics, failure rate, and a failure-adjusted normalized join
 MAE that assigns every failed row a penalty of one full normalized joint range.
 This prevents bridge coverage failures from making holdout results look better.
 
+Offline evaluation schema v3 also reports every one of the 16 named output
+dimensions in the manifest's right-first order. Arm errors are reported in
+radians and gripper errors in metres of calibrated aperture, together with
+range-normalized error, final-horizon error, commanded-motion ratio, and a
+failure-adjusted normalized error. The deterministic gripper path can therefore
+be audited even though the residual is intentionally forbidden from changing it.
+
 The residual loss uses smooth per-horizon action scales fit from valid training
 rows only. Mean action delta is fit against horizon and standard deviation
 against square-root horizon, with a joint-range-relative floor. These statistics
@@ -290,10 +297,12 @@ uv run anvil-adapter evaluate \
 ```
 
 Reported metrics include range-normalized joint MAE, shoulder J1/J2 MAE, TCP
-position/orientation error, commanded motion, and motion ratio. A residual
-training run is justified only if the bridge-only result is kinematically sane
-and the learned adapter improves validation/test metrics rather than only the
-training split.
+position/orientation error, commanded motion, motion ratio, and named
+per-actuator arm/gripper metrics. A residual training run is justified only if
+the bridge-only result is kinematically sane and the learned adapter improves
+validation/test metrics rather than only the training split. It must not be
+called better than hold merely because it moves more: hold is an important
+open-loop lower bound, while task progress still requires rollout evidence.
 
 ## Live gate
 

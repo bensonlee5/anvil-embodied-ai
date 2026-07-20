@@ -76,6 +76,29 @@ def test_train_and_evaluate_synthetic_cache(tmp_path: Path) -> None:
     }
     assert report["splits"]["test"]["attempted_samples"] == 2
     assert report["splits"]["test"]["adapter"]["failure_rate"] == 0.0
+    assert report["schema_version"] == 3
+    per_actuator = report["splits"]["test"]["adapter"]["per_actuator"]
+    assert tuple(per_actuator) == (
+        "right_joint_1.pos",
+        "right_joint_2.pos",
+        "right_joint_3.pos",
+        "right_joint_4.pos",
+        "right_joint_5.pos",
+        "right_joint_6.pos",
+        "right_joint_7.pos",
+        "right_gripper.pos",
+        "left_joint_1.pos",
+        "left_joint_2.pos",
+        "left_joint_3.pos",
+        "left_joint_4.pos",
+        "left_joint_5.pos",
+        "left_joint_6.pos",
+        "left_joint_7.pos",
+        "left_gripper.pos",
+    )
+    assert per_actuator["right_joint_1.pos"]["native_unit"] == "radian"
+    assert per_actuator["right_gripper.pos"]["native_unit"] == "meter"
+    assert all(np.isfinite(item["mae"]) for item in per_actuator.values())
     assert provenance["horizon_action_statistics"]["stats_source"] == "valid_train_split_only"
 
     with np.load(cache, allow_pickle=False) as source:
@@ -94,6 +117,10 @@ def test_train_and_evaluate_synthetic_cache(tmp_path: Path) -> None:
     assert adapter_test["valid_samples"] == 1
     assert adapter_test["failure_rate"] == 0.5
     assert adapter_test["failure_adjusted_normalized_joint_mae"] > 0.5
+    assert all(
+        item["failure_adjusted_normalized_mae"] >= 0.5
+        for item in adapter_test["per_actuator"].values()
+    )
 
 
 def test_temporal_resampling_uses_only_train_split_and_preserves_raw_bridge() -> None:

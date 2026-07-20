@@ -915,7 +915,7 @@ def _prediction_metrics(
     target: np.ndarray,
     current: np.ndarray,
     artifact: AdapterArtifact,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     predicted = torch.as_tensor(prediction, dtype=torch.float64)
     expected = torch.as_tensor(target, dtype=torch.float64)
     active = torch.tensor(ACTIVE_JOINT_INDICES)
@@ -941,6 +941,28 @@ def _prediction_metrics(
         )
         position_errors.append(torch.linalg.vector_norm(pred_pos - target_pos, dim=-1))
         orientation_errors.append(_geodesic_degrees(pred_rot, target_rot))
+    per_actuator: dict[str, dict[str, float | str]] = {}
+    for index, name in enumerate(artifact.spec.target_vector.names):
+        actuator_error = error[..., index]
+        predicted_actuator_motion = torch.mean(
+            torch.abs(predicted[..., index] - current_tensor[..., index])
+        )
+        target_actuator_motion = torch.mean(
+            torch.abs(expected[..., index] - current_tensor[..., index])
+        )
+        per_actuator[name] = {
+            "kind": "gripper" if index in (7, 15) else "arm_joint",
+            "native_unit": "meter" if index in (7, 15) else "radian",
+            "mae": float(torch.mean(torch.abs(actuator_error))),
+            "rmse": float(torch.sqrt(torch.mean(actuator_error**2))),
+            "normalized_mae": float(torch.mean(torch.abs(actuator_error) / widths[index])),
+            "final_horizon_mae": float(torch.mean(torch.abs(actuator_error[:, -1]))),
+            "mean_commanded_motion": float(predicted_actuator_motion),
+            "target_motion": float(target_actuator_motion),
+            "motion_ratio": float(
+                predicted_actuator_motion / target_actuator_motion.clamp_min(1e-8)
+            ),
+        }
     return {
         "normalized_joint_mae": float(normalized_mae),
         "joint_rmse_rad": float(torch.sqrt(torch.mean(error[..., active] ** 2))),
@@ -950,6 +972,7 @@ def _prediction_metrics(
         "mean_commanded_motion_rad": float(predicted_motion),
         "target_motion_rad": float(target_motion),
         "motion_ratio": float(predicted_motion / target_motion.clamp_min(1e-8)),
+        "per_actuator": per_actuator,
     }
 
 
@@ -960,12 +983,12 @@ def _prediction_report(
     artifact: AdapterArtifact,
     *,
     attempted_samples: int,
-) -> dict[str, float | int]:
+) -> dict[str, Any]:
     """Report valid-row metrics and a failure-adjusted joint error denominator."""
     valid_samples = len(prediction)
     if attempted_samples < valid_samples or attempted_samples < 1:
         raise ValueError("attempted_samples must cover at least one valid prediction")
-    metrics: dict[str, float | int] = _prediction_metrics(prediction, target, current, artifact)
+    metrics: dict[str, Any] = _prediction_metrics(prediction, target, current, artifact)
     active = np.asarray(ACTIVE_JOINT_INDICES)
     ranges = np.asarray(artifact.bridge.target_joint_ranges, dtype=np.float64)
     widths = ranges[active, 1] - ranges[active, 0]
@@ -987,6 +1010,10 @@ def _prediction_report(
             ),
         }
     )
+    for actuator in metrics["per_actuator"].values():
+        actuator["failure_adjusted_normalized_mae"] = float(
+            (actuator["normalized_mae"] * valid_samples + failed_samples) / attempted_samples
+        )
     return metrics
 
 
@@ -1027,13 +1054,18 @@ def evaluate_adapter_cache(
         baseline_valid = arrays["baseline_valid"].astype(bool)
         predictions["current_5k"] = (arrays["baseline_chunk"][baseline_valid], baseline_valid)
     report: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "adapter_id": artifact.spec.adapter_id,
         "cache_sha256": sha256_file(Path(cache)),
         "failure_contract": {
             "valid_row_metrics": "computed only where that prediction path produced a finite chunk",
             "failure_adjusted_normalized_joint_mae": (
                 "mean per-sample normalized joint MAE with each failed row assigned penalty 1.0"
+            ),
+            "per_actuator": (
+                "all 16 dimensions in target-vector order; arm joints are radians and grippers "
+                "are metres of calibrated aperture. Gripper metrics remain meaningful even when "
+                "the residual is configured not to modify them"
             ),
         },
         "splits": {},
