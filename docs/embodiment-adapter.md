@@ -26,6 +26,41 @@ same buffered target command envelope.
 The artifact remains `offline_only`. It is not connected to the live ROS command
 path by this change.
 
+## Production promotion gates
+
+The current state-only residual is an offline transfer ablation, not a complete
+deployment embodiment layer. It may establish whether the frozen folding prior
+survives kinematic transfer, but it cannot correct a camera-domain mistake,
+choose a different grasp, or make an unreachable source trajectory safe.
+
+Do not change `deployment_status` until all of these blockers are closed:
+
+1. Bind the artifact to independently measured base/TCP and camera intrinsics /
+   extrinsics, an independently generated robot model, joint-specific command
+   margins, and the complete source model-weight hash.
+2. Count every bridge rejection in the evaluation denominator and report it by
+   episode, task phase, direction, and reason. A rejected sample is a failed
+   prediction, not missing data.
+3. Replace pointwise inverse IK at the command boundary with a constrained
+   bimanual trajectory layer enforcing position/orientation objectives, joint
+   position/velocity/acceleration bounds, executed-state continuity, collision
+   constraints, and a defined short-horizon fallback.
+4. Validate physical gripper aperture, latency, force/contact and grasp timing;
+   add a separate bounded monotonic gripper adapter if endpoint calibration is
+   insufficient.
+5. Fingerprint the camera contract, trim manifest, episode split, full policy
+   weights and generated cache. Refuse candidate publication when absolute,
+   rejection-adjusted validation/test gates fail.
+6. Pass shadow and low-speed closed-loop rollouts from the demonstrated start
+   distribution before any live task-speed evaluation.
+
+After those safety/integrity gates, evaluate a small visual/embodiment adapter,
+multiple frozen-policy noise samples per observation, chunk-boundary smoothness,
+and data collected from states reached by the adapted policy. The long-term
+mixed-embodiment path should supervise a canonical TCP trajectory and gripper
+intent with an embodiment token; source and target joint labels must never be
+concatenated as if they described the same mechanism.
+
 ## Why joint-angle matching is still useful
 
 Direct v1-to-v2 angle equality is not the primary target because different link
