@@ -33,7 +33,11 @@ def sha256_file(path: Path) -> str:
 def verify_base_policy(spec: EmbodimentAdapterSpec, base_policy_dir: Path) -> None:
     missing = []
     mismatched = []
-    for name, expected in spec.base_policy_processor_sha256.items():
+    pinned_files = {
+        **spec.base_policy_processor_sha256,
+        **spec.base_policy_weights_sha256,
+    }
+    for name, expected in pinned_files.items():
         path = base_policy_dir / name
         if not path.is_file():
             missing.append(name)
@@ -41,7 +45,7 @@ def verify_base_policy(spec: EmbodimentAdapterSpec, base_policy_dir: Path) -> No
             mismatched.append(name)
     if missing or mismatched:
         raise EmbodimentError(
-            f"base policy processor integrity failure; missing={missing}, mismatched={mismatched}"
+            f"base policy integrity failure; missing={missing}, mismatched={mismatched}"
         )
     config_path = base_policy_dir / "config.json"
     if not config_path.is_file():
@@ -57,6 +61,38 @@ def verify_base_policy(spec: EmbodimentAdapterSpec, base_policy_dir: Path) -> No
             f"base chunk_size={config.get('chunk_size')} does not match adapter "
             f"chunk_size={spec.residual.chunk_size}"
         )
+
+
+def verify_target_dataset(spec: EmbodimentAdapterSpec, dataset_dir: Path, split_info: Path) -> None:
+    contract = spec.target_data
+    trim_path = dataset_dir / contract.trim_manifest_path
+    if not trim_path.is_file() or sha256_file(trim_path) != contract.trim_manifest_sha256:
+        raise EmbodimentError("target dataset trim manifest integrity failure")
+    if not split_info.is_file() or sha256_file(split_info) != contract.split_info_sha256:
+        raise EmbodimentError("target dataset split_info integrity failure")
+    info_path = dataset_dir / "meta" / "info.json"
+    if not info_path.is_file():
+        raise EmbodimentError(f"target dataset is missing {info_path}")
+    info = json.loads(info_path.read_text())
+    if (
+        int(info.get("total_episodes", 0)) != contract.total_episodes
+        or int(info.get("total_frames", 0)) != contract.total_frames
+    ):
+        raise EmbodimentError("target dataset episode/frame counts do not match the contract")
+    features = info.get("features", {})
+    camera_keys = tuple(
+        sorted(
+            name.removeprefix("observation.images.")
+            for name in features
+            if name.startswith("observation.images.")
+        )
+    )
+    if camera_keys != contract.camera_keys:
+        raise EmbodimentError("target dataset camera keys do not match the contract")
+    for feature in ("observation.state", "action"):
+        value = features.get(feature, {})
+        if value.get("shape") != [16] or tuple(value.get("names", [])) != spec.target_vector.names:
+            raise EmbodimentError(f"target dataset {feature} vector does not match the contract")
 
 
 @dataclass

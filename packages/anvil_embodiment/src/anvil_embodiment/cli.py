@@ -32,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_manifest(validate)
     validate.add_argument("--base-policy", type=Path)
     validate.add_argument("--dataset", type=Path)
+    validate.add_argument("--split-info", type=Path)
     validate.add_argument("--stride", type=int, default=500)
     validate.add_argument("--video-backend", default="pyav")
 
@@ -50,9 +51,9 @@ def build_parser() -> argparse.ArgumentParser:
     cache.add_argument("--seed", type=int, default=42)
     cache.add_argument("--video-backend", default="pyav")
     cache.add_argument(
-        "--align-motion-intensity",
+        "--resample-motion-intensity",
         action="store_true",
-        help="calibrate bridge displacement scale from training episodes only",
+        help="calibrate bridge trajectory rate from training episodes only",
     )
 
     train = commands.add_parser(
@@ -99,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
             manifest=args.manifest,
             base_policy=args.base_policy,
             dataset_path=args.dataset,
+            split_info=args.split_info,
             stride=args.stride,
             video_backend=args.video_backend,
         )
@@ -115,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
             stride=args.stride,
             seed=args.seed,
             video_backend=args.video_backend,
-            align_motion_intensity=args.align_motion_intensity,
+            resample_motion_intensity=args.resample_motion_intensity,
         )
     elif args.command == "train":
         result = train_residual_adapter(

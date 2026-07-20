@@ -16,7 +16,7 @@ from anvil_eval.evaluator import load_model
 from anvil_shared.embodiment import EmbodimentError
 from torch import Tensor
 
-from .artifact import AdapterArtifact, load_adapter_artifact, sha256_file
+from .artifact import AdapterArtifact, load_adapter_artifact, sha256_file, verify_target_dataset
 from .kinematics import torch_forward_kinematics
 from .policy import EmbodimentAdaptedPolicy
 from .residual import ACTIVE_JOINT_INDICES, AdapterLossWeights, compute_adapter_loss
@@ -125,43 +125,138 @@ def _target_chunk(dataset: Any, frame_indices: list[int], offset: int, size: int
     return np.stack(rows)
 
 
-def _align_cached_motion_intensity(
+def _resample_chunk(chunk: np.ndarray, current: np.ndarray, factor: float) -> np.ndarray:
+    """Resample an absolute action chunk in time, preserving its current-state origin."""
+    if factor <= 0 or not np.isfinite(factor):
+        raise ValueError("temporal resampling factor must be finite and positive")
+    steps = chunk.shape[-2]
+    source = np.concatenate([current[..., None, :], chunk], axis=-2)
+    query = np.minimum((np.arange(steps, dtype=np.float64) + 1.0) * factor, steps)
+    lower = np.floor(query).astype(np.int64)
+    upper = np.ceil(query).astype(np.int64)
+    weight = (query - lower).reshape((1,) * (chunk.ndim - 2) + (steps, 1))
+    return source[..., lower, :] * (1.0 - weight) + source[..., upper, :] * weight
+
+
+def _resample_cached_motion_intensity(
     arrays: dict[str, np.ndarray],
     target_joint_ranges: np.ndarray,
 ) -> dict[str, Any]:
-    """Match bridge displacement scale using target data from the train split only."""
-    train = arrays["split"] == "train"
+    """Choose one trajectory-rate factor using valid target rows from train only."""
+    train = (arrays["split"] == "train") & arrays["bridge_valid"]
     if not np.any(train):
-        raise EmbodimentError("motion alignment requires training samples")
+        raise EmbodimentError("temporal resampling requires valid training samples")
     active = np.asarray(ACTIVE_JOINT_INDICES)
-    current = arrays["current_state"][:, None, active]
-    raw = arrays["bridge_chunk"][..., active]
-    target = arrays["target_chunk"][..., active]
-    raw_motion = float(np.mean(np.abs(raw[train] - current[train])))
-    target_motion = float(np.mean(np.abs(target[train] - current[train])))
-    if raw_motion <= 1e-8:
-        raise EmbodimentError("bridge motion is zero on the training split")
-    scale = target_motion / raw_motion
-
     raw_bridge = arrays["bridge_chunk"].copy()
-    aligned = raw_bridge.copy()
-    proposed = current + scale * (raw - current)
+    current = arrays["current_state"]
+    target = arrays["target_chunk"]
+    widths = (
+        np.asarray(target_joint_ranges, dtype=np.float64)[active, 1]
+        - np.asarray(target_joint_ranges, dtype=np.float64)[active, 0]
+    )
+    candidates = np.linspace(0.25, 2.5, 91, dtype=np.float64)
+    target_motion = float(
+        np.mean(np.abs(target[train][..., active] - current[train][:, None, :][..., active]))
+    )
+    if target_motion <= 1e-8:
+        raise EmbodimentError("target motion is zero on the training split")
+    objectives = []
+    motion_values = []
+    mae_values = []
+    for factor in candidates:
+        candidate = _resample_chunk(raw_bridge[train], current[train], float(factor))
+        motion = float(
+            np.mean(np.abs(candidate[..., active] - current[train][:, None, :][..., active]))
+        )
+        motion_values.append(motion)
+        objectives.append(abs(np.log(max(motion, 1e-8) / target_motion)))
+        mae_values.append(
+            float(np.mean(np.abs(candidate[..., active] - target[train][..., active]) / widths))
+        )
+    best_index = int(np.argmin(objectives))
+    if best_index in {0, len(candidates) - 1}:
+        raise EmbodimentError("temporal resampling optimum is on the search boundary")
+    factor = float(candidates[best_index])
+    aligned = _resample_chunk(raw_bridge, current, factor)
     lower = np.asarray(target_joint_ranges, dtype=np.float32)[active, 0]
     upper = np.asarray(target_joint_ranges, dtype=np.float32)[active, 1]
-    clipped = (proposed < lower) | (proposed > upper)
+    proposed = aligned[..., active]
+    clipped = arrays["bridge_valid"][:, None, None] & ((proposed < lower) | (proposed > upper))
     aligned[..., active] = np.clip(proposed, lower, upper)
+    # Gripper calibration is deterministic. Do not learn or time-warp it here.
+    aligned[..., [7, 15]] = raw_bridge[..., [7, 15]]
     arrays["raw_bridge_chunk"] = raw_bridge
     arrays["bridge_chunk"] = aligned.astype(np.float32)
     return {
         "enabled": True,
-        "method": "global_active_joint_mean_absolute_displacement_ratio",
+        "method": "linear_trajectory_time_resampling_grid_search",
         "stats_source": "train_split_only",
-        "scale": scale,
-        "train_raw_motion_rad": raw_motion,
+        "factor": factor,
+        "candidate_min": float(candidates[0]),
+        "candidate_max": float(candidates[-1]),
+        "candidate_count": int(len(candidates)),
+        "objective": "absolute_log_mean_active_joint_motion_ratio",
         "train_target_motion_rad": target_motion,
-        "clipped_fraction": float(np.mean(clipped)),
+        "train_motion_ratio_before": motion_values[int(np.argmin(np.abs(candidates - 1.0)))]
+        / target_motion,
+        "train_motion_ratio_after": motion_values[best_index] / target_motion,
+        "train_normalized_joint_mae_before": mae_values[int(np.argmin(np.abs(candidates - 1.0)))],
+        "train_normalized_joint_mae_after": mae_values[best_index],
+        "clipped_fraction": float(np.mean(clipped[train])),
         "active_joint_indices": active.tolist(),
-        "grippers_scaled": False,
+        "grippers_resampled": False,
+    }
+
+
+def _fit_horizon_action_statistics(
+    arrays: dict[str, np.ndarray], target_joint_ranges: np.ndarray
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Fit smooth per-horizon action statistics from valid training rows only."""
+    selected = (arrays["split"] == "train") & arrays["bridge_valid"]
+    if not np.any(selected):
+        raise EmbodimentError("horizon normalization requires valid training samples")
+    delta = arrays["target_chunk"][selected] - arrays["current_state"][selected, None, :]
+    steps = delta.shape[1]
+    time_axis = np.arange(1, steps + 1, dtype=np.float64)
+    mean_design = np.stack([np.ones(steps), time_axis], axis=1)
+    std_design = np.stack([np.ones(steps), np.sqrt(time_axis)], axis=1)
+    observed_mean = np.mean(delta, axis=0)
+    observed_std = np.std(delta, axis=0, ddof=0)
+    mean_coefficients = np.linalg.lstsq(mean_design, observed_mean, rcond=None)[0]
+    std_coefficients = np.linalg.lstsq(std_design, observed_std, rcond=None)[0]
+    fitted_std = std_design @ std_coefficients
+    ranges = np.asarray(target_joint_ranges, dtype=np.float64)
+    floors = np.maximum((ranges[:, 1] - ranges[:, 0]) * 0.005, 1e-4)
+    scale = np.maximum(fitted_std, floors[None, :]).astype(np.float32)
+    return scale, {
+        "schema_version": 1,
+        "stats_source": "valid_train_split_only",
+        "mean_model": "intercept_plus_horizon",
+        "std_model": "intercept_plus_sqrt_horizon",
+        "train_samples": int(np.sum(selected)),
+        "mean_coefficients": mean_coefficients.tolist(),
+        "std_coefficients": std_coefficients.tolist(),
+        "scale_floor": floors.tolist(),
+        "scale": scale.tolist(),
+    }
+
+
+def _rejection_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    summary: dict[str, int] = {}
+    for row in rows:
+        key = "|".join(
+            (
+                str(row["split"]),
+                str(row["episode"]),
+                str(row["stage"]),
+                str(row["direction"]),
+                str(row["reason"]),
+            )
+        )
+        summary[key] = summary.get(key, 0) + 1
+    return {
+        "key_order": ["split", "episode", "stage", "direction", "reason"],
+        "counts": summary,
     }
 
 
@@ -178,7 +273,7 @@ def cache_policy_predictions(
     seed: int = 42,
     video_backend: str = "pyav",
     baseline_policy: str | Path | None = None,
-    align_motion_intensity: bool = False,
+    resample_motion_intensity: bool = False,
 ) -> dict[str, Any]:
     """Cache frozen folding predictions after deterministic kinematic bridging."""
     if stride < 1:
@@ -189,6 +284,7 @@ def cache_policy_predictions(
         device=device,
         require_weights=False,
     )
+    verify_target_dataset(artifact.spec, Path(dataset_path), Path(split_info))
     model, preprocessor, postprocessor = _load_policy(base_policy, device)
     adapted = EmbodimentAdaptedPolicy(
         model=model,
@@ -207,6 +303,8 @@ def cache_policy_predictions(
     bridge_rows: list[np.ndarray] = []
     target_rows: list[np.ndarray] = []
     baseline_rows: list[np.ndarray] = []
+    bridge_valid_rows: list[bool] = []
+    baseline_valid_rows: list[bool] = []
     episode_rows: list[int] = []
     frame_rows: list[int] = []
     split_rows: list[str] = []
@@ -228,7 +326,7 @@ def cache_policy_predictions(
                 {
                     "event": "adapter_cache_progress",
                     "attempted": attempted_samples,
-                    "accepted": len(current_rows),
+                    "accepted": int(sum(bridge_valid_rows)),
                     "rejected": len(rejected),
                     "total": total_samples,
                     "elapsed_seconds": elapsed,
@@ -258,12 +356,40 @@ def cache_policy_predictions(
             torch.manual_seed(sample_seed)
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(sample_seed)
+            current_state = _numpy(item["observation.state"]).astype(np.float32)
+            target_chunk = _target_chunk(dataset, frames, offset, artifact.spec.residual.chunk_size)
+            split = episode_splits[episode]
+            bridge_chunk = np.full_like(target_chunk, np.nan, dtype=np.float32)
+            bridge_valid = False
             try:
                 bridge_chunk = _numpy(adapted.predict_action_chunk(observation))[0]
-                target_chunk = _target_chunk(
-                    dataset, frames, offset, artifact.spec.residual.chunk_size
+                bridge_valid = True
+            except Exception as exc:
+                message = str(exc)
+                direction = next(
+                    (
+                        value
+                        for value in ("target_to_reference", "reference_to_target")
+                        if value in message
+                    ),
+                    "unknown",
                 )
-                if baseline is not None:
+                rejected.append(
+                    {
+                        "episode": episode,
+                        "frame": frame,
+                        "split": split,
+                        "stage": "bridge",
+                        "direction": direction,
+                        "reason": type(exc).__name__,
+                        "error": message,
+                    }
+                )
+
+            direct = np.full_like(target_chunk, np.nan, dtype=np.float32)
+            baseline_valid = False
+            if baseline is not None:
+                try:
                     torch.manual_seed(sample_seed)
                     direct = _predict_direct_chunk(
                         model=baseline[0],
@@ -283,34 +409,50 @@ def cache_policy_predictions(
                                 ),
                             ]
                         )
-                    baseline_rows.append(direct[: artifact.spec.residual.chunk_size])
-            except Exception as exc:
-                rejected.append({"episode": episode, "frame": frame, "error": str(exc)})
-                log_progress()
-                continue
-            current_rows.append(_numpy(item["observation.state"]).astype(np.float32))
+                    direct = direct[: artifact.spec.residual.chunk_size]
+                    baseline_valid = True
+                except Exception as exc:
+                    rejected.append(
+                        {
+                            "episode": episode,
+                            "frame": frame,
+                            "split": split,
+                            "stage": "baseline",
+                            "direction": "direct",
+                            "reason": type(exc).__name__,
+                            "error": str(exc),
+                        }
+                    )
+            current_rows.append(current_state)
             bridge_rows.append(bridge_chunk.astype(np.float32))
             target_rows.append(target_chunk.astype(np.float32))
+            bridge_valid_rows.append(bridge_valid)
+            if baseline is not None:
+                baseline_rows.append(direct.astype(np.float32))
+                baseline_valid_rows.append(baseline_valid)
             episode_rows.append(episode)
             frame_rows.append(int(_numpy(item["frame_index"])))
-            split_rows.append(episode_splits[episode])
+            split_rows.append(split)
             log_progress()
 
-    if not current_rows:
+    if not any(bridge_valid_rows):
         raise EmbodimentError("every cache sample was rejected")
     arrays: dict[str, np.ndarray] = {
+        "cache_schema_version": np.asarray(3, dtype=np.int64),
         "current_state": np.stack(current_rows),
         "bridge_chunk": np.stack(bridge_rows),
         "target_chunk": np.stack(target_rows),
+        "bridge_valid": np.asarray(bridge_valid_rows, dtype=np.bool_),
         "episode_index": np.asarray(episode_rows, dtype=np.int64),
         "frame_index": np.asarray(frame_rows, dtype=np.int64),
         "split": np.asarray(split_rows),
     }
     if baseline_rows:
         arrays["baseline_chunk"] = np.stack(baseline_rows).astype(np.float32)
-    motion_alignment: dict[str, Any] = {"enabled": False}
-    if align_motion_intensity:
-        motion_alignment = _align_cached_motion_intensity(
+        arrays["baseline_valid"] = np.asarray(baseline_valid_rows, dtype=np.bool_)
+    temporal_resampling: dict[str, Any] = {"enabled": False}
+    if resample_motion_intensity:
+        temporal_resampling = _resample_cached_motion_intensity(
             arrays,
             artifact.bridge.target_joint_ranges,
         )
@@ -318,16 +460,19 @@ def cache_policy_predictions(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(output_path, **arrays)
     report = {
-        "schema_version": 2,
-        "samples": len(current_rows),
-        "rejected_samples": len(rejected),
+        "schema_version": 3,
+        "attempted_samples": len(current_rows),
+        "valid_bridge_samples": int(sum(bridge_valid_rows)),
+        "rejected_bridge_samples": int(len(current_rows) - sum(bridge_valid_rows)),
+        "valid_baseline_samples": int(sum(baseline_valid_rows)) if baseline is not None else None,
         "rejected": rejected,
+        "rejection_summary": _rejection_summary(rejected),
         "stride": stride,
         "seed": seed,
         "seconds": time.perf_counter() - start_time,
         "base_policy": str(_pretrained_dir(base_policy)),
         "baseline_policy": str(_pretrained_dir(baseline_policy)) if baseline_policy else None,
-        "motion_alignment": motion_alignment,
+        "temporal_resampling": temporal_resampling,
     }
     output_path.with_suffix(output_path.suffix + ".json").write_text(
         json.dumps(report, indent=2, sort_keys=True)
@@ -338,11 +483,30 @@ def cache_policy_predictions(
 def _cache_arrays(path: str | Path) -> dict[str, np.ndarray]:
     with np.load(path, allow_pickle=False) as source:
         arrays = {name: source[name] for name in source.files}
-    required = {"current_state", "bridge_chunk", "target_chunk", "split"}
+    required = {
+        "cache_schema_version",
+        "current_state",
+        "bridge_chunk",
+        "target_chunk",
+        "bridge_valid",
+        "episode_index",
+        "frame_index",
+        "split",
+    }
     if not required.issubset(arrays):
         raise EmbodimentError(f"adapter cache is missing {sorted(required - arrays.keys())}")
+    if int(arrays["cache_schema_version"]) != 3:
+        raise EmbodimentError("adapter cache schema_version must be 3")
     if arrays["bridge_chunk"].shape != arrays["target_chunk"].shape:
         raise EmbodimentError("bridge and target cache shapes differ")
+    count = len(arrays["current_state"])
+    if any(len(arrays[name]) != count for name in required - {"cache_schema_version"}):
+        raise EmbodimentError("adapter cache row counts differ")
+    valid = arrays["bridge_valid"].astype(bool)
+    if not np.all(np.isfinite(arrays["bridge_chunk"][valid])):
+        raise EmbodimentError("valid bridge cache rows must be finite")
+    if not np.all(np.isnan(arrays["bridge_chunk"][~valid])):
+        raise EmbodimentError("rejected bridge cache rows must be NaN")
     return arrays
 
 
@@ -375,8 +539,9 @@ def train_residual_adapter(
     cache_path = Path(cache)
     cache_hash = sha256_file(cache_path)
     arrays = _cache_arrays(cache_path)
-    train_indices = np.flatnonzero(arrays["split"] == "train")
-    val_indices = np.flatnonzero(arrays["split"] == "val")
+    valid = arrays["bridge_valid"].astype(bool)
+    train_indices = np.flatnonzero((arrays["split"] == "train") & valid)
+    val_indices = np.flatnonzero((arrays["split"] == "val") & valid)
     if not len(train_indices):
         raise EmbodimentError("cache contains no training samples")
     if not len(val_indices):
@@ -395,6 +560,10 @@ def train_residual_adapter(
     target_ranges = torch.as_tensor(
         artifact.bridge.target_joint_ranges, dtype=torch.float32, device=device_value
     )
+    horizon_scale_values, horizon_statistics = _fit_horizon_action_statistics(
+        arrays, artifact.bridge.target_joint_ranges
+    )
+    action_scale = torch.as_tensor(horizon_scale_values, dtype=torch.float32, device=device_value)
     correction_bounds = artifact.residual.correction_bounds.to(device_value)
     generator = torch.Generator(device="cpu").manual_seed(seed)
     fallback_loss = float("inf")
@@ -430,6 +599,7 @@ def train_residual_adapter(
                 "eval_every": eval_every,
                 "seed": seed,
                 "loss_weights": asdict(loss_weights),
+                "horizon_action_statistics": horizon_statistics,
                 "residual_contract": asdict(artifact.spec.residual),
             },
         )
@@ -465,6 +635,7 @@ def train_residual_adapter(
                     residual=correction,
                     target=target_batch,
                     target_ranges=target_ranges,
+                    action_scale=action_scale,
                     target_model=artifact.bridge.target_spec,
                     correction_bounds=correction_bounds,
                     weights=loss_weights,
@@ -495,26 +666,31 @@ def train_residual_adapter(
         corrected_values = np.concatenate(corrected_rows)
         correction_values = np.concatenate(correction_rows)
         selected_current = arrays["current_state"][indices]
-        selected_aligned_bridge = arrays["bridge_chunk"][indices]
+        selected_resampled_bridge = arrays["bridge_chunk"][indices]
         selected_bridge = arrays.get("raw_bridge_chunk", arrays["bridge_chunk"])[indices]
         selected_target = arrays["target_chunk"][indices]
-        adapter_metrics = _prediction_metrics(
+        split_name = str(arrays["split"][indices[0]])
+        attempted_count = int(np.sum(arrays["split"] == split_name))
+        adapter_metrics = _prediction_report(
             corrected_values,
             selected_target,
             selected_current,
             artifact,
+            attempted_samples=attempted_count,
         )
-        bridge_metrics = _prediction_metrics(
+        bridge_metrics = _prediction_report(
             selected_bridge,
             selected_target,
             selected_current,
             artifact,
+            attempted_samples=attempted_count,
         )
-        aligned_bridge_metrics = _prediction_metrics(
-            selected_aligned_bridge,
+        resampled_bridge_metrics = _prediction_report(
+            selected_resampled_bridge,
             selected_target,
             selected_current,
             artifact,
+            attempted_samples=attempted_count,
         )
         active = np.asarray(ACTIVE_JOINT_INDICES)
         active_bounds = _numpy(correction_bounds)[active]
@@ -532,10 +708,11 @@ def train_residual_adapter(
         for name, value in bridge_metrics.items():
             quality[f"bridge_{name}"] = value
         if "raw_bridge_chunk" in arrays:
-            for name, value in aligned_bridge_metrics.items():
-                quality[f"aligned_bridge_{name}"] = value
+            for name, value in resampled_bridge_metrics.items():
+                quality[f"resampled_bridge_{name}"] = value
         error_metrics = (
             "normalized_joint_mae",
+            "failure_adjusted_normalized_joint_mae",
             "joint_rmse_rad",
             "shoulder_mae_rad",
             "tcp_position_mae_m",
@@ -547,12 +724,20 @@ def train_residual_adapter(
             adapter_metrics["motion_ratio"] - 1.0
         )
         quality["quality_gate_joint"] = float(quality["improvement_normalized_joint_mae"] > 0.0)
+        quality["quality_gate_failure_adjusted_joint"] = float(
+            quality["improvement_failure_adjusted_normalized_joint_mae"] > 0.0
+        )
+        quality["quality_gate_failure_rate"] = float(
+            adapter_metrics["failure_rate"] <= bridge_metrics["failure_rate"]
+        )
         quality["quality_gate_shoulder"] = float(quality["improvement_shoulder_mae_rad"] > 0.0)
         quality["quality_gate_tcp"] = float(quality["improvement_tcp_position_mae_m"] > 0.0)
         quality["quality_gate_motion"] = float(quality["improvement_motion_ratio"] >= 0.0)
         quality["quality_gate_residual"] = float(quality["residual_saturation_fraction"] <= 0.05)
         quality["quality_gate_pass"] = float(
             quality["quality_gate_joint"]
+            and quality["quality_gate_failure_adjusted_joint"]
+            and quality["quality_gate_failure_rate"]
             and quality["quality_gate_shoulder"]
             and quality["quality_gate_tcp"]
             and quality["quality_gate_motion"]
@@ -574,6 +759,7 @@ def train_residual_adapter(
             residual=correction,
             target=target_batch,
             target_ranges=target_ranges,
+            action_scale=action_scale,
             target_model=artifact.bridge.target_spec,
             correction_bounds=correction_bounds,
             weights=loss_weights,
@@ -633,7 +819,7 @@ def train_residual_adapter(
     residual.load_state_dict(best_state)
     artifact.residual.eval()
     provenance = {
-        "schema_version": 1,
+        "schema_version": 2,
         "cache": str(cache_path.resolve()),
         "cache_sha256": cache_hash,
         "seed": seed,
@@ -652,6 +838,7 @@ def train_residual_adapter(
         "fallback_best_step": fallback_step,
         "fallback_best_val_loss": fallback_loss,
         "loss_weights": asdict(loss_weights),
+        "horizon_action_statistics": horizon_statistics,
         "history": history,
         "wandb": (
             {
@@ -691,7 +878,7 @@ def train_residual_adapter(
         wandb_run.summary["quality_gate_pass"] = best_record["quality_gate_pass"]
         for name, value in best_record.items():
             if name.startswith(
-                ("adapter_", "bridge_", "aligned_bridge_", "improvement_", "residual_")
+                ("adapter_", "bridge_", "resampled_bridge_", "improvement_", "residual_")
             ):
                 wandb_run.summary[f"best/{name}"] = value
 
@@ -766,6 +953,43 @@ def _prediction_metrics(
     }
 
 
+def _prediction_report(
+    prediction: np.ndarray,
+    target: np.ndarray,
+    current: np.ndarray,
+    artifact: AdapterArtifact,
+    *,
+    attempted_samples: int,
+) -> dict[str, float | int]:
+    """Report valid-row metrics and a failure-adjusted joint error denominator."""
+    valid_samples = len(prediction)
+    if attempted_samples < valid_samples or attempted_samples < 1:
+        raise ValueError("attempted_samples must cover at least one valid prediction")
+    metrics: dict[str, float | int] = _prediction_metrics(prediction, target, current, artifact)
+    active = np.asarray(ACTIVE_JOINT_INDICES)
+    ranges = np.asarray(artifact.bridge.target_joint_ranges, dtype=np.float64)
+    widths = ranges[active, 1] - ranges[active, 0]
+    sample_error = np.mean(
+        np.abs(prediction[..., active] - target[..., active]) / widths, axis=(1, 2)
+    )
+    failed_samples = attempted_samples - valid_samples
+    metrics.update(
+        {
+            "attempted_samples": attempted_samples,
+            "valid_samples": valid_samples,
+            "failed_samples": failed_samples,
+            "failure_rate": failed_samples / attempted_samples,
+            # One full normalized joint range is the explicit penalty for a row
+            # that could not produce a bridge command.
+            "failure_penalty_normalized_joint_mae": 1.0,
+            "failure_adjusted_normalized_joint_mae": float(
+                (np.sum(sample_error) + failed_samples) / attempted_samples
+            ),
+        }
+    )
+    return metrics
+
+
 def evaluate_adapter_cache(
     *,
     adapter: str | Path,
@@ -775,39 +999,69 @@ def evaluate_adapter_cache(
 ) -> dict[str, Any]:
     arrays = _cache_arrays(cache)
     artifact = load_adapter_artifact(adapter, device=device, require_weights=True)
-    current = torch.as_tensor(arrays["current_state"], dtype=torch.float32, device=device)
-    bridge = torch.as_tensor(arrays["bridge_chunk"], dtype=torch.float32, device=device)
+    bridge_valid = arrays["bridge_valid"].astype(bool)
+    if not np.any(bridge_valid):
+        raise EmbodimentError("adapter cache contains no valid bridge predictions")
+    current = torch.as_tensor(
+        arrays["current_state"][bridge_valid], dtype=torch.float32, device=device
+    )
+    bridge = torch.as_tensor(
+        arrays["bridge_chunk"][bridge_valid], dtype=torch.float32, device=device
+    )
     with torch.no_grad():
         corrected, _ = artifact.residual(current, bridge)
-    predictions = {
-        "hold": np.repeat(arrays["current_state"][:, None, :], bridge.shape[1], axis=1),
-        "bridge": arrays.get("raw_bridge_chunk", arrays["bridge_chunk"]),
-        "adapter": corrected.cpu().numpy(),
+    predictions: dict[str, tuple[np.ndarray, np.ndarray]] = {
+        "hold": (
+            np.repeat(arrays["current_state"][:, None, :], arrays["target_chunk"].shape[1], axis=1),
+            np.ones(len(arrays["current_state"]), dtype=bool),
+        ),
+        "bridge": (
+            arrays.get("raw_bridge_chunk", arrays["bridge_chunk"])[bridge_valid],
+            bridge_valid,
+        ),
+        "adapter": (corrected.cpu().numpy(), bridge_valid),
     }
     if "raw_bridge_chunk" in arrays:
-        predictions["aligned_bridge"] = arrays["bridge_chunk"]
+        predictions["resampled_bridge"] = (arrays["bridge_chunk"][bridge_valid], bridge_valid)
     if "baseline_chunk" in arrays:
-        predictions["current_5k"] = arrays["baseline_chunk"]
+        baseline_valid = arrays["baseline_valid"].astype(bool)
+        predictions["current_5k"] = (arrays["baseline_chunk"][baseline_valid], baseline_valid)
     report: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "adapter_id": artifact.spec.adapter_id,
         "cache_sha256": sha256_file(Path(cache)),
+        "failure_contract": {
+            "valid_row_metrics": "computed only where that prediction path produced a finite chunk",
+            "failure_adjusted_normalized_joint_mae": (
+                "mean per-sample normalized joint MAE with each failed row assigned penalty 1.0"
+            ),
+        },
         "splits": {},
     }
     for split in ("train", "val", "test"):
         selected = arrays["split"] == split
         if not np.any(selected):
             continue
-        report["splits"][split] = {
-            name: _prediction_metrics(
-                prediction[selected],
-                arrays["target_chunk"][selected],
-                arrays["current_state"][selected],
+        attempted = int(np.sum(selected))
+        split_report: dict[str, Any] = {}
+        for name, (prediction, prediction_valid) in predictions.items():
+            valid_selected = selected & prediction_valid
+            if not np.any(valid_selected):
+                raise EmbodimentError(f"{name} produced no valid {split} predictions")
+            # Prediction arrays for failure-prone paths are compacted to valid rows.
+            if len(prediction) == len(prediction_valid):
+                split_prediction = prediction[valid_selected]
+            else:
+                split_prediction = prediction[selected[prediction_valid]]
+            split_report[name] = _prediction_report(
+                split_prediction,
+                arrays["target_chunk"][valid_selected],
+                arrays["current_state"][valid_selected],
                 artifact,
+                attempted_samples=attempted,
             )
-            for name, prediction in predictions.items()
-        }
-        report["splits"][split]["samples"] = int(np.sum(selected))
+        split_report["attempted_samples"] = attempted
+        report["splits"][split] = split_report
     if output is not None:
         destination = Path(output)
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -820,6 +1074,7 @@ def validate_adapter_contract(
     manifest: str | Path,
     base_policy: str | Path | None = None,
     dataset_path: str | Path | None = None,
+    split_info: str | Path | None = None,
     stride: int = 500,
     video_backend: str = "pyav",
 ) -> dict[str, Any]:
@@ -839,6 +1094,9 @@ def validate_adapter_contract(
     }
     if dataset_path is None:
         return report
+    if split_info is None:
+        raise EmbodimentError("dataset validation requires the pinned split_info")
+    verify_target_dataset(artifact.spec, Path(dataset_path), Path(split_info))
     dataset_wrapper = EvaluationDataset(Path(dataset_path), video_backend=video_backend)
     if tuple(dataset_wrapper.joint_names) != artifact.spec.target_vector.names:
         raise EmbodimentError("dataset action names do not match target vector contract")
@@ -859,5 +1117,8 @@ def validate_adapter_contract(
         "rejected": len(rejected),
         "acceptance_rate": accepted / total if total else 0.0,
         "rejections": rejected,
+        "target_data_revision": artifact.spec.target_data.revision,
+        "trim_manifest_sha256": artifact.spec.target_data.trim_manifest_sha256,
+        "split_info_sha256": artifact.spec.target_data.split_info_sha256,
     }
     return report

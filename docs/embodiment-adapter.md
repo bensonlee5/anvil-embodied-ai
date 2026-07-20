@@ -181,13 +181,15 @@ hf download lerobot-data-collection/folding_final \
   --local-dir model_zoo/hf-folding-final
 ```
 
-Then validate all processor content hashes:
+Then validate the complete policy weight/processor hashes, trimmed dataset
+manifest, and saved episode split:
 
 ```bash
 uv run anvil-adapter validate \
   --manifest configs/embodiment_adapters/hf_folding_to_anvil_openarm2.json \
   --base-policy model_zoo/hf-folding-final \
-  --dataset datasets/shirt-fold/lerobot
+  --dataset datasets/shirt-fold/lerobot-hf-phase-aligned \
+  --split-info model_zoo/openarm2-real-topshort-teleop-v1/pi05_openarm2_flat_shirt_expert_v1/checkpoints/005000/pretrained_model/split_info.json
 ```
 
 Cache the frozen policy every ten frames. The optional baseline is the existing
@@ -198,11 +200,12 @@ uv run anvil-adapter cache \
   --manifest configs/embodiment_adapters/hf_folding_to_anvil_openarm2.json \
   --base-policy model_zoo/hf-folding-final \
   --baseline-policy model_zoo/openarm2-real-topshort-teleop-v1/pi05_openarm2_flat_shirt_expert_v1/checkpoints/005000/pretrained_model \
-  --dataset datasets/shirt-fold/lerobot \
+  --dataset datasets/shirt-fold/lerobot-hf-phase-aligned \
   --split-info model_zoo/openarm2-real-topshort-teleop-v1/pi05_openarm2_flat_shirt_expert_v1/checkpoints/005000/pretrained_model/split_info.json \
   --output adapter_cache/shirt-fold-frozen-hf.npz \
   --task "Fold the T-shirt properly" \
   --stride 10 \
+  --resample-motion-intensity \
   --device cuda
 ```
 
@@ -211,13 +214,26 @@ noise seeds. Rejected IK samples are listed next to the cache in a JSON report.
 The bridge column is produced with a zero-initialized residual, so it is the
 required bridge-only sanity baseline.
 
-For a cross-embodiment transfer run, add `--align-motion-intensity`. This stores
-the untouched bridge chunk as `raw_bridge_chunk`, computes one global active-arm
-displacement scale from training episodes only, applies it to the residual's
-bridge input, and clips the result to the buffered target command envelope.
-Validation and test rows never contribute to the scale, and grippers are not
-scaled. Quality gates continue to compare the trained adapter with the untouched
-raw bridge; the aligned bridge is reported separately.
+For a cross-embodiment transfer run, add `--resample-motion-intensity`. This
+stores the untouched bridge chunk as `raw_bridge_chunk`, selects a single linear
+trajectory-rate factor from valid training episodes only, resamples the active
+arm trajectory, and clips it to the buffered target command envelope. Validation
+and test rows never contribute to the factor. Grippers remain on the untouched
+deterministic calibration path: they are neither resampled nor corrected by the
+residual. Quality gates continue to compare the trained adapter with the
+untouched raw bridge; the resampled bridge is reported separately.
+
+Cache schema v3 retains every attempted sample. A failed IK bridge is stored as
+a NaN chunk plus `bridge_valid=false` instead of being dropped. Offline reports
+show the valid-row metrics, failure rate, and a failure-adjusted normalized joint
+MAE that assigns every failed row a penalty of one full normalized joint range.
+This prevents bridge coverage failures from making holdout results look better.
+
+The residual loss uses smooth per-horizon action scales fit from valid training
+rows only. Mean action delta is fit against horizon and standard deviation
+against square-root horizon, with a joint-range-relative floor. These statistics
+are frozen into training provenance; validation and test episodes never
+contribute to them.
 
 The residual is supervised only by target OpenArm 2.0 episodes. The much larger
 and more diverse source corpus is not discarded: it is already represented in
@@ -239,11 +255,11 @@ Train only the residual:
 uv run anvil-adapter train \
   --manifest configs/embodiment_adapters/hf_folding_to_anvil_openarm2.json \
   --cache adapter_cache/shirt-fold-frozen-hf.npz \
-  --output model_zoo/adapters/hf-folding-to-openarm2-v1 \
+  --output model_zoo/adapters/hf-folding-to-openarm2-v2 \
   --steps 5000 \
   --device cuda \
   --wandb-project shirt-fold \
-  --wandb-run-name hf-folding-to-openarm2-v1-seed-42 \
+  --wandb-run-name hf-folding-to-openarm2-v2-seed-42 \
   --wandb-mode online
 ```
 
@@ -267,7 +283,7 @@ Compare hold, deterministic bridge, learned adapter, and the optional current
 
 ```bash
 uv run anvil-adapter evaluate \
-  --adapter model_zoo/adapters/hf-folding-to-openarm2-v1 \
+  --adapter model_zoo/adapters/hf-folding-to-openarm2-v2 \
   --cache adapter_cache/shirt-fold-frozen-hf.npz \
   --output eval_results/shirt-fold/embodiment-adapter.json \
   --device cuda

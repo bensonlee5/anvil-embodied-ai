@@ -131,6 +131,7 @@ def compute_adapter_loss(
     residual: Tensor,
     target: Tensor,
     target_ranges: Tensor,
+    action_scale: Tensor,
     target_model: RobotModelSpec,
     correction_bounds: Tensor,
     weights: AdapterLossWeights = AdapterLossWeights(),
@@ -142,10 +143,16 @@ def compute_adapter_loss(
         raise ValueError("adapter loss expects [B, T, 16] chunks")
     if current_state.shape != (corrected.shape[0], corrected.shape[-1]):
         raise ValueError("current_state must have shape [B, 16]")
+    if action_scale.shape != corrected.shape[1:]:
+        raise ValueError("action_scale must have shape [T, 16]")
+    if not torch.all(torch.isfinite(action_scale)) or not torch.all(action_scale > 0):
+        raise ValueError("action_scale must be finite and positive")
 
     active = torch.tensor(ACTIVE_JOINT_INDICES, device=corrected.device)
-    widths = (target_ranges[:, 1] - target_ranges[:, 0]).clamp_min(1e-6)
-    normalized_error = (corrected - target) / widths
+    if target_ranges.shape != (16, 2):
+        raise ValueError("target_ranges must have shape [16, 2]")
+    scale = action_scale.to(device=corrected.device, dtype=corrected.dtype)
+    normalized_error = (corrected - target) / scale
     joint_loss = F.smooth_l1_loss(
         normalized_error[..., active],
         torch.zeros_like(normalized_error[..., active]),
@@ -172,7 +179,8 @@ def compute_adapter_loss(
     if corrected.shape[1] > 1:
         predicted_velocity = corrected[:, 1:] - corrected[:, :-1]
         target_velocity = target[:, 1:] - target[:, :-1]
-        velocity_error = (predicted_velocity - target_velocity) / widths
+        velocity_scale = torch.sqrt(scale[1:] ** 2 + scale[:-1] ** 2).clamp_min(1e-6)
+        velocity_error = (predicted_velocity - target_velocity) / velocity_scale
         velocity_loss = F.smooth_l1_loss(
             velocity_error[..., active],
             torch.zeros_like(velocity_error[..., active]),
@@ -184,7 +192,7 @@ def compute_adapter_loss(
     current = current_state[:, None, :]
     predicted_motion = torch.abs(corrected - current)
     target_motion = torch.abs(target - current)
-    motion_error = (predicted_motion - target_motion) / widths
+    motion_error = (predicted_motion - target_motion) / scale
     motion_loss = F.smooth_l1_loss(
         motion_error[..., active],
         torch.zeros_like(motion_error[..., active]),

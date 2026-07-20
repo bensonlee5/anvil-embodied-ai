@@ -328,7 +328,62 @@ class ResidualAdapterContract:
         if not 0 < result.max_joint_range_fraction <= 1:
             raise EmbodimentError("residual max_joint_range_fraction must be in (0, 1]")
         if result.correct_grippers:
-            raise EmbodimentError("schema v1 keeps grippers deterministic")
+            raise EmbodimentError("embodiment adapter keeps grippers deterministic")
+        return result
+
+
+@dataclass(frozen=True)
+class TargetDatasetContract:
+    repo_id: str
+    revision: str
+    trim_manifest_path: str
+    trim_manifest_sha256: str
+    split_info_sha256: str
+    total_episodes: int
+    total_frames: int
+    camera_keys: tuple[str, ...]
+    arm_action_mode: str
+    relative_arm_dimensions: int
+    gripper_action_mode: str
+    absolute_gripper_indices: tuple[int, ...]
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> TargetDatasetContract:
+        result = cls(
+            repo_id=str(value.get("repo_id", "")),
+            revision=str(value.get("revision", "")),
+            trim_manifest_path=str(value.get("trim_manifest_path", "")),
+            trim_manifest_sha256=str(value.get("trim_manifest_sha256", "")),
+            split_info_sha256=str(value.get("split_info_sha256", "")),
+            total_episodes=int(value.get("total_episodes", 0)),
+            total_frames=int(value.get("total_frames", 0)),
+            camera_keys=tuple(str(item) for item in value.get("camera_keys", [])),
+            arm_action_mode=str(value.get("arm_action_mode", "")),
+            relative_arm_dimensions=int(value.get("relative_arm_dimensions", 0)),
+            gripper_action_mode=str(value.get("gripper_action_mode", "")),
+            absolute_gripper_indices=tuple(
+                int(item) for item in value.get("absolute_gripper_indices", [])
+            ),
+        )
+        digests = (result.trim_manifest_sha256, result.split_info_sha256)
+        if not result.repo_id or len(result.revision) != 40:
+            raise EmbodimentError("target_data must pin a repo_id and 40-character revision")
+        if not result.trim_manifest_path or any(
+            len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest)
+            for digest in digests
+        ):
+            raise EmbodimentError("target_data must pin trim and split SHA-256 digests")
+        if result.total_episodes != 33 or result.total_frames != 34850:
+            raise EmbodimentError("target_data must be the 33-session, 34,850-frame trim")
+        if result.camera_keys != ("base", "left_wrist", "right_wrist"):
+            raise EmbodimentError("target_data must pin base/left_wrist/right_wrist cameras")
+        if (
+            result.arm_action_mode != "native_relative"
+            or result.relative_arm_dimensions != 14
+            or result.gripper_action_mode != "absolute"
+            or result.absolute_gripper_indices != (7, 15)
+        ):
+            raise EmbodimentError("target_data action semantics do not match Pi0.5 folding")
         return result
 
 
@@ -342,6 +397,8 @@ class EmbodimentAdapterSpec:
     base_policy_repo: str
     base_policy_revision: str
     base_policy_processor_sha256: dict[str, str]
+    base_policy_weights_sha256: dict[str, str]
+    target_data: TargetDatasetContract
     reference_vector: AdapterVectorContract
     target_vector: AdapterVectorContract
     reference_model: KinematicModelContract
@@ -354,8 +411,8 @@ class EmbodimentAdapterSpec:
     def load(cls, path: str | Path) -> EmbodimentAdapterSpec:
         source = Path(path)
         raw = _read_json(source)
-        if raw.get("schema_version") != 1:
-            raise EmbodimentError("adapter schema_version must be 1")
+        if raw.get("schema_version") != 2:
+            raise EmbodimentError("adapter schema_version must be 2")
         policy = raw.get("base_policy", {})
         hashes = {
             str(name): str(digest) for name, digest in policy.get("processor_sha256", {}).items()
@@ -373,6 +430,14 @@ class EmbodimentAdapterSpec:
             raise EmbodimentError(
                 "base_policy.processor_sha256 must pin processor JSON and state files"
             )
+        weights = {
+            str(name): str(digest) for name, digest in policy.get("weights_sha256", {}).items()
+        }
+        if set(weights) != {"model.safetensors"} or any(
+            len(value) != 64 or any(char not in "0123456789abcdef" for char in value)
+            for value in weights.values()
+        ):
+            raise EmbodimentError("base_policy.weights_sha256 must pin model.safetensors")
         models = raw.get("models", {})
         grippers = {
             side: GripperCalibration.from_dict(value, side=side)
@@ -387,6 +452,8 @@ class EmbodimentAdapterSpec:
             base_policy_repo=str(policy.get("repo_id", "")),
             base_policy_revision=str(policy.get("revision", "")),
             base_policy_processor_sha256=hashes,
+            base_policy_weights_sha256=weights,
+            target_data=TargetDatasetContract.from_dict(raw.get("target_data", {})),
             reference_vector=AdapterVectorContract.from_dict(
                 raw.get("reference_vector", {}), label="reference_vector"
             ),

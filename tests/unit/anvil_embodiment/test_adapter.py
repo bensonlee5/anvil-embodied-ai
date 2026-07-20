@@ -58,12 +58,22 @@ def test_anvil_target_limits_match_session_resolved_contract() -> None:
     spec = get_model_spec("anvil_openarm_v2")
     expected_degrees = {
         "right": [
-            (-80, 200), (-10, 190), (-90, 90), (0, 140),
-            (-90, 90), (-70, 45), (-90, 90),
+            (-80, 200),
+            (-10, 190),
+            (-90, 90),
+            (0, 140),
+            (-90, 90),
+            (-70, 45),
+            (-90, 90),
         ],
         "left": [
-            (-200, 80), (-190, 10), (-90, 90), (0, 140),
-            (-90, 90), (-45, 70), (-90, 90),
+            (-200, 80),
+            (-190, 10),
+            (-90, 90),
+            (0, 140),
+            (-90, 90),
+            (-45, 70),
+            (-90, 90),
         ],
     }
     for side, limits in expected_degrees.items():
@@ -218,6 +228,7 @@ def test_adapter_loss_is_zero_for_exact_target() -> None:
         residual=residual,
         target=target,
         target_ranges=torch.tensor(artifact.bridge.target_joint_ranges, dtype=torch.float64),
+        action_scale=torch.ones(4, 16, dtype=torch.float64),
         target_model=artifact.bridge.target_spec,
         correction_bounds=torch.tensor(artifact.bridge.residual_bounds, dtype=torch.float64),
         weights=AdapterLossWeights(),
@@ -246,6 +257,7 @@ def test_adapter_motion_loss_penalizes_damped_displacement() -> None:
         residual=residual,
         target=target,
         target_ranges=torch.tensor(artifact.bridge.target_joint_ranges, dtype=torch.float64),
+        action_scale=torch.ones(4, 16, dtype=torch.float64),
         target_model=artifact.bridge.target_spec,
         correction_bounds=torch.tensor(artifact.bridge.residual_bounds, dtype=torch.float64),
         weights=AdapterLossWeights(motion=1.0),
@@ -262,6 +274,10 @@ def test_base_policy_verification_pins_processor_state(tmp_path: Path) -> None:
     for index, name in enumerate(processor_names):
         (base / name).write_bytes(f"processor-{index}".encode())
         raw["base_policy"]["processor_sha256"][name] = sha256_file(base / name)
+    (base / "model.safetensors").write_bytes(b"weights")
+    raw["base_policy"]["weights_sha256"]["model.safetensors"] = sha256_file(
+        base / "model.safetensors"
+    )
     (base / "config.json").write_text(
         json.dumps(
             {

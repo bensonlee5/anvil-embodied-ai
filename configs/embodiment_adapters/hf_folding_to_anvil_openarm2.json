@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "adapter_id": "hf-folding-final-to-anvil-openarm2-v1",
+  "schema_version": 2,
+  "adapter_id": "hf-folding-final-to-anvil-openarm2-v2",
   "deployment_status": "offline_only",
   "base_policy": {
     "repo_id": "lerobot-data-collection/folding_final",
@@ -10,7 +10,31 @@
       "policy_postprocessor.json": "2b1b189a52228cbdb12b012012785b17ce519db6b4e3ffe786cb7cdfed1bd583",
       "policy_preprocessor_step_3_normalizer_processor.safetensors": "7ee1325aedd9377bcc831275919b06e00bc7fe25a4dfba057b51afd4564ab756",
       "policy_postprocessor_step_0_unnormalizer_processor.safetensors": "7ee1325aedd9377bcc831275919b06e00bc7fe25a4dfba057b51afd4564ab756"
+    },
+    "weights_sha256": {
+      "model.safetensors": "f04985f077de0a3d2c49f455d800be120a3c1bdd8b99c936e01f3100ad4e477a"
     }
+  },
+  "target_data": {
+    "repo_id": "bohlt/openarm2-shirt-fold-phase-aligned-v1",
+    "revision": "8411e3e85eaf3e482b4ccb1cac9d4fc02891305e",
+    "trim_manifest_path": "meta/trim_manifest.json",
+    "trim_manifest_sha256": "97019524cda0d85347979b00db56c6e19e26b0d962e1a17fee35c22832a0821f",
+    "split_info_sha256": "dac42679c3d43b9a6c76e28fb6e23aad6d85599524b73433bb37df662b02795f",
+    "total_episodes": 33,
+    "total_frames": 34850,
+    "camera_keys": [
+      "base",
+      "left_wrist",
+      "right_wrist"
+    ],
+    "arm_action_mode": "native_relative",
+    "relative_arm_dimensions": 14,
+    "gripper_action_mode": "absolute",
+    "absolute_gripper_indices": [
+      7,
+      15
+    ]
   },
   "reference_vector": {
     "arm_order": [
