@@ -3,7 +3,7 @@ Tests for random-split + __getitem__ patch logic (train.py).
 
 Covers:
   1. apply_dataset_patches always installs the patch (no early-return on empty transforms)
-  2. patched_getitem maps absolute→relative only for train dataset (_anvil_uses_abs_sampler)
+  2. patched_getitem does not double-map sampler-provided relative indices
   3. Val/test datasets with non-consecutive episodes are NOT remapped (Bug 2 regression)
   4. split_info.json is written with the correct episode lists
   5. Resume correctly loads split_info.json from last checkpoint
@@ -32,6 +32,7 @@ _FULL_DATASET_AVAILABLE = (Path(DATASET_ROOT) / "meta" / "info.json").exists()
 def make_config(split_ratio="8,1,1", dataset_root=DATASET_ROOT, output_dir=None, extra_argv=None):
     """Build a minimal TrainingConfig without going through sys.argv."""
     import sys
+
     from anvil_trainer.train import TrainingConfig
 
     original_argv = sys.argv[:]
@@ -73,6 +74,7 @@ class TestPatchAlwaysInstalled:
     def test_patch_installed_without_transforms(self):
         """apply_dataset_patches must install the patch even when active_transforms is empty."""
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
         from anvil_trainer.train import TrainingConfig, TransformRunner
 
         original_getitem = LeRobotDataset.__getitem__
@@ -96,6 +98,7 @@ class TestPatchAlwaysInstalled:
     def test_patch_installed_with_transforms(self):
         """apply_dataset_patches still works when transforms are present."""
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
         from anvil_trainer.train import TrainingConfig, TransformRunner
 
         original_getitem = LeRobotDataset.__getitem__
@@ -116,7 +119,7 @@ class TestPatchAlwaysInstalled:
             LeRobotDataset.__getitem__ = original_getitem
 
 
-# ── Test 2: index mapping only for train dataset (Bug 2) ────────────────────
+# ── Test 2: LeRobot owns absolute→relative sampler mapping ─────────────────
 
 class TestIndexMappingScope:
     def _make_mock_reader(self, abs_to_rel: dict | None):
@@ -126,14 +129,10 @@ class TestIndexMappingScope:
             hf_dataset = None
         return FakeReader()
 
-    def test_train_dataset_mapping_applied(self):
-        """patched_getitem must apply absolute→relative mapping for flagged dataset.
-
-        Setup: spy is installed as original_getitem BEFORE apply_dataset_patches,
-        so the closure captures spy as original_getitem. Then patched_getitem maps
-        absolute 105 → relative 5 → calls spy(self, 5).
-        """
+    def test_train_dataset_relative_index_is_not_double_mapped(self):
+        """LeRobot's sampler maps absolute→relative; patched_getitem must not do it again."""
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
         from anvil_trainer.train import TrainingConfig, TransformRunner
 
         true_original = LeRobotDataset.__getitem__
@@ -153,24 +152,25 @@ class TestIndexMappingScope:
 
             # Build a fake train dataset instance
             class FakeTrainDataset:
-                _anvil_uses_abs_sampler = True
-
                 def _ensure_reader(self):
                     return self.__class__._reader
 
             FakeTrainDataset._reader = self._make_mock_reader({100: 0, 101: 1, 105: 5})
 
             instance = FakeTrainDataset()
-            # patched_getitem should map abs 105 → rel 5, then call spy(self, 5)
-            LeRobotDataset.__getitem__(instance, 105)
+            # LeRobot's EpisodeAwareSampler has already mapped absolute 105 to
+            # relative 5 before __getitem__ is called.  A second lookup would
+            # corrupt the sample whenever relative 5 is also an absolute key.
+            FakeTrainDataset._reader = self._make_mock_reader({5: 1, 105: 5})
+            LeRobotDataset.__getitem__(instance, 5)
             assert collected == [5], (
-                f"Bug 1/2 regression: expected spy called with relative index 5, got {collected}"
+                f"Double-mapping regression: expected relative index 5, got {collected}"
             )
         finally:
             LeRobotDataset.__getitem__ = true_original
 
     def test_val_dataset_mapping_skipped(self):
-        """patched_getitem must NOT remap indices for val/test (no _anvil_uses_abs_sampler).
+        """patched_getitem must NOT remap relative indices for val/test.
 
         Scenario: val_episodes=[0,2,5] frames 0-9,20-29,50-59.
         _absolute_to_relative_idx has key 20 (absolute frame of episode 2 start).
@@ -178,6 +178,7 @@ class TestIndexMappingScope:
         Without the fix this would be remapped to 10 (absolute 20 → relative 10), corrupting data.
         """
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
         from anvil_trainer.train import TrainingConfig, TransformRunner
 
         true_original = LeRobotDataset.__getitem__
@@ -195,7 +196,6 @@ class TestIndexMappingScope:
             runner.apply_dataset_patches()  # captures spy as original_getitem
 
             class FakeValDataset:
-                # NO _anvil_uses_abs_sampler → val/test: mapping must be skipped
                 def _ensure_reader(self):
                     return self.__class__._reader
 
@@ -226,7 +226,7 @@ class TestSplitInfoWritten:
         and non-overlapping episode lists.
         """
         import os
-        import subprocess, sys
+        import subprocess
         with tempfile.TemporaryDirectory(prefix="anvil_split_test_") as tmp_base:
             # Use a sub-path that doesn't pre-exist so lerobot doesn't reject it
             output_dir = Path(tmp_base) / "run"
@@ -286,17 +286,17 @@ class TestSplitInfoWritten:
             )
 
 
-# ── Test 4: train_dataset receives the flag ───────────────────────────────────
+# ── Test 4: split dataset factory patch is installed ─────────────────────────
 
-class TestTrainDatasetFlag:
-    def test_flag_set_on_train_dataset(self):
+class TestTrainDatasetFactoryPatch:
+    def test_split_dataset_factory_is_patched(self):
         """
-        patched_make_dataset must set _anvil_uses_abs_sampler=True on the
-        returned train dataset, but NOT on val/test datasets.
+        patched_make_dataset must replace the LeRobot dataset factory while
+        split-aware validation/test construction is active.
         """
-        import sys
-        from anvil_trainer.train import TrainingConfig, TransformRunner
         import lerobot.datasets.factory as factory_mod
+
+        from anvil_trainer.train import TrainingConfig, TransformRunner
 
         original_make_dataset = factory_mod.make_dataset
 
@@ -308,17 +308,13 @@ class TestTrainDatasetFlag:
         runner = TransformRunner(cfg)
         runner.apply_dataset_patches()
 
-        captured = {"train": None, "val": None, "test": None}
-
-        # We can't run a full training; instead verify the flag is set by
-        # inspecting the patched closure logic directly.
+        # We can't run a full training; inspect the patched factory directly.
         # apply_val_loss_patch replaces factory_mod.make_dataset; call it then
         # invoke the patched function with a minimal stub cfg.
         runner.apply_val_loss_patch()
         patched_fn = factory_mod.make_dataset
 
         try:
-            import lerobot.configs.train as train_cfg_mod
             # We need to pass a cfg object that has .seed, .batch_size, etc.
             # This is complex to fake without running lerobot; skip full invocation
             # and just confirm the patch was registered.

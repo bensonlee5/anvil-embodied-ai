@@ -54,13 +54,14 @@ dev = [
 # =============================================================================
 smolvla        = ["lerobot[smolvla]~=0.6.0"]          # SmolVLA
 pi             = ["lerobot[pi]~=0.6.0"]              # Pi0 / Pi0.5
+sarm           = ["lerobot[sarm]~=0.6.0"]            # SARM reward model + RA-BC labeling
 molmoact2      = ["lerobot[molmoact2]~=0.6.0"]       # MolmoAct2
 groot          = ["lerobot[groot]~=0.6.0"]           # GR00T N1.7
 multi_task_dit = ["lerobot[multi_task_dit]~=0.6.0"]  # Multitask DiT
 evo1           = ["lerobot[evo1]~=0.6.0"]            # EVO1
 fastwam        = ["lerobot[fastwam]~=0.6.0"]         # FastWAM
 vla_jepa       = ["lerobot[vla_jepa]~=0.6.0"]        # VLA-JEPA
-all            = ["lerobot[smolvla,pi,molmoact2,groot,multi_task_dit,evo1,fastwam,vla_jepa]~=0.6.0"]
+all            = ["lerobot[smolvla,pi,sarm,molmoact2,groot,multi_task_dit,evo1,fastwam,vla_jepa]~=0.6.0"]
 
 [project.scripts]
 anvil-trainer = "anvil_trainer.train:main"

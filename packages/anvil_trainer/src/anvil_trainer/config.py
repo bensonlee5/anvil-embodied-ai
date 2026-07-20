@@ -120,6 +120,7 @@ class TrainingConfig:
     resume_checkpoint: str = "last"       # Checkpoint to resume from ("last" or e.g. "020000")
     split_ratio: list[float] = field(default_factory=lambda: [8.0, 1.0, 1.0])  # train/val/test episode split ratios
     max_episodes: int | None = None  # Randomly subsample N episodes before train/val/test split (None = use all)
+    priority_sampling_manifest: str | None = None  # Immutable frame-priority annotations
     # Vision backbone for ACT/Diffusion: resnet18 | resnet34 | resnet50
     backbone: str = "resnet18"
     note: str | None = None         # Free-text note for this run (also sent to wandb as run notes)
@@ -204,6 +205,12 @@ class TrainingConfig:
         _me_raw = _pop_argv("max-episodes")
         max_episodes: int | None = int(_me_raw) if _me_raw else None
 
+        priority_sampling_manifest = (
+            _pop_argv("priority-sampling-manifest")
+            or os.environ.get("ANVIL_PRIORITY_SAMPLING_MANIFEST")
+            or None
+        )
+
         # peek (no remove) — needed for naming and backbone injection
         dataset_root = (
             _pop_argv("dataset.root", remove=False)
@@ -279,6 +286,21 @@ class TrainingConfig:
                 sys.argv.append(f"--output_dir={resume_job_path}")
 
             output_dir = resume_job_path
+
+            if priority_sampling_manifest is None:
+                saved_manifest = (
+                    Path(resume_job_path)
+                    / "checkpoints"
+                    / resume_checkpoint
+                    / "pretrained_model"
+                    / "priority_sampling_manifest.json"
+                )
+                if saved_manifest.is_file():
+                    priority_sampling_manifest = str(saved_manifest)
+                    log.info(
+                        "[anvil_trainer] --resume: inherited priority sampling manifest %s",
+                        saved_manifest,
+                    )
 
             # Auto-inherit action_type and delta_exclude_joints from checkpoint if not set on CLI
             if action_type == "absolute":
@@ -459,6 +481,7 @@ class TrainingConfig:
             resume_checkpoint=resume_checkpoint,
             split_ratio=split_ratio,
             max_episodes=max_episodes,
+            priority_sampling_manifest=priority_sampling_manifest,
             backbone=backbone,
             note=note,
             note_append=note_append,
@@ -482,6 +505,7 @@ class TrainingConfig:
             delta_exclude_joints=data.get("delta_exclude_joints"),
             dataset_root=data.get("dataset_root"),
             split_ratio=data.get("split_ratio", [8.0, 1.0, 1.0]),
+            priority_sampling_manifest=data.get("priority_sampling_manifest"),
             backbone=data.get("backbone", "resnet18"),
         )
 

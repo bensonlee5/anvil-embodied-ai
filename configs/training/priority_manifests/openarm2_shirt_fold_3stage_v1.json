@@ -1,0 +1,1614 @@
+{
+  "schema_version": "openarm2.priority-sampling.v1",
+  "description": "Three-stage quality and behavior annotations for the 33 trimmed successful OpenARM2 shirt-fold demonstrations, resolved into Larchenko-inspired frame priorities.",
+  "dataset": {
+    "repo_id": "bohlt/openarm2-shirt-fold-phase-aligned-v1",
+    "revision": "8411e3e85eaf3e482b4ccb1cac9d4fc02891305e",
+    "episodes": 33,
+    "frames": 34850,
+    "fps": 30,
+    "fingerprints": {
+      "meta/info.json": "6022ac2f297aa46503934b3710be54004db78c93a1c3892e8382a1e24d590285",
+      "data/chunk-000/file-000.parquet": "2d8a6e2a851df08c4a4d1173d89b07aeefd886ee38c3505644a233c39453d867",
+      "meta/trim_manifest.json": "97019524cda0d85347979b00db56c6e19e26b0d962e1a17fee35c22832a0821f"
+    }
+  },
+  "stage_order": [
+    "side_one",
+    "side_two",
+    "bottom_to_top"
+  ],
+  "annotation_contract": {
+    "quality_scale": [
+      1,
+      5
+    ],
+    "repeated_grasp_definition": "A short close/reopen followed by another close from the same gripper within 1.5 s; the event is quality evidence, not a task-failure label.",
+    "smoothing_definition": "A deliberate contact pass over an already placed layer or edge; review windows are coarse and independent of motion speed.",
+    "smoothing_affects_priority": false,
+    "single_annotator": true
+  },
+  "weighting": {
+    "method": "exponential_priority_sampler",
+    "loss_reweighting": false,
+    "sampling_replacement": true,
+    "quality_log_priority": {
+      "1": -1.0,
+      "2": -0.5,
+      "3": 0.0,
+      "4": 0.5,
+      "5": 1.0
+    },
+    "repeated_grasp_log_penalty": -0.5,
+    "smoothing_log_adjustment": 0.0,
+    "stage_probability_mass": {
+      "side_one": 1.0,
+      "side_two": 1.0,
+      "bottom_to_top": 1.0
+    }
+  },
+  "episodes": [
+    {
+      "episode_index": 0,
+      "frame_count": 892,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 132,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 132,
+          "end_frame": 681,
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 681,
+          "end_frame": 892,
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "right",
+          "stage": "side_two",
+          "close_frame": 433,
+          "reopen_frame": 461,
+          "retry_frame": 463,
+          "penalty_start_frame": 418,
+          "penalty_end_frame": 463,
+          "confidence": "medium"
+        },
+        {
+          "gripper": "right",
+          "stage": "side_two",
+          "close_frame": 463,
+          "reopen_frame": 465,
+          "retry_frame": 487,
+          "penalty_start_frame": 448,
+          "penalty_end_frame": 487,
+          "confidence": "medium"
+        },
+        {
+          "gripper": "right",
+          "stage": "side_two",
+          "close_frame": 487,
+          "reopen_frame": 503,
+          "retry_frame": 523,
+          "penalty_start_frame": 472,
+          "penalty_end_frame": 523,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 210,
+        "review_end_frame": 600,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 1,
+      "frame_count": 1194,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 269,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 269,
+          "end_frame": 961,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 961,
+          "end_frame": 1194,
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "right",
+          "stage": "side_two",
+          "close_frame": 553,
+          "reopen_frame": 564,
+          "retry_frame": 606,
+          "penalty_start_frame": 538,
+          "penalty_end_frame": 606,
+          "confidence": "medium"
+        },
+        {
+          "gripper": "left",
+          "stage": "side_two",
+          "close_frame": 561,
+          "reopen_frame": 568,
+          "retry_frame": 605,
+          "penalty_start_frame": 546,
+          "penalty_end_frame": 605,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 360,
+        "review_end_frame": 660,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 2,
+      "frame_count": 833,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 166,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 166,
+          "end_frame": 522,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 522,
+          "end_frame": 833,
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "left",
+          "stage": "side_two",
+          "close_frame": 435,
+          "reopen_frame": 479,
+          "retry_frame": 522,
+          "penalty_start_frame": 420,
+          "penalty_end_frame": 522,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "present",
+        "confidence": "medium",
+        "review_start_frame": 210,
+        "review_end_frame": 480,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 3,
+      "frame_count": 1215,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 241,
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 241,
+          "end_frame": 903,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 903,
+          "end_frame": 1215,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "left",
+          "stage": "side_two",
+          "close_frame": 328,
+          "reopen_frame": 355,
+          "retry_frame": 372,
+          "penalty_start_frame": 313,
+          "penalty_end_frame": 372,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 270,
+        "review_end_frame": 720,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 4,
+      "frame_count": 1105,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 176,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 176,
+          "end_frame": 726,
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 726,
+          "end_frame": 1105,
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "right",
+          "stage": "side_two",
+          "close_frame": 476,
+          "reopen_frame": 505,
+          "retry_frame": 550,
+          "penalty_start_frame": 461,
+          "penalty_end_frame": 550,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "uncertain",
+        "confidence": "low",
+        "review_start_frame": 360,
+        "review_end_frame": 600,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 5,
+      "frame_count": 1241,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 235,
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 235,
+          "end_frame": 652,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 652,
+          "end_frame": 1241,
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "right",
+          "stage": "bottom_to_top",
+          "close_frame": 910,
+          "reopen_frame": 932,
+          "retry_frame": 964,
+          "penalty_start_frame": 895,
+          "penalty_end_frame": 964,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 270,
+        "review_end_frame": 690,
+        "stage_context": [
+          "side_two",
+          "bottom_to_top"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 6,
+      "frame_count": 1046,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 157,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 157,
+          "end_frame": 696,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 696,
+          "end_frame": 1046,
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "right",
+          "stage": "side_two",
+          "close_frame": 461,
+          "reopen_frame": 486,
+          "retry_frame": 491,
+          "penalty_start_frame": 446,
+          "penalty_end_frame": 491,
+          "confidence": "medium"
+        },
+        {
+          "gripper": "right",
+          "stage": "side_two",
+          "close_frame": 491,
+          "reopen_frame": 493,
+          "retry_frame": 506,
+          "penalty_start_frame": 476,
+          "penalty_end_frame": 506,
+          "confidence": "medium"
+        },
+        {
+          "gripper": "right",
+          "stage": "bottom_to_top",
+          "close_frame": 820,
+          "reopen_frame": 835,
+          "retry_frame": 866,
+          "penalty_start_frame": 805,
+          "penalty_end_frame": 866,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 210,
+        "review_end_frame": 540,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 7,
+      "frame_count": 1022,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 138,
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 138,
+          "end_frame": 721,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 721,
+          "end_frame": 1022,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "right",
+          "stage": "side_two",
+          "close_frame": 484,
+          "reopen_frame": 495,
+          "retry_frame": 508,
+          "penalty_start_frame": 469,
+          "penalty_end_frame": 508,
+          "confidence": "medium"
+        },
+        {
+          "gripper": "right",
+          "stage": "bottom_to_top",
+          "close_frame": 823,
+          "reopen_frame": 853,
+          "retry_frame": 876,
+          "penalty_start_frame": 808,
+          "penalty_end_frame": 876,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 270,
+        "review_end_frame": 570,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 8,
+      "frame_count": 1026,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 179,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 179,
+          "end_frame": 712,
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 712,
+          "end_frame": 1026,
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 270,
+        "review_end_frame": 600,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 9,
+      "frame_count": 1298,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 157,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 157,
+          "end_frame": 796,
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 796,
+          "end_frame": 1298,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "right",
+          "stage": "bottom_to_top",
+          "close_frame": 939,
+          "reopen_frame": 978,
+          "retry_frame": 1008,
+          "penalty_start_frame": 924,
+          "penalty_end_frame": 1008,
+          "confidence": "medium"
+        },
+        {
+          "gripper": "left",
+          "stage": "side_two",
+          "close_frame": 193,
+          "reopen_frame": 208,
+          "retry_frame": 234,
+          "penalty_start_frame": 178,
+          "penalty_end_frame": 234,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 270,
+        "review_end_frame": 630,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 10,
+      "frame_count": 1032,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 172,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 172,
+          "end_frame": 669,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 669,
+          "end_frame": 1032,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [],
+      "smoothing": {
+        "label": "present",
+        "confidence": "medium",
+        "review_start_frame": 210,
+        "review_end_frame": 510,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 11,
+      "frame_count": 875,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 169,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 169,
+          "end_frame": 631,
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 631,
+          "end_frame": 875,
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "right",
+          "stage": "side_two",
+          "close_frame": 422,
+          "reopen_frame": 466,
+          "retry_frame": 486,
+          "penalty_start_frame": 407,
+          "penalty_end_frame": 486,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 210,
+        "review_end_frame": 510,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 12,
+      "frame_count": 936,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 199,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 199,
+          "end_frame": 682,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 682,
+          "end_frame": 936,
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [],
+      "smoothing": {
+        "label": "present",
+        "confidence": "medium",
+        "review_start_frame": 240,
+        "review_end_frame": 540,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 13,
+      "frame_count": 1160,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 249,
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 249,
+          "end_frame": 766,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 766,
+          "end_frame": 1160,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "right",
+          "stage": "bottom_to_top",
+          "close_frame": 887,
+          "reopen_frame": 927,
+          "retry_frame": 963,
+          "penalty_start_frame": 872,
+          "penalty_end_frame": 963,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 240,
+        "review_end_frame": 660,
+        "stage_context": [
+          "side_one",
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 14,
+      "frame_count": 909,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 153,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 153,
+          "end_frame": 682,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 682,
+          "end_frame": 909,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "right",
+          "stage": "side_two",
+          "close_frame": 480,
+          "reopen_frame": 487,
+          "retry_frame": 505,
+          "penalty_start_frame": 465,
+          "penalty_end_frame": 505,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 240,
+        "review_end_frame": 570,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 15,
+      "frame_count": 900,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 181,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 181,
+          "end_frame": 645,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 645,
+          "end_frame": 900,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "right",
+          "stage": "side_two",
+          "close_frame": 573,
+          "reopen_frame": 574,
+          "retry_frame": 586,
+          "penalty_start_frame": 558,
+          "penalty_end_frame": 586,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 210,
+        "review_end_frame": 510,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 16,
+      "frame_count": 1061,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 262,
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 262,
+          "end_frame": 798,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 798,
+          "end_frame": 1061,
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "left",
+          "stage": "side_one",
+          "close_frame": 44,
+          "reopen_frame": 46,
+          "retry_frame": 71,
+          "penalty_start_frame": 29,
+          "penalty_end_frame": 71,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 300,
+        "review_end_frame": 660,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 17,
+      "frame_count": 1197,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 304,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 304,
+          "end_frame": 948,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 948,
+          "end_frame": 1197,
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 270,
+        "review_end_frame": 630,
+        "stage_context": [
+          "side_one",
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 18,
+      "frame_count": 1020,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 204,
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 204,
+          "end_frame": 704,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 704,
+          "end_frame": 1020,
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "left",
+          "stage": "side_two",
+          "close_frame": 671,
+          "reopen_frame": 672,
+          "retry_frame": 704,
+          "penalty_start_frame": 656,
+          "penalty_end_frame": 704,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 240,
+        "review_end_frame": 600,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 19,
+      "frame_count": 1082,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 244,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 244,
+          "end_frame": 799,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 799,
+          "end_frame": 1082,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 330,
+        "review_end_frame": 630,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 20,
+      "frame_count": 973,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 202,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 202,
+          "end_frame": 462,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 462,
+          "end_frame": 973,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [],
+      "smoothing": {
+        "label": "present",
+        "confidence": "medium",
+        "review_start_frame": 210,
+        "review_end_frame": 540,
+        "stage_context": [
+          "side_two",
+          "bottom_to_top"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 21,
+      "frame_count": 1095,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 272,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 272,
+          "end_frame": 829,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 829,
+          "end_frame": 1095,
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 360,
+        "review_end_frame": 690,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 22,
+      "frame_count": 963,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 247,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 247,
+          "end_frame": 571,
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 571,
+          "end_frame": 963,
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [],
+      "smoothing": {
+        "label": "present",
+        "confidence": "medium",
+        "review_start_frame": 210,
+        "review_end_frame": 480,
+        "stage_context": [
+          "side_one",
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 23,
+      "frame_count": 1255,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 249,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 249,
+          "end_frame": 893,
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 893,
+          "end_frame": 1255,
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "right",
+          "stage": "side_two",
+          "close_frame": 675,
+          "reopen_frame": 715,
+          "retry_frame": 735,
+          "penalty_start_frame": 660,
+          "penalty_end_frame": 735,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 300,
+        "review_end_frame": 720,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 24,
+      "frame_count": 991,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 248,
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 248,
+          "end_frame": 753,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 753,
+          "end_frame": 991,
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 270,
+        "review_end_frame": 630,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 25,
+      "frame_count": 1255,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 296,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 296,
+          "end_frame": 894,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 894,
+          "end_frame": 1255,
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "right",
+          "stage": "side_two",
+          "close_frame": 646,
+          "reopen_frame": 674,
+          "retry_frame": 692,
+          "penalty_start_frame": 631,
+          "penalty_end_frame": 692,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "uncertain",
+        "confidence": "low",
+        "review_start_frame": 360,
+        "review_end_frame": 720,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 26,
+      "frame_count": 910,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 191,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 191,
+          "end_frame": 654,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 654,
+          "end_frame": 910,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 300,
+        "review_end_frame": 540,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 27,
+      "frame_count": 1017,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 239,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 239,
+          "end_frame": 628,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 628,
+          "end_frame": 1017,
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "right",
+          "stage": "side_two",
+          "close_frame": 410,
+          "reopen_frame": 428,
+          "retry_frame": 447,
+          "penalty_start_frame": 395,
+          "penalty_end_frame": 447,
+          "confidence": "medium"
+        },
+        {
+          "gripper": "right",
+          "stage": "bottom_to_top",
+          "close_frame": 862,
+          "reopen_frame": 869,
+          "retry_frame": 875,
+          "penalty_start_frame": 847,
+          "penalty_end_frame": 875,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 210,
+        "review_end_frame": 510,
+        "stage_context": [
+          "side_one",
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 28,
+      "frame_count": 1112,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 276,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 276,
+          "end_frame": 866,
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 866,
+          "end_frame": 1112,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 300,
+        "review_end_frame": 690,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 29,
+      "frame_count": 1010,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 246,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 246,
+          "end_frame": 708,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 708,
+          "end_frame": 1010,
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 270,
+        "review_end_frame": 600,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 30,
+      "frame_count": 1124,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 273,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 273,
+          "end_frame": 797,
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 797,
+          "end_frame": 1124,
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "right",
+          "stage": "side_two",
+          "close_frame": 291,
+          "reopen_frame": 298,
+          "retry_frame": 336,
+          "penalty_start_frame": 276,
+          "penalty_end_frame": 336,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "present",
+        "confidence": "medium",
+        "review_start_frame": 270,
+        "review_end_frame": 630,
+        "stage_context": [
+          "side_one",
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 31,
+      "frame_count": 1003,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 228,
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 228,
+          "end_frame": 687,
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 687,
+          "end_frame": 1003,
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [],
+      "smoothing": {
+        "label": "present",
+        "confidence": "medium",
+        "review_start_frame": 300,
+        "review_end_frame": 570,
+        "stage_context": [
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    },
+    {
+      "episode_index": 32,
+      "frame_count": 1098,
+      "stages": [
+        {
+          "name": "side_one",
+          "start_frame": 0,
+          "end_frame": 303,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "start_frame": 303,
+          "end_frame": 841,
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "start_frame": 841,
+          "end_frame": 1098,
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "repeated_grasps": [
+        {
+          "gripper": "left",
+          "stage": "side_two",
+          "close_frame": 782,
+          "reopen_frame": 826,
+          "retry_frame": 841,
+          "penalty_start_frame": 767,
+          "penalty_end_frame": 841,
+          "confidence": "medium"
+        }
+      ],
+      "smoothing": {
+        "label": "present",
+        "confidence": "high",
+        "review_start_frame": 270,
+        "review_end_frame": 660,
+        "stage_context": [
+          "side_one",
+          "side_two"
+        ],
+        "priority_adjustment": 0.0
+      }
+    }
+  ]
+}

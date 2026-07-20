@@ -205,6 +205,11 @@ Anvil-specific flags (stripped before passing to LeRobot):
       Test loss logged every save_freq steps (eval/test_loss).
       Set to --split-ratio=1,0,0 to disable held-out sets.
 
+  --priority-sampling-manifest=PATH
+      Sample training frames with replacement from a strict, immutable priority
+      manifest. The action loss remains unweighted. May also be set through
+      ANVIL_PRIORITY_SAMPLING_MANIFEST. Validation and test remain exhaustive.
+
   --job_name=NAME
       Human-readable run name. Checkpoints saved to model_zoo/<name>/.
       Auto-generated from policy type + timestamp if omitted.

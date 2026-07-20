@@ -25,6 +25,10 @@ SHIRT_FOLD_CONFIGS = {
         "lerobot/pi05_base",
         "7de663972b7817d2c4cf2d84c821153dfea772e9",
     ),
+    "shirt_fold_pi05_hf_phase_aligned_priority_v1.yaml": (
+        "lerobot-data-collection/folding_final",
+        "695abe40dbf3aac04efda59c1501d748681fa0fb",
+    ),
 }
 SHIRT_FOLD_ACTION_NAMES = [
     "right_joint_1.pos",
@@ -171,7 +175,11 @@ def test_shirt_fold_pi05_configs_pin_the_openarm2_dataset_contract(
 
 def test_shirt_fold_pi05_configs_differ_only_by_initialization_and_run_identity() -> None:
     configs = [
-        yaml.safe_load((CONFIG_ROOT / filename).read_text()) for filename in SHIRT_FOLD_CONFIGS
+        yaml.safe_load((CONFIG_ROOT / filename).read_text())
+        for filename in (
+            "shirt_fold_pi05_hf_phase_aligned.yaml",
+            "shirt_fold_pi05_base_phase_aligned.yaml",
+        )
     ]
     comparable = []
     for config in configs:
@@ -183,6 +191,19 @@ def test_shirt_fold_pi05_configs_differ_only_by_initialization_and_run_identity(
         comparable.append(candidate)
 
     assert comparable[0] == comparable[1]
+
+
+def test_priority_recipe_changes_only_run_identity_from_hf_control() -> None:
+    control = yaml.safe_load(
+        (CONFIG_ROOT / "shirt_fold_pi05_hf_phase_aligned.yaml").read_text()
+    )
+    priority = yaml.safe_load(
+        (CONFIG_ROOT / "shirt_fold_pi05_hf_phase_aligned_priority_v1.yaml").read_text()
+    )
+    for config in (control, priority):
+        config.pop("output_dir")
+        config.pop("job_name")
+    assert priority == control
 
 
 def test_vla_jepa_inference_uses_opt_in_full_rtc() -> None:

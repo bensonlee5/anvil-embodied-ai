@@ -147,6 +147,113 @@ replay metrics are at least as good as the base-initialized run. Train the
 embodiment adapter next only if the folding prior is useful but joint-space
 replay still shows a systematic embodiment-dependent error.
 
+## Three-stage quality-priority experiment
+
+The next HF-prior experiment uses all 33 successful, phase-aligned target
+episodes while changing only how training frames are selected. The reviewed
+task structure is:
+
+1. fold the first side;
+2. fold the other side;
+3. fold the shirt from bottom to top.
+
+The full untrimmed videos were used for annotation so setup, reset, and the
+complete manipulation context remained visible. Training still uses only the
+34,850-frame phase-aligned trim. The immutable annotation and weighting artifact
+is
+`configs/training/priority_manifests/openarm2_shirt_fold_3stage_v1.json`;
+`scripts/training/build_openarm2_shirt_fold_priority_manifest.py --check`
+detects drift.
+
+Each stage has an independent 1–5 quality score. All labels describe successful
+folds, so a score of 1 is a poor-quality success rather than task failure. The
+artifact separately records 28 medium-confidence repeated-grasp attempts,
+defined as a short close/reopen followed by another close from the same gripper
+within 1.5 seconds. Recovery frames remain ordinary demonstrations. Smoothing
+review windows are also separate: slow surface or edge refinement is deliberate
+and receives exactly zero quality adjustment.
+
+The sampler follows the data-selection mechanism in [Larchenko's LeHome 2026
+write-up](https://arxiv.org/html/2606.27163), not its later on-policy learning
+claim. It samples with replacement in proportion to an exponential priority;
+the Pi0.5 flow-matching action loss is unchanged. Manual quality scores are
+mapped to clipped log-priorities `[-1, -0.5, 0, 0.5, 1]`, repeated-attempt
+approach windows receive `-0.5`, and the three stages receive equal aggregate
+probability mass. These annotations are not learned advantages and this run
+must not be called AWR. If auxiliary heads are added later, their losses require
+inverse-sampling correction; the current action-only run does not.
+
+Run the frozen experiment with:
+
+```bash
+uv run anvil-trainer \
+  --config_path=configs/training/shirt_fold_pi05_hf_phase_aligned_priority_v1.yaml \
+  --priority-sampling-manifest=configs/training/priority_manifests/openarm2_shirt_fold_3stage_v1.json \
+  --task-description="Fold the T-shirt properly" \
+  --action-type=absolute \
+  --split-ratio=8,1,1 \
+  --note="HF prior; three-stage quality-priority sampler v1; all 33 trimmed successes"
+```
+
+Only training uses the priority sampler. Validation and test remain exhaustive,
+unweighted episode splits. Every checkpoint copies the exact manifest and its
+SHA-256 into `pretrained_model/`, allowing a resumed run to inherit it without
+depending on a machine-local path.
+
+## Native SARM and RA-BC experiment
+
+The reward-aware experiment is a separate follow-up to the manual priority
+sampler. It uses LeRobot's native SARM `dense_only` model to learn progress over
+the same three stages, then uses native RA-BC to weight the ordinary Pi0.5
+action loss. Do not combine manual priority sampling and RA-BC in the first
+controlled run: doing so would confound two different sampling/weighting
+mechanisms.
+
+The immutable contract is
+`configs/training/sarm_manifests/openarm2_shirt_fold_sarm_v1.json`. It preserves
+the policy experiment's seed-1000 27/3/3 episode split and derives SARM temporal
+proportions from the 27 training episodes only. The converter translates the
+review manifest's exclusive stage ends to the inclusive ends consumed by
+LeRobot SARM. It never changes the 34,850-frame phase-aligned source dataset.
+
+Materialize and independently validate the derived dataset with:
+
+```bash
+uv run python scripts/training/materialize_openarm2_shirt_fold_sarm_dataset.py
+uv run python scripts/training/materialize_openarm2_shirt_fold_sarm_dataset.py --check
+```
+
+Train the reward model with
+`configs/training/shirt_fold_sarm_dense_v1.yaml`. SARM's bidirectional image
+window is appropriate for this offline data-selection experiment, but the
+reward model is not an online production component. After training, compute
+every-frame dense progress without interpolation:
+
+```bash
+python -m lerobot.rewards.sarm.compute_rabc_weights \
+  --dataset-repo-id=bohlt/openarm2-shirt-fold-phase-aligned-sarm-v1 \
+  --reward-model-path=bohlt/openarm2-shirt-fold-sarm-v1 \
+  --head-mode=dense \
+  --stride=1 \
+  --num-visualizations=6 \
+  --output-path=datasets/shirt-fold/lerobot-hf-phase-aligned-sarm-v1/sarm_progress.parquet
+
+uv run python scripts/training/audit_openarm2_sarm_progress.py
+uv run python scripts/training/resolve_openarm2_sarm_rabc_recipe.py
+```
+
+The audit requires one finite `[0, 1]` value for every frame, emits a separately
+pinned train-only progress parquet so native RA-BC cannot compute normalization
+statistics from policy holdouts, reports progress
+agreement by split and stage, checks monotonicity, and separately reports the
+reviewed quality, repeated-grasp, and coarse smoothing strata. Repeated grasps
+remain evaluation signals rather than task-failure labels; smoothing windows
+remain diagnostic because their current boundaries are review windows, not
+precise action masks. The checked-in RA-BC recipe is deliberately fail-closed
+with zero provenance hashes. Only the generated recipe may be launched after
+the audit freezes the full and train-only progress SHA-256 values, audit SHA-256,
+and train-only kappa.
+
 ## Deployment preflight
 
 Use the shadow inference config before enabling commands. The shirt-fold live

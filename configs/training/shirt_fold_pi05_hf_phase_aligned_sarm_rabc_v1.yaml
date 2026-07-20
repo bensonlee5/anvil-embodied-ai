@@ -1,0 +1,86 @@
+# SARM RA-BC policy experiment initialized from the same HF folding checkpoint
+# as the controlled phase-aligned run. This recipe is intentionally separate
+# from the manual priority sampler. Before launch, replace the provisional
+# kappa using scripts/training/audit_openarm2_sarm_progress.py and freeze the
+# resolved value plus progress SHA-256 in the run note/ledger.
+
+dataset:
+  repo_id: local
+  root: datasets/shirt-fold/lerobot-hf-phase-aligned-sarm-v1
+  video_backend: pyav
+  image_transforms:
+    enable: false
+
+policy:
+  path: lerobot-data-collection/folding_final
+  pretrained_revision: 695abe40dbf3aac04efda59c1501d748681fa0fb
+  device: cuda
+  use_amp: false
+  push_to_hub: false
+
+  chunk_size: 30
+  n_action_steps: 30
+  max_state_dim: 32
+  max_action_dim: 32
+  num_inference_steps: 10
+  use_relative_actions: true
+  relative_exclude_joints: [gripper]
+  action_feature_names: [right_joint_1.pos, right_joint_2.pos, right_joint_3.pos, right_joint_4.pos, right_joint_5.pos, right_joint_6.pos, right_joint_7.pos, right_gripper.pos, left_joint_1.pos, left_joint_2.pos, left_joint_3.pos, left_joint_4.pos, left_joint_5.pos, left_joint_6.pos, left_joint_7.pos, left_gripper.pos]
+
+  normalization_mapping: '{"VISUAL":"IDENTITY","STATE":"QUANTILES","ACTION":"QUANTILES"}'
+  input_features: '{"observation.images.left_wrist":{"type":"VISUAL","shape":[3,270,480]},"observation.images.right_wrist":{"type":"VISUAL","shape":[3,270,480]},"observation.images.base":{"type":"VISUAL","shape":[3,270,480]},"observation.state":{"type":"STATE","shape":[16]}}'
+  output_features: '{"action":{"type":"ACTION","shape":[16]}}'
+
+  dtype: bfloat16
+  gradient_checkpointing: true
+  compile_model: false
+  freeze_vision_encoder: false
+  train_expert_only: true
+
+  optimizer_lr: 0.00001
+  optimizer_betas: [0.9, 0.95]
+  optimizer_eps: 1.0e-8
+  optimizer_weight_decay: 0.01
+  optimizer_grad_clip_norm: 1.0
+  scheduler_warmup_steps: 250
+  scheduler_decay_steps: 5000
+  scheduler_decay_lr: 0.000001
+
+sample_weighting:
+  type: rabc
+  # Native RA-BC computes global delta statistics from this file. It must contain
+  # only the 27 training episodes; the full progress file remains an audit artifact.
+  progress_path: datasets/shirt-fold/lerobot-hf-phase-aligned-sarm-v1/sarm_progress_train.parquet
+  head_mode: dense
+  # Provisional parse-safe value. Launch is forbidden until the progress audit
+  # replaces it with the frozen train-only 95th-percentile delta.
+  kappa: 0.01
+  epsilon: 0.000001
+  extra_params:
+    # Zero hashes intentionally make this checked-in template fail closed.
+    # The resolver replaces them after the reward model labels and audits all frames.
+    audit_path: datasets/shirt-fold/lerobot-hf-phase-aligned-sarm-v1/sarm_progress_audit.json
+    audit_sha256: 0000000000000000000000000000000000000000000000000000000000000000
+    source_progress_sha256: 0000000000000000000000000000000000000000000000000000000000000000
+    training_progress_sha256: 0000000000000000000000000000000000000000000000000000000000000000
+    priority_manifest_sha256: 90fa439031ce9e16cd5de5e1293743e0f4e8525a7d51a585da43f6cab20385f3
+    sarm_contract_sha256: c76957e42f3f9ed1e8e710cefab3892681643c5e0d4318411f9ae84d29e4522d
+
+output_dir: model_zoo/shirt-fold/pi05-hf-folding-phase-aligned-sarm-rabc-v1-5k
+job_name: shirt-fold-pi05-hf-folding-phase-aligned-sarm-rabc-v1-5k
+seed: 1000
+cudnn_deterministic: false
+num_workers: 0
+persistent_workers: false
+batch_size: 16
+steps: 5000
+env_eval_freq: 0
+log_freq: 100
+save_checkpoint: true
+save_freq: 500
+use_policy_training_preset: true
+
+wandb:
+  enable: true
+  disable_artifact: true
+  project: openarm2-shirt-folding

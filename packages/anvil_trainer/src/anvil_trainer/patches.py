@@ -2,8 +2,9 @@
 
 ``TransformRunner`` owns:
     * The active list of :class:`~anvil_trainer.transforms.Transform` instances.
-    * Six monkey-patches on lerobot modules:
-        - ``apply_dataset_patches`` — patches ``LeRobotDataset.__getitem__``.
+    * Runtime monkey-patches on lerobot modules:
+        - ``apply_dataset_patches`` — patches ``LeRobotDataset.__getitem__`` for transforms.
+        - ``apply_priority_sampler_patch`` — optionally replaces uniform train sampling.
         - ``apply_val_loss_patch`` — patches ``make_dataset`` (split creation),
           captures the preprocessor from ``make_pre_post_processors``, and
           injects delta action stats into the returned ``train_dataset``.
@@ -29,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,8 @@ from anvil_shared.provenance import git_provenance
 from anvil_shared.splits import compute_split_episodes, load_split_info, save_split_info
 
 from anvil_trainer.config import TrainingConfig
+from anvil_trainer.priority_sampling import PriorityEpisodeAwareSampler, PriorityManifest
+from anvil_trainer.rabc_audit import make_audit_verified_sample_weighter
 from anvil_trainer.transforms import (
     DataIntegrityError,
     DeltaActionTransform,
@@ -110,6 +114,77 @@ def _normalize_uint8_camera_images(batch: dict[str, Any], camera_keys: tuple[str
         if isinstance(image, torch.Tensor) and image.dtype == torch.uint8:
             batch[camera_key] = image.to(dtype=torch.float32) / 255.0
     return batch
+
+
+class _PerActuatorLossMeter:
+    """Aggregate named per-actuator losses into scalar logging metrics."""
+
+    def __init__(self, action_names: tuple[str, ...]):
+        if not action_names or any(not isinstance(name, str) or not name for name in action_names):
+            raise DataIntegrityError(
+                "Per-actuator loss logging requires non-empty action feature names"
+            )
+        if len(set(action_names)) != len(action_names):
+            raise DataIntegrityError(
+                f"Per-actuator loss logging requires unique action feature names: {action_names}"
+            )
+        self.action_names = action_names
+        self._weighted_sums = [0.0] * len(action_names)
+        self._total_weight = 0.0
+
+    def update(self, loss_dict: dict[str, Any], *, weight: int = 1) -> dict[str, Any]:
+        """Consume ``loss_per_dim`` and return only logger-compatible values."""
+        cleaned = dict(loss_dict)
+        raw_losses = cleaned.pop("loss_per_dim", None)
+        if raw_losses is None:
+            return cleaned
+        if not isinstance(raw_losses, (list, tuple)):
+            raise DataIntegrityError(
+                "loss_per_dim must be a list or tuple ordered by action_feature_names"
+            )
+        if len(raw_losses) != len(self.action_names):
+            raise DataIntegrityError(
+                "loss_per_dim/action feature length mismatch: "
+                f"losses={len(raw_losses)}, actions={len(self.action_names)}"
+            )
+        if isinstance(weight, bool) or not isinstance(weight, int) or weight <= 0:
+            raise DataIntegrityError(
+                f"Per-actuator loss weight must be a positive integer: {weight}"
+            )
+
+        try:
+            losses = [float(value) for value in raw_losses]
+        except (TypeError, ValueError) as error:
+            raise DataIntegrityError(
+                f"loss_per_dim contains a non-numeric value: {raw_losses}"
+            ) from error
+        if not all(math.isfinite(value) for value in losses):
+            raise DataIntegrityError(f"loss_per_dim contains non-finite values: {losses}")
+        for index, value in enumerate(losses):
+            self._weighted_sums[index] += value * weight
+        self._total_weight += weight
+        return cleaned
+
+    def pop_metrics(self, prefix: str) -> dict[str, float]:
+        """Return scalar means keyed by exact actuator name, then reset."""
+        if self._total_weight == 0:
+            return {}
+        metrics = {
+            f"{prefix}/{name}": self._weighted_sums[index] / self._total_weight
+            for index, name in enumerate(self.action_names)
+        }
+        self._weighted_sums = [0.0] * len(self.action_names)
+        self._total_weight = 0.0
+        return metrics
+
+
+def _action_batch_size(batch: dict[str, Any]) -> int:
+    """Return the batch size used to sample-weight holdout metrics."""
+    action = batch.get("action")
+    shape = getattr(action, "shape", ())
+    if not shape or int(shape[0]) <= 0:
+        raise DataIntegrityError("Cannot determine a positive batch size from batch['action']")
+    return int(shape[0])
 
 
 def _vla_jepa_current_state(state: Any):
@@ -273,9 +348,20 @@ class TransformRunner:
         self._split_info: dict = {}  # populated by patched_make_dataset
         self._preprocessor = None  # captured from make_pre_post_processors
         self._camera_keys: tuple[str, ...] = ()  # captured from dataset metadata
+        self._action_feature_names: tuple[str, ...] = ()  # exact dataset action-vector order
+        self._train_per_actuator_meter: _PerActuatorLossMeter | None = None
+        self._log_freq = 0  # captured from lerobot cfg for window-averaged actuator metrics
         self._val_freq = 0  # set from cfg.log_freq * 5 inside patched_make_dataset
         self._resume_step = 0  # for absolute step tracking in wandb
         self._normalization_contract: dict[str, Any] = {}
+        self._priority_manifest: PriorityManifest | None = None
+        if config.priority_sampling_manifest:
+            if not config.dataset_root:
+                raise DataIntegrityError(
+                    "Priority sampling requires --dataset.root for fingerprint verification"
+                )
+            self._priority_manifest = PriorityManifest.load(config.priority_sampling_manifest)
+            self._priority_manifest.verify_dataset(config.dataset_root)
         # List of (module, attr_name, original_value) — populated by _patch in
         # insertion order so restore_all_patches can revert in reverse.
         self._saved_originals: list[tuple[Any, str, Any]] = []
@@ -423,14 +509,19 @@ class TransformRunner:
             log.warning("[anvil_trainer] Failed to register processor compat alias: %s", e)
 
     def log_config(self) -> None:
-        """Log active transforms."""
+        """Log active transforms and sampling policy."""
         if not self.active_transforms:
             log.info("[anvil_trainer] Active transforms: (none - pass-through mode)")
-            return
-
-        for transform in self.active_transforms:
-            details = self._get_transform_details(transform)
-            log.info("[anvil_trainer] Active transform: %s — %s", transform.name, details)
+        else:
+            for transform in self.active_transforms:
+                details = self._get_transform_details(transform)
+                log.info("[anvil_trainer] Active transform: %s — %s", transform.name, details)
+        if self._priority_manifest is not None:
+            log.info(
+                "[priority-sampling] Validated %s (%s)",
+                self._priority_manifest.path,
+                self._priority_manifest.sha256,
+            )
 
     def _get_transform_details(self, transform: Transform) -> str:
         """Get human-readable details for a transform."""
@@ -768,42 +859,69 @@ class TransformRunner:
         self._patch(VLAJEPAPolicy, "_prepare_model_inputs", patched_prepare)
         log.info("[vla_jepa] Patched stacked state selection to use observation time t")
 
-    def apply_dataset_patches(self) -> None:
-        """Patch LeRobotDataset.__getitem__ to apply transforms and fix index mapping.
+    def apply_priority_sampler_patch(self) -> None:
+        """Replace LeRobot's uniform train sampler when a manifest is configured."""
+        if self._priority_manifest is None:
+            return
 
-        This patch is always installed (even without active_transforms) because
-        EpisodeAwareSampler yields absolute frame indices that must be remapped to
-        relative indices for filtered (split) datasets. The mapping is only applied
-        to the train dataset instance (flagged via _anvil_uses_abs_sampler).
+        import lerobot.datasets.sampler as sampler_mod
+        import lerobot.scripts.lerobot_train as lerobot_train_mod
+
+        manifest = self._priority_manifest
+
+        def configured_priority_sampler(*args, **kwargs):
+            return PriorityEpisodeAwareSampler(*args, manifest=manifest, **kwargs)
+
+        self._patch(sampler_mod, "EpisodeAwareSampler", configured_priority_sampler)
+        self._patch(lerobot_train_mod, "EpisodeAwareSampler", configured_priority_sampler)
+        log.info(
+            "[priority-sampling] Enabled manifest %s (%s)",
+            manifest.path,
+            manifest.sha256,
+        )
+
+    def apply_rabc_audit_patch(self) -> None:
+        """Require an exact progress audit when a recipe opts into provenance locking."""
+        import lerobot.utils.sample_weighting as sample_weighting_mod
+
+        original_factory = sample_weighting_mod.make_sample_weighter
+
+        def verified_factory(
+            config,
+            policy,
+            device,
+            dataset_root=None,
+            dataset_repo_id=None,
+        ):
+            return make_audit_verified_sample_weighter(
+                config,
+                policy,
+                device,
+                dataset_root,
+                dataset_repo_id,
+                original_factory=original_factory,
+            )
+
+        self._patch(sample_weighting_mod, "make_sample_weighter", verified_factory)
+
+    def apply_dataset_patches(self) -> None:
+        """Patch LeRobotDataset.__getitem__ to apply Anvil transforms.
+
+        LeRobot 0.6's EpisodeAwareSampler already applies the dataset's
+        absolute-to-relative mapping. A second mapping here corrupts split
+        datasets whenever a relative index is also an absolute-map key.
         """
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-        # We must capture the original __getitem__ to use it in our patch.
-        # LeRobotDataset.__getitem__ does not perform Anvil split index mapping,
-        # but EpisodeAwareSampler yields absolute indices. We add the mapping
-        # logic here to support filtered datasets (splits).
         original_getitem = LeRobotDataset.__getitem__
         transforms = self.active_transforms
         config = self.config
 
         def patched_getitem(self, idx):
-            # 1. Resolve relative index if the dataset is filtered by episodes.
-            # Only the train dataset uses EpisodeAwareSampler (absolute indices).
-            # Val/test datasets use DataLoader without a sampler (relative indices
-            # 0..N-1) and must NOT be remapped — doing so would corrupt reads when
-            # relative indices overlap with the absolute frame index space.
-            reader = self._ensure_reader()
-            if (
-                getattr(self, "_anvil_uses_abs_sampler", False)
-                and reader._absolute_to_relative_idx is not None
-            ):
-                # Map from absolute HF frame index to relative filtered index
-                idx = reader._absolute_to_relative_idx.get(idx, idx)
-
-            # 2. Call original __getitem__ (which calls reader.get_item)
+            # Samplers and ordinary DataLoaders both supply relative indices.
             item = original_getitem(self, idx)
 
-            # 3. Apply transforms (no-op when transforms list is empty)
+            # Apply transforms (no-op when transforms list is empty).
             for transform in transforms:
                 item = transform.apply(item, config)
             return item
@@ -834,7 +952,8 @@ class TransformRunner:
                 return original_make_dataset(cfg)
             _patched["done"] = True
 
-            # Capture val_freq and resume_step from lerobot cfg
+            # Capture logging frequencies and resume_step from lerobot cfg
+            val_state._log_freq = cfg.log_freq
             val_state._val_freq = cfg.log_freq * 5 if cfg.log_freq > 0 else 0
             if cfg.resume and hasattr(cfg, "checkpoint_path") and cfg.checkpoint_path:
                 try:
@@ -850,6 +969,8 @@ class TransformRunner:
             val_state._camera_keys = tuple(full_dataset.meta.camera_keys)
             policy_cfg = cfg.trainable_config
             val_state._validate_pi05_dataset_contract(policy_cfg, full_dataset)
+            action_feature = full_dataset.meta.features.get("action", {})
+            val_state._action_feature_names = tuple(action_feature.get("names") or ())
 
             # Build action stats in the same representation consumed by the
             # processor. Native Pi0.5 relative actions use every valid future
@@ -864,7 +985,6 @@ class TransformRunner:
                 _patched_action_stats = val_state._compute_delta_action_stats(full_dataset)
 
             if not has_holdout:
-                full_dataset._anvil_uses_abs_sampler = True
                 val_state._split_info = {
                     "split_ratio": list(s),
                     "total_episodes": total_ep,
@@ -972,11 +1092,6 @@ class TransformRunner:
             # Train dataset
             cfg.dataset.episodes = train_ep
             train_dataset = original_make_dataset(cfg)
-            # Flag this instance so patched_getitem applies absolute→relative mapping.
-            # EpisodeAwareSampler (used by ACT and similar policies) yields absolute
-            # frame indices; val/test dataloaders use relative indices and must NOT
-            # be remapped.
-            train_dataset._anvil_uses_abs_sampler = True
             # The train dataset is a fresh instance that re-reads stats.json,
             # so re-apply the in-memory transformed-action statistics.
             if _patched_action_stats is not None:
@@ -1080,6 +1195,8 @@ class TransformRunner:
             anvil_cfg_base["task_description"] = self.config.task_override
         if self.config.note:
             anvil_cfg_base["note"] = self.config.note
+        if self._priority_manifest is not None:
+            anvil_cfg_base["priority_sampling"] = self._priority_manifest.provenance()
 
         val_state = self
 
@@ -1099,7 +1216,8 @@ class TransformRunner:
                     policy.eval()
                     t0 = time.perf_counter()
                     total_loss = 0.0
-                    n_batches = 0
+                    total_samples = 0
+                    per_actuator_meter = None
 
                     # ACTPolicy in evaluation mode has no VAE, but test_loss
                     # needs to calculate the full loss. We set back to train mode
@@ -1119,14 +1237,21 @@ class TransformRunner:
                                     k: v.to(device) if isinstance(v, torch.Tensor) else v
                                     for k, v in batch.items()
                                 }
-                            loss, _ = policy.forward(batch)
-                            total_loss += loss.item()
-                            n_batches += 1
+                            loss, loss_dict = policy.forward(batch)
+                            batch_size = _action_batch_size(batch)
+                            total_loss += loss.item() * batch_size
+                            total_samples += batch_size
+                            if isinstance(loss_dict, dict) and "loss_per_dim" in loss_dict:
+                                if per_actuator_meter is None:
+                                    per_actuator_meter = _PerActuatorLossMeter(
+                                        val_state._action_feature_names
+                                    )
+                                per_actuator_meter.update(loss_dict, weight=batch_size)
 
                     if is_act:
                         policy.eval()
 
-                    test_loss = total_loss / max(n_batches, 1)
+                    test_loss = total_loss / max(total_samples, 1)
                     test_s = time.perf_counter() - t0
                     log.info("[eval] test_loss=%.6f @ step %s (%.1fs)", test_loss, step, test_s)
 
@@ -1134,9 +1259,14 @@ class TransformRunner:
                         import wandb as _wandb
 
                         if _wandb.run is not None:
-                            _wandb.log({"eval/test_loss": test_loss}, step=int(step))
+                            metrics = {"eval/test_loss": test_loss}
+                            if per_actuator_meter is not None:
+                                metrics.update(
+                                    per_actuator_meter.pop_metrics("eval/test_loss_per_actuator")
+                                )
+                            _wandb.log(metrics, step=int(step))
                     except Exception:
-                        pass
+                        log.exception("[eval] Failed to log test metrics to W&B")
 
             # --- Original save ---
             original_save_checkpoint(checkpoint_dir, *args, **kwargs)
@@ -1152,6 +1282,11 @@ class TransformRunner:
                 # 2. split_info.json: all split metadata
                 if val_state._split_info:
                     save_split_info(pretrained_dir / "split_info.json", val_state._split_info)
+
+                if val_state._priority_manifest is not None:
+                    (pretrained_dir / "priority_sampling_manifest.json").write_bytes(
+                        val_state._priority_manifest.path.read_bytes()
+                    )
 
                 log.info("[anvil_trainer] Saved configs to %s", pretrained_dir)
 
@@ -1173,7 +1308,7 @@ class TransformRunner:
         _counter = {"n": 0}
 
         def patched_update_policy(*args, **kwargs):
-            result = original_update_policy(*args, **kwargs)
+            train_tracker, output_dict = original_update_policy(*args, **kwargs)
 
             policy = args[1] if len(args) > 1 else kwargs.get("policy")
             accelerator = kwargs.get("accelerator")
@@ -1181,13 +1316,34 @@ class TransformRunner:
                 accelerator = args[5]
 
             _counter["n"] += 1
+            abs_step = val_state._resume_step + _counter["n"]
+            if isinstance(output_dict, dict) and "loss_per_dim" in output_dict:
+                batch = args[2] if len(args) > 2 else kwargs.get("batch")
+                if val_state._train_per_actuator_meter is None:
+                    val_state._train_per_actuator_meter = _PerActuatorLossMeter(
+                        val_state._action_feature_names
+                    )
+                output_dict = val_state._train_per_actuator_meter.update(
+                    output_dict,
+                    weight=_action_batch_size(batch),
+                )
+            if (
+                val_state._train_per_actuator_meter is not None
+                and val_state._log_freq > 0
+                and abs_step % val_state._log_freq == 0
+            ):
+                output_dict = dict(output_dict or {})
+                output_dict.update(
+                    val_state._train_per_actuator_meter.pop_metrics("loss_per_actuator")
+                )
+            result = train_tracker, output_dict
+
             val_freq = val_state._val_freq
             if not val_freq or val_freq <= 0 or val_state._val_dataloader is None:
                 return result
             if _counter["n"] % val_freq != 0:
                 return result
 
-            abs_step = val_state._resume_step + _counter["n"]
             preprocessor = val_state._preprocessor
 
             # Unwrap accelerator-wrapped policy for eval
@@ -1199,7 +1355,8 @@ class TransformRunner:
             unwrapped.eval()
             t0 = time.perf_counter()
             total_loss = 0.0
-            n_batches = 0
+            total_samples = 0
+            per_actuator_meter = None
 
             # ACTPolicy in evaluation mode has no VAE, but val_loss
             # needs to calculate the full loss.
@@ -1218,14 +1375,21 @@ class TransformRunner:
                             k: v.to(device) if isinstance(v, torch.Tensor) else v
                             for k, v in val_batch.items()
                         }
-                    loss, _ = unwrapped.forward(val_batch)
-                    total_loss += loss.item()
-                    n_batches += 1
+                    loss, loss_dict = unwrapped.forward(val_batch)
+                    batch_size = _action_batch_size(val_batch)
+                    total_loss += loss.item() * batch_size
+                    total_samples += batch_size
+                    if isinstance(loss_dict, dict) and "loss_per_dim" in loss_dict:
+                        if per_actuator_meter is None:
+                            per_actuator_meter = _PerActuatorLossMeter(
+                                val_state._action_feature_names
+                            )
+                        per_actuator_meter.update(loss_dict, weight=batch_size)
 
             if is_act:
                 unwrapped.eval()
 
-            val_loss = total_loss / max(n_batches, 1)
+            val_loss = total_loss / max(total_samples, 1)
             val_s = time.perf_counter() - t0
             log.info("[eval] val_loss=%.6f @ step %s (%.1fs)", val_loss, abs_step, val_s)
 
@@ -1233,9 +1397,12 @@ class TransformRunner:
                 import wandb as _wandb
 
                 if _wandb.run is not None:
-                    _wandb.log({"eval/val_loss": val_loss}, step=abs_step)
+                    metrics = {"eval/val_loss": val_loss}
+                    if per_actuator_meter is not None:
+                        metrics.update(per_actuator_meter.pop_metrics("eval/val_loss_per_actuator"))
+                    _wandb.log(metrics, step=abs_step)
             except Exception:
-                pass
+                log.exception("[eval] Failed to log validation metrics to W&B")
 
             return result
 
@@ -1274,6 +1441,8 @@ def patched_lerobot(config: TrainingConfig):
     # which apply_metadata_patches typically triggers indirectly via
     # Transform.patch_metadata.  Keep the same install order as train().
     runner.apply_dataset_patches()
+    runner.apply_priority_sampler_patch()
+    runner.apply_rabc_audit_patch()
     runner.apply_val_loss_patch()
     runner.apply_checkpoint_patch()
     runner.apply_val_loss_hook()
