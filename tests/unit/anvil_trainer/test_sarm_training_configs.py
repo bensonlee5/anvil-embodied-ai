@@ -29,6 +29,7 @@ def test_sarm_reward_recipe_transcribes_the_frozen_contract() -> None:
     assert config["dataset"]["revision"] == "a631469960ec5b983eb43e430c39ffc621f7c23b"
     assert config["dataset"]["episodes"] == split["train"] + split["validation"] + split["test"]
     assert config["dataset"]["eval_split"] == 0.18
+    assert config["dataset"]["video_backend"] == "torchcodec"
     assert config["steps"] == 1200
 
 
