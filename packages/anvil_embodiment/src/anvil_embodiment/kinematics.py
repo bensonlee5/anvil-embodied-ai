@@ -96,19 +96,49 @@ def _reference_arm(side: str) -> ArmModelSpec:
 def _target_arm(side: str) -> ArmModelSpec:
     mirror = -1.0 if side == "right" else 1.0
     joint1_axis = (0.0, mirror, 0.0)
-    joint2_range = (-0.17453, 3.3161) if side == "right" else (-3.3161, 0.17453)
+    joint1_range = (
+        (-1.3962634015954636, 3.490658503988659)
+        if side == "right"
+        else (-3.490658503988659, 1.3962634015954636)
+    )
+    joint2_range = (
+        (-0.17453292519943295, 3.3161255787892263)
+        if side == "right"
+        else (-3.3161255787892263, 0.17453292519943295)
+    )
     joint6_axis = (0.0, 1.0 if side == "right" else -1.0, 0.0)
+    joint6_range = (
+        (-1.2217304763960306, 0.7853981633974483)
+        if side == "right"
+        else (-0.7853981633974483, 1.2217304763960306)
+    )
     return ArmModelSpec(
         root_pos=(0.0, 0.031 * mirror, 0.0),
         root_quat=IDENTITY_QUAT,
         links=(
-            _link((0.0, 0.0625 * mirror, 0.0), joint1_axis, (-2.3562, 2.3562)),
+            _link((0.0, 0.0625 * mirror, 0.0), joint1_axis, joint1_range),
             _link((0.0, 0.06 * mirror, 0.0), (-1.0, 0.0, 0.0), joint2_range),
-            _link((0.0, 0.0, -0.06625), (0.0, 0.0, -1.0), (-1.5708, 1.5708)),
-            _link((0.0, 0.0, -0.15375), (0.0, -1.0, 0.0), (0.0, 2.4435)),
-            _link((0.0, 0.0, -0.0955), (0.0, 0.0, -1.0), (-1.5708, 1.5708)),
-            _link((0.0, 0.0, -0.1205), joint6_axis, (-0.7854, 1.2217)),
-            _link((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (-1.5708, 1.5708)),
+            _link(
+                (0.0, 0.0, -0.06625),
+                (0.0, 0.0, -1.0),
+                (-1.5707963267948966, 1.5707963267948966),
+            ),
+            _link(
+                (0.0, 0.0, -0.15375),
+                (0.0, -1.0, 0.0),
+                (0.0, 2.443460952792061),
+            ),
+            _link(
+                (0.0, 0.0, -0.0955),
+                (0.0, 0.0, -1.0),
+                (-1.5707963267948966, 1.5707963267948966),
+            ),
+            _link((0.0, 0.0, -0.1205), joint6_axis, joint6_range),
+            _link(
+                (0.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (-1.5707963267948966, 1.5707963267948966),
+            ),
         ),
         tcp_pos=(-0.02193, 0.0, -0.138),
         tcp_quat=(0.70710678, 0.0, 0.70710678, 0.0),
@@ -126,7 +156,12 @@ BUILTIN_MODELS: dict[str, RobotModelSpec] = {
     ),
     "anvil_openarm_v2": RobotModelSpec(
         model_id="anvil_openarm_v2",
-        provenance="anvil-openarm-mujoco models/anvil_openarm_bimanual.xml",
+        provenance=(
+            "anvil-robotics/openarm_description@"
+            "a1e6bb625fd1b4a8345dc8ab95ffae05316da74f plus bimanual side mirroring; "
+            "Anvil J6 extension resolved from bohlt/openarm2-shirt-fold-phase-aligned-v1@"
+            "8411e3e85eaf3e482b4ccb1cac9d4fc02891305e"
+        ),
         arms={side: _target_arm(side) for side in ("right", "left")},
     ),
 }

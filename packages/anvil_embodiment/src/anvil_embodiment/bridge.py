@@ -123,11 +123,22 @@ class KinematicEmbodimentBridge:
     @property
     def target_joint_ranges(self) -> np.ndarray:
         rows: list[tuple[float, float]] = []
+        margin = float(
+            self._from_radians(
+                np.asarray([self.spec.ik.joint_limit_margin_rad]),
+                self.spec.target_vector.joint_unit,
+            )[0]
+        )
         for side in ("right", "left"):
             limits = self._from_radians(
                 self.target[side].limits, self.spec.target_vector.joint_unit
             )
-            rows.extend(tuple(row) for row in limits)
+            command_limits = limits.copy()
+            command_limits[:, 0] += margin
+            command_limits[:, 1] -= margin
+            if np.any(command_limits[:, 0] >= command_limits[:, 1]):
+                raise BridgeError("IK joint-limit margin leaves an empty target command range")
+            rows.extend(tuple(row) for row in command_limits)
             calibration = self.spec.grippers[side]
             rows.append(
                 (

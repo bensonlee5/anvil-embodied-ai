@@ -72,22 +72,22 @@
     },
     "target": {
       "model_id": "anvil_openarm_v2",
-      "sha256": "fb12028a8b08fc6f0aaab6a472727419b7aff2ab07ec4bb0672de88a7c5bbac2",
-      "provenance": "anvil-openarm-mujoco models/anvil_openarm_bimanual.xml"
+      "sha256": "d754398e61803c100072bfeeb6327b2cb449fe63a92eacc8157c7252163047a5",
+      "provenance": "anvil-robotics/openarm_description@a1e6bb625fd1b4a8345dc8ab95ffae05316da74f plus bimanual side mirroring; Anvil J6 extension resolved from bohlt/openarm2-shirt-fold-phase-aligned-v1@8411e3e85eaf3e482b4ccb1cac9d4fc02891305e"
     }
   },
   "grippers": {
     "right": {
       "reference_closed": 0.0,
       "reference_open": -65.0,
-      "target_closed": 0.0,
-      "target_open": 0.0523599
+      "target_closed": -0.003,
+      "target_open": 0.05
     },
     "left": {
       "reference_closed": 0.0,
       "reference_open": -65.0,
-      "target_closed": 0.0,
-      "target_open": 0.0523599
+      "target_closed": -0.003,
+      "target_open": 0.05
     }
   },
   "ik": {

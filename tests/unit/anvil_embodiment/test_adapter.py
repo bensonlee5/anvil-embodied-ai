@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -12,6 +13,7 @@ from anvil_embodiment.kinematics import (
     model_spec_hash,
     torch_forward_kinematics,
 )
+from anvil_embodiment.policy import EmbodimentAdaptedPolicy
 from anvil_embodiment.residual import (
     AdapterLossWeights,
     compute_adapter_loss,
@@ -52,6 +54,39 @@ def test_torch_fk_matches_mujoco(model_id: str, side: str) -> None:
     np.testing.assert_allclose(actual_rotation.numpy(), expected_rotation, atol=1e-9)
 
 
+def test_anvil_target_limits_match_session_resolved_contract() -> None:
+    spec = get_model_spec("anvil_openarm_v2")
+    expected_degrees = {
+        "right": [
+            (-80, 200), (-10, 190), (-90, 90), (0, 140),
+            (-90, 90), (-70, 45), (-90, 90),
+        ],
+        "left": [
+            (-200, 80), (-190, 10), (-90, 90), (0, 140),
+            (-90, 90), (-45, 70), (-90, 90),
+        ],
+    }
+    for side, limits in expected_degrees.items():
+        actual = np.asarray([link.joint_range for link in spec.arms[side].links])
+        np.testing.assert_allclose(actual, np.deg2rad(limits), atol=1e-12)
+
+
+def test_target_command_ranges_apply_ik_margin_and_gripper_command_calibration() -> None:
+    from anvil_embodiment.artifact import load_adapter_artifact
+
+    artifact = load_adapter_artifact(MANIFEST, require_weights=False)
+    ranges = artifact.bridge.target_joint_ranges
+    margin = artifact.spec.ik.joint_limit_margin_rad
+    for side_index, side in enumerate(("right", "left")):
+        raw = np.asarray(
+            [link.joint_range for link in artifact.bridge.target_spec.arms[side].links]
+        )
+        start = side_index * 8
+        np.testing.assert_allclose(ranges[start : start + 7, 0], raw[:, 0] + margin)
+        np.testing.assert_allclose(ranges[start : start + 7, 1], raw[:, 1] - margin)
+        np.testing.assert_allclose(ranges[start + 7], [-0.003, 0.05])
+
+
 def test_tcp_alignment_is_a_proper_rotation() -> None:
     np.testing.assert_allclose(
         TARGET_TO_REFERENCE_TCP_ROTATION.T @ TARGET_TO_REFERENCE_TCP_ROTATION,
@@ -76,6 +111,64 @@ def test_bridge_converts_degrees_and_round_trips_current_pose() -> None:
     round_trip = artifact.bridge.policy_chunk_to_target(reference.values[None], state)
     np.testing.assert_allclose(round_trip.values[0, :7], state[:7], atol=1e-12)
     np.testing.assert_allclose(round_trip.values[0, 8:15], state[8:15], atol=1e-12)
+
+
+def test_gripper_bridge_preserves_command_endpoints() -> None:
+    from anvil_embodiment.artifact import load_adapter_artifact
+
+    artifact = load_adapter_artifact(MANIFEST, require_weights=False)
+    state = np.asarray(
+        [0.0, 0.2, 0.01, 1.55, 0.0, -0.02, 0.01, -0.003]
+        + [0.0, -0.2, 0.01, 1.55, 0.0, -0.02, 0.01, 0.05],
+        dtype=np.float64,
+    )
+    reference = artifact.bridge.target_state_to_policy(state).values
+    assert reference[7] == pytest.approx(0.0)
+    assert reference[15] == pytest.approx(-65.0)
+    round_trip = artifact.bridge.policy_chunk_to_target(reference[None], state).values[0]
+    assert round_trip[7] == pytest.approx(-0.003)
+    assert round_trip[15] == pytest.approx(0.05)
+
+
+def test_policy_keeps_reference_ik_continuity_until_reset() -> None:
+    class Model(torch.nn.Module):
+        def predict_action_chunk(self, observation):
+            return observation["observation.state"][:, None, :]
+
+    class Bridge:
+        def __init__(self):
+            self.previous: list[np.ndarray | None] = []
+
+        def target_state_to_policy(self, state, previous):
+            self.previous.append(None if previous is None else previous.copy())
+            return SimpleNamespace(values=np.asarray(state) + 1.0)
+
+        def policy_chunk_to_target(self, chunk, _current_state):
+            return SimpleNamespace(values=np.asarray(chunk))
+
+    class Residual(torch.nn.Module):
+        def forward(self, _current, chunk):
+            return chunk, torch.zeros_like(chunk)
+
+    bridge = Bridge()
+    artifact = SimpleNamespace(bridge=bridge, residual=Residual())
+    policy = EmbodimentAdaptedPolicy(
+        model=Model(),
+        preprocessor=lambda value: value,
+        postprocessor=SimpleNamespace(process_action=lambda value: value),
+        artifact=artifact,
+        device="cpu",
+    )
+    observation = {"observation.state": torch.zeros(1, 16)}
+
+    policy.predict_action_chunk(observation)
+    policy.predict_action_chunk(observation)
+    assert bridge.previous[0] is None
+    np.testing.assert_allclose(bridge.previous[1], np.ones(16))
+
+    policy.reset()
+    policy.predict_action_chunk(observation)
+    assert bridge.previous[2] is None
 
 
 def test_bridge_rejects_nonfinite_input() -> None:

@@ -47,6 +47,7 @@ class EmbodimentAdaptedPolicy:
         self.postprocessor = postprocessor
         self.artifact = artifact
         self.device = torch.device(device)
+        self._previous_reference_state: np.ndarray | None = None
         for parameter in self.model.parameters():
             parameter.requires_grad_(False)
         self.model.eval()
@@ -54,7 +55,6 @@ class EmbodimentAdaptedPolicy:
 
     @torch.no_grad()
     def predict_action_chunk(self, observation: dict[str, Any]) -> torch.Tensor:
-        self._previous_reference_state: np.ndarray | None = None
         if "observation.state" not in observation:
             raise ValueError("OpenArm 2 observation.state is required")
         raw_state = _to_numpy(observation["observation.state"])

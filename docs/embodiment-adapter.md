@@ -19,6 +19,10 @@ The adapter keeps the folding VLA frozen and composes four explicit stages:
    inverse kinematic bridge.
 4. Apply a small learned, bounded residual in OpenArm 2.0 joint coordinates.
 
+Reference IK continuity is retained between action chunks and cleared only at
+an episode reset. Both the IK result and learned residual are clamped to the
+same buffered target command envelope.
+
 The artifact remains `offline_only`. It is not connected to the live ROS command
 path by this change.
 
@@ -32,10 +36,39 @@ previous solution as that posture seed, and the learned loss includes target-sid
 joint and velocity terms. It never compares a Hugging Face degree value directly
 to an OpenArm 2 radian target.
 
-The deterministic bridge is evaluated before training. On the local shirt-fold
-dataset, the default sampled validation accepts 85 of 88 states (96.6%). The
-three rejected states miss the overlapping workspace by approximately 1–3 cm
-and fail closed rather than being silently clipped into an unrelated motion.
+The deterministic bridge is evaluated before training. Samples outside the
+overlapping workspace fail closed rather than being silently clipped into an
+unrelated motion. Record the accepted/rejected counts from the exact pinned
+manifest and dataset in the run metadata; do not carry counts forward after a
+kinematic model or joint-limit change.
+
+## Target limits and gripper calibration
+
+The target arm uses these controller-coordinate nominal limits:
+
+| Joint | Right | Left |
+|---|---:|---:|
+| J1 | −80°…+200° | −200°…+80° |
+| J2 | −10°…+190° | −190°…+10° |
+| J3 | −90°…+90° | −90°…+90° |
+| J4 | 0°…+140° | 0°…+140° |
+| J5 | −90°…+90° | −90°…+90° |
+| J6 | −70°…+45° | −45°…+70° |
+| J7 | −90°…+90° | −90°…+90° |
+
+J1–J5/J7 come from the pinned upstream OpenArm 2.0 description with the
+bimanual side convention. Anvil documents the wider v2 J6 qualitatively but
+does not publish numeric controller limits; the mirrored J6 range is resolved
+from all 33 sessions in the pinned target dataset. Target follower-state extrema
+are −70.30°/+44.34° on right J6 and −43.94°/+63.46° on left J6. Small excursions
+past a nominal endpoint are treated as encoder/controller tolerance, not as a
+reason to expand the mechanical model.
+
+Arm commands remain 0.005 rad (0.286°) inside every nominal endpoint. The
+target gripper mapping deliberately uses command endpoints rather than follower
+state extrema: −0.003 rad is closed and +0.050 rad is open. The source policy's
+corresponding endpoints are 0° and −65°. This retains the small negative close
+command present in the target demonstrations instead of weakening it to zero.
 
 ## Loss
 
@@ -91,11 +124,12 @@ uv run anvil-adapter validate \
   --stride 500
 ```
 
-Obtain the exact frozen policy once. This is a large download:
+Obtain the exact frozen policy revision once. This is a large download:
 
 ```bash
-git clone https://huggingface.co/lerobot-data-collection/folding_final \
-  model_zoo/hf-folding-final
+hf download lerobot-data-collection/folding_final \
+  --revision 695abe40dbf3aac04efda59c1501d748681fa0fb \
+  --local-dir model_zoo/hf-folding-final
 ```
 
 Then validate all processor content hashes:
@@ -127,6 +161,13 @@ Cache generation uses the checkpoint's exact episode split and deterministic
 noise seeds. Rejected IK samples are listed next to the cache in a JSON report.
 The bridge column is produced with a zero-initialized residual, so it is the
 required bridge-only sanity baseline.
+
+The residual is supervised only by target OpenArm 2.0 episodes. The much larger
+and more diverse source corpus is not discarded: it is already represented in
+the frozen `folding_final` policy weights and pinned processors. Mixing
+source-embodiment joint targets into the residual loss would reintroduce the
+unit/geometry mismatch; source-only data can instead be used for frozen-policy
+regression tests of the reference side of the bridge.
 
 Train only the residual:
 
