@@ -169,6 +169,12 @@ source-embodiment joint targets into the residual loss would reintroduce the
 unit/geometry mismatch; source-only data can instead be used for frozen-policy
 regression tests of the reference side of the bridge.
 
+The target rows must come from the pinned phase-aligned trim, not the full raw
+33 sessions. Its `meta/trim_manifest.json` reduces 43,625 source frames to
+34,850 by removing 8,775 setup/final-idle frames, and records non-zero start and
+end removals for every episode. The saved train/validation/test assignment must
+come from that same dataset revision.
+
 Train only the residual:
 
 ```bash
