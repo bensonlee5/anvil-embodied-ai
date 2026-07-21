@@ -1,0 +1,1306 @@
+{
+  "schema_version": "openarm2.blind-stage-review.v1",
+  "seed": 20260720,
+  "source_manifest": "configs/training/priority_manifests/openarm2_shirt_fold_3stage_v1.json",
+  "source_manifest_sha256": "90fa439031ce9e16cd5de5e1293743e0f4e8525a7d51a585da43f6cab20385f3",
+  "trim_manifest": "datasets/shirt-fold/lerobot-hf-phase-aligned/meta/trim_manifest.json",
+  "trim_manifest_sha256": "97019524cda0d85347979b00db56c6e19e26b0d962e1a17fee35c22832a0821f",
+  "source_video": "datasets/shirt-fold/lerobot-pi05-relative/videos/observation.images.base/chunk-000/file-000.mp4",
+  "source_video_sha256": "6001ea47d087ef2f03804cff59d2fe27aef4a9c544f6bcc5a09c1dc9726d7957",
+  "review_camera": "base",
+  "frame_offsets_from_stage_end": [
+    46,
+    31,
+    16,
+    1
+  ],
+  "items": [
+    {
+      "token": "7f96d21fcf",
+      "episode_index": 0,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 132,
+      "source_frames_global": [
+        343,
+        358,
+        373,
+        388
+      ]
+    },
+    {
+      "token": "556ef21935",
+      "episode_index": 0,
+      "stage": "side_two",
+      "retained_start_frame": 132,
+      "retained_end_frame_exclusive": 681,
+      "source_frames_global": [
+        892,
+        907,
+        922,
+        937
+      ]
+    },
+    {
+      "token": "affb663a2f",
+      "episode_index": 0,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 681,
+      "retained_end_frame_exclusive": 892,
+      "source_frames_global": [
+        1103,
+        1118,
+        1133,
+        1148
+      ]
+    },
+    {
+      "token": "5df102a4aa",
+      "episode_index": 1,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 269,
+      "source_frames_global": [
+        1824,
+        1839,
+        1854,
+        1869
+      ]
+    },
+    {
+      "token": "1e1ebe93c2",
+      "episode_index": 1,
+      "stage": "side_two",
+      "retained_start_frame": 269,
+      "retained_end_frame_exclusive": 961,
+      "source_frames_global": [
+        2516,
+        2531,
+        2546,
+        2561
+      ]
+    },
+    {
+      "token": "f2d08280ac",
+      "episode_index": 1,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 961,
+      "retained_end_frame_exclusive": 1194,
+      "source_frames_global": [
+        2749,
+        2764,
+        2779,
+        2794
+      ]
+    },
+    {
+      "token": "6d05abc694",
+      "episode_index": 2,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 166,
+      "source_frames_global": [
+        3231,
+        3246,
+        3261,
+        3276
+      ]
+    },
+    {
+      "token": "f1092d31c1",
+      "episode_index": 2,
+      "stage": "side_two",
+      "retained_start_frame": 166,
+      "retained_end_frame_exclusive": 522,
+      "source_frames_global": [
+        3587,
+        3602,
+        3617,
+        3632
+      ]
+    },
+    {
+      "token": "c4ef9348db",
+      "episode_index": 2,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 522,
+      "retained_end_frame_exclusive": 833,
+      "source_frames_global": [
+        3898,
+        3913,
+        3928,
+        3943
+      ]
+    },
+    {
+      "token": "0bd00f6189",
+      "episode_index": 3,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 241,
+      "source_frames_global": [
+        4367,
+        4382,
+        4397,
+        4412
+      ]
+    },
+    {
+      "token": "e91621b635",
+      "episode_index": 3,
+      "stage": "side_two",
+      "retained_start_frame": 241,
+      "retained_end_frame_exclusive": 903,
+      "source_frames_global": [
+        5029,
+        5044,
+        5059,
+        5074
+      ]
+    },
+    {
+      "token": "dbfe655a6a",
+      "episode_index": 3,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 903,
+      "retained_end_frame_exclusive": 1215,
+      "source_frames_global": [
+        5341,
+        5356,
+        5371,
+        5386
+      ]
+    },
+    {
+      "token": "1742b7f80f",
+      "episode_index": 4,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 176,
+      "source_frames_global": [
+        5756,
+        5771,
+        5786,
+        5801
+      ]
+    },
+    {
+      "token": "08d6020ab9",
+      "episode_index": 4,
+      "stage": "side_two",
+      "retained_start_frame": 176,
+      "retained_end_frame_exclusive": 726,
+      "source_frames_global": [
+        6306,
+        6321,
+        6336,
+        6351
+      ]
+    },
+    {
+      "token": "1c354f1a4b",
+      "episode_index": 4,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 726,
+      "retained_end_frame_exclusive": 1105,
+      "source_frames_global": [
+        6685,
+        6700,
+        6715,
+        6730
+      ]
+    },
+    {
+      "token": "8dee14a5d9",
+      "episode_index": 5,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 235,
+      "source_frames_global": [
+        7128,
+        7143,
+        7158,
+        7173
+      ]
+    },
+    {
+      "token": "dabfd0e0ab",
+      "episode_index": 5,
+      "stage": "side_two",
+      "retained_start_frame": 235,
+      "retained_end_frame_exclusive": 652,
+      "source_frames_global": [
+        7545,
+        7560,
+        7575,
+        7590
+      ]
+    },
+    {
+      "token": "2f021393fa",
+      "episode_index": 5,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 652,
+      "retained_end_frame_exclusive": 1241,
+      "source_frames_global": [
+        8134,
+        8149,
+        8164,
+        8179
+      ]
+    },
+    {
+      "token": "0b29936457",
+      "episode_index": 6,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 157,
+      "source_frames_global": [
+        8563,
+        8578,
+        8593,
+        8608
+      ]
+    },
+    {
+      "token": "ae0356d7ca",
+      "episode_index": 6,
+      "stage": "side_two",
+      "retained_start_frame": 157,
+      "retained_end_frame_exclusive": 696,
+      "source_frames_global": [
+        9102,
+        9117,
+        9132,
+        9147
+      ]
+    },
+    {
+      "token": "fe27e6d9c2",
+      "episode_index": 6,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 696,
+      "retained_end_frame_exclusive": 1046,
+      "source_frames_global": [
+        9452,
+        9467,
+        9482,
+        9497
+      ]
+    },
+    {
+      "token": "2aba10f26e",
+      "episode_index": 7,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 138,
+      "source_frames_global": [
+        10016,
+        10031,
+        10046,
+        10061
+      ]
+    },
+    {
+      "token": "af3f15a31b",
+      "episode_index": 7,
+      "stage": "side_two",
+      "retained_start_frame": 138,
+      "retained_end_frame_exclusive": 721,
+      "source_frames_global": [
+        10599,
+        10614,
+        10629,
+        10644
+      ]
+    },
+    {
+      "token": "1232e3bac6",
+      "episode_index": 7,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 721,
+      "retained_end_frame_exclusive": 1022,
+      "source_frames_global": [
+        10900,
+        10915,
+        10930,
+        10945
+      ]
+    },
+    {
+      "token": "f509b63506",
+      "episode_index": 8,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 179,
+      "source_frames_global": [
+        11485,
+        11500,
+        11515,
+        11530
+      ]
+    },
+    {
+      "token": "ed6a969555",
+      "episode_index": 8,
+      "stage": "side_two",
+      "retained_start_frame": 179,
+      "retained_end_frame_exclusive": 712,
+      "source_frames_global": [
+        12018,
+        12033,
+        12048,
+        12063
+      ]
+    },
+    {
+      "token": "a29296ef09",
+      "episode_index": 8,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 712,
+      "retained_end_frame_exclusive": 1026,
+      "source_frames_global": [
+        12332,
+        12347,
+        12362,
+        12377
+      ]
+    },
+    {
+      "token": "70e7707989",
+      "episode_index": 9,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 157,
+      "source_frames_global": [
+        12726,
+        12741,
+        12756,
+        12771
+      ]
+    },
+    {
+      "token": "0033d0b2e8",
+      "episode_index": 9,
+      "stage": "side_two",
+      "retained_start_frame": 157,
+      "retained_end_frame_exclusive": 796,
+      "source_frames_global": [
+        13365,
+        13380,
+        13395,
+        13410
+      ]
+    },
+    {
+      "token": "9f6e233585",
+      "episode_index": 9,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 796,
+      "retained_end_frame_exclusive": 1298,
+      "source_frames_global": [
+        13867,
+        13882,
+        13897,
+        13912
+      ]
+    },
+    {
+      "token": "df4240f516",
+      "episode_index": 10,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 172,
+      "source_frames_global": [
+        14291,
+        14306,
+        14321,
+        14336
+      ]
+    },
+    {
+      "token": "23ff55146e",
+      "episode_index": 10,
+      "stage": "side_two",
+      "retained_start_frame": 172,
+      "retained_end_frame_exclusive": 669,
+      "source_frames_global": [
+        14788,
+        14803,
+        14818,
+        14833
+      ]
+    },
+    {
+      "token": "63875b4b67",
+      "episode_index": 10,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 669,
+      "retained_end_frame_exclusive": 1032,
+      "source_frames_global": [
+        15151,
+        15166,
+        15181,
+        15196
+      ]
+    },
+    {
+      "token": "a9f731d31e",
+      "episode_index": 11,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 169,
+      "source_frames_global": [
+        15538,
+        15553,
+        15568,
+        15583
+      ]
+    },
+    {
+      "token": "8a52890c5e",
+      "episode_index": 11,
+      "stage": "side_two",
+      "retained_start_frame": 169,
+      "retained_end_frame_exclusive": 631,
+      "source_frames_global": [
+        16000,
+        16015,
+        16030,
+        16045
+      ]
+    },
+    {
+      "token": "9e8f00c5bb",
+      "episode_index": 11,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 631,
+      "retained_end_frame_exclusive": 875,
+      "source_frames_global": [
+        16244,
+        16259,
+        16274,
+        16289
+      ]
+    },
+    {
+      "token": "aff46e9092",
+      "episode_index": 12,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 199,
+      "source_frames_global": [
+        16700,
+        16715,
+        16730,
+        16745
+      ]
+    },
+    {
+      "token": "44fe026147",
+      "episode_index": 12,
+      "stage": "side_two",
+      "retained_start_frame": 199,
+      "retained_end_frame_exclusive": 682,
+      "source_frames_global": [
+        17183,
+        17198,
+        17213,
+        17228
+      ]
+    },
+    {
+      "token": "a3aa603642",
+      "episode_index": 12,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 682,
+      "retained_end_frame_exclusive": 936,
+      "source_frames_global": [
+        17437,
+        17452,
+        17467,
+        17482
+      ]
+    },
+    {
+      "token": "dbe39241f6",
+      "episode_index": 13,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 249,
+      "source_frames_global": [
+        18001,
+        18016,
+        18031,
+        18046
+      ]
+    },
+    {
+      "token": "5cef1a47c2",
+      "episode_index": 13,
+      "stage": "side_two",
+      "retained_start_frame": 249,
+      "retained_end_frame_exclusive": 766,
+      "source_frames_global": [
+        18518,
+        18533,
+        18548,
+        18563
+      ]
+    },
+    {
+      "token": "30b1f92ecb",
+      "episode_index": 13,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 766,
+      "retained_end_frame_exclusive": 1160,
+      "source_frames_global": [
+        18912,
+        18927,
+        18942,
+        18957
+      ]
+    },
+    {
+      "token": "a58e68a826",
+      "episode_index": 14,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 153,
+      "source_frames_global": [
+        19392,
+        19407,
+        19422,
+        19437
+      ]
+    },
+    {
+      "token": "e9626ec1b8",
+      "episode_index": 14,
+      "stage": "side_two",
+      "retained_start_frame": 153,
+      "retained_end_frame_exclusive": 682,
+      "source_frames_global": [
+        19921,
+        19936,
+        19951,
+        19966
+      ]
+    },
+    {
+      "token": "d7d9cde1ba",
+      "episode_index": 14,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 682,
+      "retained_end_frame_exclusive": 909,
+      "source_frames_global": [
+        20148,
+        20163,
+        20178,
+        20193
+      ]
+    },
+    {
+      "token": "5642d88c23",
+      "episode_index": 15,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 181,
+      "source_frames_global": [
+        20554,
+        20569,
+        20584,
+        20599
+      ]
+    },
+    {
+      "token": "0d8a03d95b",
+      "episode_index": 15,
+      "stage": "side_two",
+      "retained_start_frame": 181,
+      "retained_end_frame_exclusive": 645,
+      "source_frames_global": [
+        21018,
+        21033,
+        21048,
+        21063
+      ]
+    },
+    {
+      "token": "cee95cd34a",
+      "episode_index": 15,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 645,
+      "retained_end_frame_exclusive": 900,
+      "source_frames_global": [
+        21273,
+        21288,
+        21303,
+        21318
+      ]
+    },
+    {
+      "token": "68738f028e",
+      "episode_index": 16,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 262,
+      "source_frames_global": [
+        21747,
+        21762,
+        21777,
+        21792
+      ]
+    },
+    {
+      "token": "f4e677afd5",
+      "episode_index": 16,
+      "stage": "side_two",
+      "retained_start_frame": 262,
+      "retained_end_frame_exclusive": 798,
+      "source_frames_global": [
+        22283,
+        22298,
+        22313,
+        22328
+      ]
+    },
+    {
+      "token": "68e392862f",
+      "episode_index": 16,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 798,
+      "retained_end_frame_exclusive": 1061,
+      "source_frames_global": [
+        22546,
+        22561,
+        22576,
+        22591
+      ]
+    },
+    {
+      "token": "5c242e0682",
+      "episode_index": 17,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 304,
+      "source_frames_global": [
+        23100,
+        23115,
+        23130,
+        23145
+      ]
+    },
+    {
+      "token": "8c61719788",
+      "episode_index": 17,
+      "stage": "side_two",
+      "retained_start_frame": 304,
+      "retained_end_frame_exclusive": 948,
+      "source_frames_global": [
+        23744,
+        23759,
+        23774,
+        23789
+      ]
+    },
+    {
+      "token": "d28d4195f5",
+      "episode_index": 17,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 948,
+      "retained_end_frame_exclusive": 1197,
+      "source_frames_global": [
+        23993,
+        24008,
+        24023,
+        24038
+      ]
+    },
+    {
+      "token": "0daf369dca",
+      "episode_index": 18,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 204,
+      "source_frames_global": [
+        24393,
+        24408,
+        24423,
+        24438
+      ]
+    },
+    {
+      "token": "f8b4358f02",
+      "episode_index": 18,
+      "stage": "side_two",
+      "retained_start_frame": 204,
+      "retained_end_frame_exclusive": 704,
+      "source_frames_global": [
+        24893,
+        24908,
+        24923,
+        24938
+      ]
+    },
+    {
+      "token": "d754fab5a0",
+      "episode_index": 18,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 704,
+      "retained_end_frame_exclusive": 1020,
+      "source_frames_global": [
+        25209,
+        25224,
+        25239,
+        25254
+      ]
+    },
+    {
+      "token": "d5d33af591",
+      "episode_index": 19,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 244,
+      "source_frames_global": [
+        25653,
+        25668,
+        25683,
+        25698
+      ]
+    },
+    {
+      "token": "53ffef3806",
+      "episode_index": 19,
+      "stage": "side_two",
+      "retained_start_frame": 244,
+      "retained_end_frame_exclusive": 799,
+      "source_frames_global": [
+        26208,
+        26223,
+        26238,
+        26253
+      ]
+    },
+    {
+      "token": "b4629ef1e7",
+      "episode_index": 19,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 799,
+      "retained_end_frame_exclusive": 1082,
+      "source_frames_global": [
+        26491,
+        26506,
+        26521,
+        26536
+      ]
+    },
+    {
+      "token": "d6eaafcc1f",
+      "episode_index": 20,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 202,
+      "source_frames_global": [
+        26892,
+        26907,
+        26922,
+        26937
+      ]
+    },
+    {
+      "token": "aedccddc65",
+      "episode_index": 20,
+      "stage": "side_two",
+      "retained_start_frame": 202,
+      "retained_end_frame_exclusive": 462,
+      "source_frames_global": [
+        27152,
+        27167,
+        27182,
+        27197
+      ]
+    },
+    {
+      "token": "fb200945c1",
+      "episode_index": 20,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 462,
+      "retained_end_frame_exclusive": 973,
+      "source_frames_global": [
+        27663,
+        27678,
+        27693,
+        27708
+      ]
+    },
+    {
+      "token": "c71d7a6559",
+      "episode_index": 21,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 272,
+      "source_frames_global": [
+        28210,
+        28225,
+        28240,
+        28255
+      ]
+    },
+    {
+      "token": "4128d23de7",
+      "episode_index": 21,
+      "stage": "side_two",
+      "retained_start_frame": 272,
+      "retained_end_frame_exclusive": 829,
+      "source_frames_global": [
+        28767,
+        28782,
+        28797,
+        28812
+      ]
+    },
+    {
+      "token": "6656ebfcba",
+      "episode_index": 21,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 829,
+      "retained_end_frame_exclusive": 1095,
+      "source_frames_global": [
+        29033,
+        29048,
+        29063,
+        29078
+      ]
+    },
+    {
+      "token": "89987f6e46",
+      "episode_index": 22,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 247,
+      "source_frames_global": [
+        29514,
+        29529,
+        29544,
+        29559
+      ]
+    },
+    {
+      "token": "716add9fc9",
+      "episode_index": 22,
+      "stage": "side_two",
+      "retained_start_frame": 247,
+      "retained_end_frame_exclusive": 571,
+      "source_frames_global": [
+        29838,
+        29853,
+        29868,
+        29883
+      ]
+    },
+    {
+      "token": "9e3414ed93",
+      "episode_index": 22,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 571,
+      "retained_end_frame_exclusive": 963,
+      "source_frames_global": [
+        30230,
+        30245,
+        30260,
+        30275
+      ]
+    },
+    {
+      "token": "236d20e52f",
+      "episode_index": 23,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 249,
+      "source_frames_global": [
+        30756,
+        30771,
+        30786,
+        30801
+      ]
+    },
+    {
+      "token": "a6fa656974",
+      "episode_index": 23,
+      "stage": "side_two",
+      "retained_start_frame": 249,
+      "retained_end_frame_exclusive": 893,
+      "source_frames_global": [
+        31400,
+        31415,
+        31430,
+        31445
+      ]
+    },
+    {
+      "token": "2136ae71f3",
+      "episode_index": 23,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 893,
+      "retained_end_frame_exclusive": 1255,
+      "source_frames_global": [
+        31762,
+        31777,
+        31792,
+        31807
+      ]
+    },
+    {
+      "token": "a631949d3b",
+      "episode_index": 24,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 248,
+      "source_frames_global": [
+        32219,
+        32234,
+        32249,
+        32264
+      ]
+    },
+    {
+      "token": "525e3f9152",
+      "episode_index": 24,
+      "stage": "side_two",
+      "retained_start_frame": 248,
+      "retained_end_frame_exclusive": 753,
+      "source_frames_global": [
+        32724,
+        32739,
+        32754,
+        32769
+      ]
+    },
+    {
+      "token": "4a08a47b36",
+      "episode_index": 24,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 753,
+      "retained_end_frame_exclusive": 991,
+      "source_frames_global": [
+        32962,
+        32977,
+        32992,
+        33007
+      ]
+    },
+    {
+      "token": "dfffc74f9d",
+      "episode_index": 25,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 296,
+      "source_frames_global": [
+        33459,
+        33474,
+        33489,
+        33504
+      ]
+    },
+    {
+      "token": "075379e40d",
+      "episode_index": 25,
+      "stage": "side_two",
+      "retained_start_frame": 296,
+      "retained_end_frame_exclusive": 894,
+      "source_frames_global": [
+        34057,
+        34072,
+        34087,
+        34102
+      ]
+    },
+    {
+      "token": "01ffae7055",
+      "episode_index": 25,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 894,
+      "retained_end_frame_exclusive": 1255,
+      "source_frames_global": [
+        34418,
+        34433,
+        34448,
+        34463
+      ]
+    },
+    {
+      "token": "9e58186cee",
+      "episode_index": 26,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 191,
+      "source_frames_global": [
+        34845,
+        34860,
+        34875,
+        34890
+      ]
+    },
+    {
+      "token": "08477f272e",
+      "episode_index": 26,
+      "stage": "side_two",
+      "retained_start_frame": 191,
+      "retained_end_frame_exclusive": 654,
+      "source_frames_global": [
+        35308,
+        35323,
+        35338,
+        35353
+      ]
+    },
+    {
+      "token": "659a083cc9",
+      "episode_index": 26,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 654,
+      "retained_end_frame_exclusive": 910,
+      "source_frames_global": [
+        35564,
+        35579,
+        35594,
+        35609
+      ]
+    },
+    {
+      "token": "007e10665a",
+      "episode_index": 27,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 239,
+      "source_frames_global": [
+        36035,
+        36050,
+        36065,
+        36080
+      ]
+    },
+    {
+      "token": "35dbf13519",
+      "episode_index": 27,
+      "stage": "side_two",
+      "retained_start_frame": 239,
+      "retained_end_frame_exclusive": 628,
+      "source_frames_global": [
+        36424,
+        36439,
+        36454,
+        36469
+      ]
+    },
+    {
+      "token": "8fb2728cf8",
+      "episode_index": 27,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 628,
+      "retained_end_frame_exclusive": 1017,
+      "source_frames_global": [
+        36813,
+        36828,
+        36843,
+        36858
+      ]
+    },
+    {
+      "token": "5ec4310a85",
+      "episode_index": 28,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 276,
+      "source_frames_global": [
+        37430,
+        37445,
+        37460,
+        37475
+      ]
+    },
+    {
+      "token": "bd84c570e5",
+      "episode_index": 28,
+      "stage": "side_two",
+      "retained_start_frame": 276,
+      "retained_end_frame_exclusive": 866,
+      "source_frames_global": [
+        38020,
+        38035,
+        38050,
+        38065
+      ]
+    },
+    {
+      "token": "eb9897fc51",
+      "episode_index": 28,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 866,
+      "retained_end_frame_exclusive": 1112,
+      "source_frames_global": [
+        38266,
+        38281,
+        38296,
+        38311
+      ]
+    },
+    {
+      "token": "6850920b45",
+      "episode_index": 29,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 246,
+      "source_frames_global": [
+        38794,
+        38809,
+        38824,
+        38839
+      ]
+    },
+    {
+      "token": "81fccf761b",
+      "episode_index": 29,
+      "stage": "side_two",
+      "retained_start_frame": 246,
+      "retained_end_frame_exclusive": 708,
+      "source_frames_global": [
+        39256,
+        39271,
+        39286,
+        39301
+      ]
+    },
+    {
+      "token": "8f8a9dcfa6",
+      "episode_index": 29,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 708,
+      "retained_end_frame_exclusive": 1010,
+      "source_frames_global": [
+        39558,
+        39573,
+        39588,
+        39603
+      ]
+    },
+    {
+      "token": "8855d57426",
+      "episode_index": 30,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 273,
+      "source_frames_global": [
+        40059,
+        40074,
+        40089,
+        40104
+      ]
+    },
+    {
+      "token": "40721547fb",
+      "episode_index": 30,
+      "stage": "side_two",
+      "retained_start_frame": 273,
+      "retained_end_frame_exclusive": 797,
+      "source_frames_global": [
+        40583,
+        40598,
+        40613,
+        40628
+      ]
+    },
+    {
+      "token": "eeef31df06",
+      "episode_index": 30,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 797,
+      "retained_end_frame_exclusive": 1124,
+      "source_frames_global": [
+        40910,
+        40925,
+        40940,
+        40955
+      ]
+    },
+    {
+      "token": "4d95493d32",
+      "episode_index": 31,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 228,
+      "source_frames_global": [
+        41332,
+        41347,
+        41362,
+        41377
+      ]
+    },
+    {
+      "token": "47a9da4192",
+      "episode_index": 31,
+      "stage": "side_two",
+      "retained_start_frame": 228,
+      "retained_end_frame_exclusive": 687,
+      "source_frames_global": [
+        41791,
+        41806,
+        41821,
+        41836
+      ]
+    },
+    {
+      "token": "b0e05d0502",
+      "episode_index": 31,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 687,
+      "retained_end_frame_exclusive": 1003,
+      "source_frames_global": [
+        42107,
+        42122,
+        42137,
+        42152
+      ]
+    },
+    {
+      "token": "8834b3ccc7",
+      "episode_index": 32,
+      "stage": "side_one",
+      "retained_start_frame": 0,
+      "retained_end_frame_exclusive": 303,
+      "source_frames_global": [
+        42607,
+        42622,
+        42637,
+        42652
+      ]
+    },
+    {
+      "token": "6b23a2e95c",
+      "episode_index": 32,
+      "stage": "side_two",
+      "retained_start_frame": 303,
+      "retained_end_frame_exclusive": 841,
+      "source_frames_global": [
+        43145,
+        43160,
+        43175,
+        43190
+      ]
+    },
+    {
+      "token": "3f1c2fe52e",
+      "episode_index": 32,
+      "stage": "bottom_to_top",
+      "retained_start_frame": 841,
+      "retained_end_frame_exclusive": 1098,
+      "source_frames_global": [
+        43402,
+        43417,
+        43432,
+        43447
+      ]
+    }
+  ]
+}

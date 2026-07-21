@@ -177,15 +177,37 @@ def test_sampler_maps_filtered_absolute_indices_once_and_resumes_exactly(tmp_pat
     assert list(iter(resumed)) == first_epoch[3:]
 
 
-def test_checked_in_manifest_is_current_and_complete() -> None:
+def test_checked_in_v1_manifest_remains_frozen_and_complete() -> None:
     root = Path(__file__).resolve().parents[3]
     manifest = PriorityManifest.load(
-        root
-        / "configs/training/priority_manifests/openarm2_shirt_fold_3stage_v1.json"
+        root / "configs/training/priority_manifests/openarm2_shirt_fold_3stage_v1.json"
     )
     assert len(manifest.episodes) == 33
     assert sum(episode.frame_count for episode in manifest.episodes) == 34850
     assert sum(len(episode.repeated_grasps) for episode in manifest.episodes) == 28
+
+
+def test_checked_in_v2_manifest_is_conservative_and_complete() -> None:
+    root = Path(__file__).resolve().parents[3]
+    manifest = PriorityManifest.load(
+        root / "configs/training/priority_manifests/openarm2_shirt_fold_3stage_v2.json"
+    )
+    assert len(manifest.episodes) == 33
+    assert sum(episode.frame_count for episode in manifest.episodes) == 34850
+    assert sum(len(episode.repeated_grasps) for episode in manifest.episodes) == 0
+    assert manifest.quality_log_priority == {
+        1: -0.4,
+        2: -0.2,
+        3: 0.0,
+        4: 0.2,
+        5: 0.4,
+    }
+    assert manifest.repeated_grasp_log_penalty == 0.0
+    assert manifest.stage_probability_mass == {
+        "side_one": 6174,
+        "side_two": 14262,
+        "bottom_to_top": 8798,
+    }
 
 
 def test_priority_manifest_cli_flag_is_consumed(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,0 +1,100 @@
+token,stage,criterion_1,criterion_2,criterion_3,criterion_4,quality_score,visibility_confidence,review_note
+9e58186cee,side_one,1,1,1,1,3,high,Moderate placement with visible bunching and uneven alignment.
+6d05abc694,side_one,2,1,2,1,4,high,Good placement and axis alignment; localized sleeve ridge remains.
+c71d7a6559,side_one,1,1,1,1,3,high,Completed inward fold with moderate bunching and skew.
+70e7707989,side_one,2,2,2,2,5,high,Clean stable first-side fold across all four criteria.
+5642d88c23,side_one,1,1,1,0,2,high,Large central bunch compromises flatness and next-stage readiness.
+aff46e9092,side_one,2,1,1,1,3,high,Side is contained but tapered with a localized ridge.
+d6eaafcc1f,side_one,2,1,2,1,4,high,Well placed and aligned; sleeve-area bunching remains.
+1742b7f80f,side_one,2,1,1,1,3,high,Usable inward fold with skew and a bunched shoulder end.
+89987f6e46,side_one,2,2,2,1,4,high,Strong geometry with only localized surface unevenness.
+5c242e0682,side_one,2,1,2,1,4,high,Good lateral placement; contained edge has a visible ridge.
+a631949d3b,side_one,1,1,1,1,3,high,Moderate placement and containment with broad wrinkling.
+2aba10f26e,side_one,2,2,2,2,5,high,Clean flat aligned first fold.
+8855d57426,side_one,2,2,2,1,4,high,Well aligned with a small residual wrinkle.
+a9f731d31e,side_one,2,2,2,2,5,high,Strong placement containment alignment and flatness.
+5ec4310a85,side_one,2,1,2,1,4,high,Good fold line with a localized sleeve-side bunch.
+6850920b45,side_one,1,1,1,0,2,high,Pronounced central ridge and uneven fold placement.
+df4240f516,side_one,1,1,1,0,2,high,Bunched side fold with poor flatness.
+f509b63506,side_one,1,1,1,0,2,high,Substantial diagonal bunching despite completed topology.
+a58e68a826,side_one,2,1,1,1,3,medium,Outcome is usable but partly obscured during settling.
+7f96d21fcf,side_one,2,2,2,2,5,high,Flat stable and consistently aligned.
+236d20e52f,side_one,2,2,2,2,5,high,Clean contained first-side result.
+0bd00f6189,side_one,2,1,2,1,4,high,Good axis and placement with a localized loose edge.
+5df102a4aa,side_one,2,1,1,1,3,high,Correct placement but moderate bunching and taper.
+8834b3ccc7,side_one,2,2,2,1,4,high,Straight contained fold with minor unevenness.
+0daf369dca,side_one,2,1,2,1,4,high,Good overall geometry with a bunched sleeve end.
+0b29936457,side_one,2,1,2,2,4,high,Flat and straight; localized sleeve protrusion prevents top score.
+4d95493d32,side_one,2,2,2,2,5,high,Strong result on every criterion.
+8dee14a5d9,side_one,1,1,0,0,2,high,Severe diagonal bunching and body disturbance.
+68738f028e,side_one,2,1,1,1,3,high,Usable result with moderate skew and wrinkles.
+007e10665a,side_one,2,1,2,1,4,high,Well positioned but not fully flat at the sleeve edge.
+dbe39241f6,side_one,2,2,2,2,5,high,Clean stable first-side fold.
+d5d33af591,side_one,2,1,1,1,3,high,Correct topology with a bunched and tapered folded side.
+dfffc74f9d,side_one,2,1,2,1,4,high,Good placement and alignment with a localized protrusion.
+556ef21935,side_two,1,1,1,1,3,high,Completed strip but broad and visibly uneven.
+6b23a2e95c,side_two,2,2,2,1,4,high,Good narrow aligned strip with a localized ridge.
+f1092d31c1,side_two,2,2,2,2,5,high,Clean flat aligned two-sided strip.
+0d8a03d95b,side_two,1,1,1,1,3,high,Moderately broad strip with a messy folded end.
+aedccddc65,side_two,2,1,1,1,3,high,Second side lands adequately but leaves bunching and asymmetry.
+bd84c570e5,side_two,1,1,2,1,3,high,First fold is preserved but final strip is broad with an edge roll.
+1e1ebe93c2,side_two,2,1,2,2,4,high,Flat straight strip with one contained-edge defect.
+40721547fb,side_two,1,1,1,1,3,high,Usable two-side state with moderate width and alignment defects.
+44fe026147,side_two,2,1,2,1,4,high,Good bilateral alignment; localized sleeve-end bulge remains.
+47a9da4192,side_two,1,1,1,1,3,high,Broad strip with a pronounced rolled end.
+525e3f9152,side_two,1,0,1,0,2,high,Large uncontained crumple at the folded end.
+af3f15a31b,side_two,1,0,1,0,2,medium,Result is partly in motion and visibly rolled and uncontained.
+f8b4358f02,side_two,1,1,2,1,3,high,First fold survives but width and containment are only acceptable.
+e9626ec1b8,side_two,2,2,2,1,4,high,Good aligned strip with minor surface unevenness.
+4128d23de7,side_two,2,1,2,1,4,high,Strong placement and preservation with a rolled end.
+e91621b635,side_two,2,1,2,1,4,high,Straight stable strip with a localized protrusion.
+dabfd0e0ab,side_two,1,1,1,1,3,high,Wide and moderately asymmetric but usable.
+075379e40d,side_two,2,2,2,2,5,high,Clean flat two-sided strip.
+ed6a969555,side_two,1,1,1,1,3,high,Moderate strip with a pronounced folded-end roll.
+08d6020ab9,side_two,2,2,2,2,5,high,Strong geometry and flatness throughout.
+8a52890c5e,side_two,1,0,1,0,2,high,Second sleeve area remains heavily bunched and unstable.
+81fccf761b,side_two,1,1,1,1,3,medium,Arm occlusion remains but the settled strip appears broad and uneven.
+08477f272e,side_two,2,2,2,2,5,high,Clean narrow and stable strip.
+f4e677afd5,side_two,2,2,2,2,5,high,Strong result on every second-stage criterion.
+a6fa656974,side_two,2,1,2,1,4,high,Good bilateral geometry with one rolled edge.
+23ff55146e,side_two,2,2,2,2,5,high,Clean flat aligned strip.
+716add9fc9,side_two,2,1,2,2,4,high,Strong flat strip with a localized containment defect.
+5cef1a47c2,side_two,2,1,2,1,4,high,Well placed and aligned with an exposed folded-end edge.
+53ffef3806,side_two,1,1,2,1,3,high,First fold is preserved but resulting strip is broad and uneven.
+ae0356d7ca,side_two,1,0,1,0,2,high,Large central bunch and poor edge containment.
+0033d0b2e8,side_two,2,2,2,2,5,high,Clean straight and flat two-sided result.
+8c61719788,side_two,2,1,2,2,4,high,Good stable strip with a localized rolled end.
+35dbf13519,side_two,2,1,2,1,4,high,Good placement and preservation with moderate end unevenness.
+01ffae7055,bottom_to_top,1,0,1,0,2,high,Completed fold is pile-like but most layers remain localized.
+9e8f00c5bb,bottom_to_top,1,0,2,0,2,high,Narrow upright stack is contained but neither rectangular nor flat.
+8f8a9dcfa6,bottom_to_top,2,1,2,2,4,high,Compact and flat with a mildly irregular silhouette.
+fe27e6d9c2,bottom_to_top,2,2,1,2,4,high,Good rectangle with one visibly uneven layer edge.
+c4ef9348db,bottom_to_top,1,0,0,0,1,medium,Severely bunched pile; arm motion partly obscures the settled state.
+2136ae71f3,bottom_to_top,1,0,1,0,2,high,Upright rolled package with limited rectangularity.
+6656ebfcba,bottom_to_top,1,0,0,0,1,high,Pile-like result with uncontained fabric and no flat outline.
+2f021393fa,bottom_to_top,2,2,2,2,5,high,Clean flat rectangular package.
+9f6e233585,bottom_to_top,1,0,1,0,2,high,Completed but pile-like and unstable.
+a3aa603642,bottom_to_top,1,0,0,0,1,high,Severe bunching with no stable rectangular outline.
+eeef31df06,bottom_to_top,1,0,0,0,1,high,Broad irregular pile with protruding layers.
+d7d9cde1ba,bottom_to_top,2,1,1,1,3,high,Compact result with moderate irregularity and a raised ridge.
+f2d08280ac,bottom_to_top,1,0,1,0,2,high,Upright pile-like package despite contained fabric.
+68e392862f,bottom_to_top,1,1,1,0,2,high,Recognizable compact stack with severe bunching and poor flatness.
+1c354f1a4b,bottom_to_top,1,0,1,0,2,medium,Upright result is partly occluded but clearly non-flat.
+9e3414ed93,bottom_to_top,2,1,2,2,4,high,Flat contained package with mild wedge shape.
+cee95cd34a,bottom_to_top,2,2,2,2,5,high,Clean stable rectangular result.
+8fb2728cf8,bottom_to_top,1,0,1,0,2,high,Small but irregular and pile-like final state.
+fb200945c1,bottom_to_top,2,1,1,1,3,high,Flat completed fold with moderate wedge shape and edge mismatch.
+b0e05d0502,bottom_to_top,1,0,0,0,1,high,Loose pile with poor containment and stability.
+a29296ef09,bottom_to_top,1,0,0,0,1,high,Upright bunched stack with no rectangular outline.
+1232e3bac6,bottom_to_top,2,2,1,2,4,high,Clean flat rectangle with one protruding layer edge.
+dbfe655a6a,bottom_to_top,1,0,1,0,2,high,Layered but upright and visibly unstable.
+affb663a2f,bottom_to_top,1,0,0,0,1,high,Severely bunched pile-like final result.
+3f1c2fe52e,bottom_to_top,1,0,0,0,1,high,No stable rectangular outline after completion.
+659a083cc9,bottom_to_top,1,0,0,0,1,high,Pile-like package with multiple protruding layers.
+d28d4195f5,bottom_to_top,1,1,1,0,2,high,Compact but upright and unevenly stacked.
+30b1f92ecb,bottom_to_top,1,0,1,0,2,high,Irregular upright stack with poor flatness.
+63875b4b67,bottom_to_top,1,0,0,0,1,high,Severe bunching and unstable silhouette.
+4a08a47b36,bottom_to_top,2,1,1,1,3,high,Compact and settled but moderately irregular and layered.
+d754fab5a0,bottom_to_top,2,2,2,2,5,high,Clean flat rectangular final package.
+eb9897fc51,bottom_to_top,1,0,0,0,1,high,Pile-like result with poor edge definition.
+b4629ef1e7,bottom_to_top,1,1,1,1,3,high,Recognizable compact package with moderate defects on every criterion.

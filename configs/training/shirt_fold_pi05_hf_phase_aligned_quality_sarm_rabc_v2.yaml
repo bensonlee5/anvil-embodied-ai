@@ -1,0 +1,87 @@
+# Integrated production-candidate experiment initialized from Hugging Face's
+# OpenArm shirt-fold policy. Launch through anvil-trainer with:
+#   --priority-sampling-manifest=configs/training/priority_manifests/openarm2_shirt_fold_3stage_v2.json
+#
+# The two supervision signals have deliberately separate roles:
+#   * blinded stage quality changes the training-frame sampling distribution;
+#   * SARM 30-frame progress deltas apply native RA-BC action-loss weights.
+# Validation and test remain exhaustive and unweighted. The dense-progress
+# checkpoint is reused from SARM v1 because v2 changed quality labels only;
+# all stage boundaries, dense targets, and split assignments are identical.
+
+dataset:
+  repo_id: local
+  root: datasets/shirt-fold/lerobot-hf-phase-aligned-sarm-v1
+  video_backend: pyav
+  image_transforms:
+    enable: false
+
+policy:
+  path: lerobot-data-collection/folding_final
+  pretrained_revision: 695abe40dbf3aac04efda59c1501d748681fa0fb
+  device: cuda
+  use_amp: false
+  push_to_hub: false
+
+  chunk_size: 30
+  n_action_steps: 30
+  max_state_dim: 32
+  max_action_dim: 32
+  num_inference_steps: 10
+  use_relative_actions: true
+  relative_exclude_joints: [gripper]
+  action_feature_names: [right_joint_1.pos, right_joint_2.pos, right_joint_3.pos, right_joint_4.pos, right_joint_5.pos, right_joint_6.pos, right_joint_7.pos, right_gripper.pos, left_joint_1.pos, left_joint_2.pos, left_joint_3.pos, left_joint_4.pos, left_joint_5.pos, left_joint_6.pos, left_joint_7.pos, left_gripper.pos]
+
+  normalization_mapping: '{"VISUAL":"IDENTITY","STATE":"QUANTILES","ACTION":"QUANTILES"}'
+  input_features: '{"observation.images.left_wrist":{"type":"VISUAL","shape":[3,270,480]},"observation.images.right_wrist":{"type":"VISUAL","shape":[3,270,480]},"observation.images.base":{"type":"VISUAL","shape":[3,270,480]},"observation.state":{"type":"STATE","shape":[16]}}'
+  output_features: '{"action":{"type":"ACTION","shape":[16]}}'
+
+  dtype: bfloat16
+  gradient_checkpointing: true
+  compile_model: false
+  freeze_vision_encoder: false
+  train_expert_only: true
+
+  optimizer_lr: 0.00001
+  optimizer_betas: [0.9, 0.95]
+  optimizer_eps: 1.0e-8
+  optimizer_weight_decay: 0.01
+  optimizer_grad_clip_norm: 1.0
+  scheduler_warmup_steps: 250
+  scheduler_decay_steps: 5000
+  scheduler_decay_lr: 0.000001
+
+sample_weighting:
+  type: rabc
+  # This parquet contains only the exact 27 policy-training episodes, so native
+  # RA-BC cannot derive delta statistics from validation or test episodes.
+  progress_path: datasets/shirt-fold/lerobot-hf-phase-aligned-sarm-v1/sarm_progress_train_v2.parquet
+  head_mode: dense
+  kappa: 0.05090876221656798
+  epsilon: 0.000001
+  extra_params:
+    audit_path: datasets/shirt-fold/lerobot-hf-phase-aligned-sarm-v1/sarm_progress_audit_v2.json
+    audit_sha256: a5dbe2f68efb41846a6b27ae6034b3566353a86e62458d530dac4d32c6816810
+    source_progress_sha256: 02cd6f66bcc4d1054091bb838201687b14739fea9a88135cad41af314f8c75b5
+    training_progress_sha256: 92d665db5f7329253dcd726ffc215e9e8b93115c6a083a640056dda27d18072b
+    priority_manifest_sha256: ab0f67fbf0f944cfd7a7e59cbfe15bbc5f6e380144746f06eac4b2333b016424
+    sarm_contract_sha256: df31cc5a3bbb59c38ec92446be16a7f4f4cc75a6c89446ff64a6a4076c17b493
+
+output_dir: model_zoo/shirt-fold/pi05-hf-folding-phase-aligned-quality-sarm-rabc-v2-5k
+job_name: shirt-fold-pi05-hf-folding-phase-aligned-quality-sarm-rabc-v2-5k
+seed: 1000
+cudnn_deterministic: false
+num_workers: 0
+persistent_workers: false
+batch_size: 16
+steps: 5000
+env_eval_freq: 0
+log_freq: 100
+save_checkpoint: true
+save_freq: 500
+use_policy_training_preset: true
+
+wandb:
+  enable: true
+  disable_artifact: true
+  project: openarm2-shirt-folding

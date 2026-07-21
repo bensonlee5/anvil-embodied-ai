@@ -203,6 +203,38 @@ def test_checked_in_sarm_contract_matches_priority_annotations() -> None:
     )
 
 
+def test_v2_contract_reuses_identical_dense_targets_with_blind_quality_manifest() -> None:
+    v1_manifest = PriorityManifest.load(PRIORITY_PATH)
+    v2_manifest = PriorityManifest.load(
+        ROOT / "configs/training/priority_manifests/openarm2_shirt_fold_3stage_v2.json"
+    )
+    v1_contract = SARMAnnotationContract.load(
+        CONTRACT_PATH,
+        priority_manifest=v1_manifest,
+    )
+    v2_contract = SARMAnnotationContract.load(
+        ROOT / "configs/training/sarm_manifests/openarm2_shirt_fold_sarm_v2.json",
+        priority_manifest=v2_manifest,
+    )
+
+    v1_boundaries = [
+        [(stage.name, stage.start_frame, stage.end_frame) for stage in episode.stages]
+        for episode in v1_manifest.episodes
+    ]
+    v2_boundaries = [
+        [(stage.name, stage.start_frame, stage.end_frame) for stage in episode.stages]
+        for episode in v2_manifest.episodes
+    ]
+    assert v2_boundaries == v1_boundaries
+    assert [episode.frame_count for episode in v2_manifest.episodes] == [
+        episode.frame_count for episode in v1_manifest.episodes
+    ]
+    assert v2_contract.train_episodes == v1_contract.train_episodes
+    assert v2_contract.validation_episodes == v1_contract.validation_episodes
+    assert v2_contract.test_episodes == v1_contract.test_episodes
+    assert v2_contract.temporal_proportions == v1_contract.temporal_proportions
+
+
 def test_materialization_preserves_source_and_converts_exclusive_ends(tmp_path: Path) -> None:
     source, manifest, contract = _write_fixture(tmp_path)
     source_meta = source / "meta/episodes/chunk-000/file-000.parquet"

@@ -159,40 +159,48 @@ task structure is:
 
 The full untrimmed videos were used for annotation so setup, reset, and the
 complete manipulation context remained visible. Training still uses only the
-34,850-frame phase-aligned trim. The immutable annotation and weighting artifact
-is
-`configs/training/priority_manifests/openarm2_shirt_fold_3stage_v1.json`;
-`scripts/training/build_openarm2_shirt_fold_priority_manifest.py --check`
-detects drift.
+34,850-frame phase-aligned trim. The first holistic annotation artifact,
+`configs/training/priority_manifests/openarm2_shirt_fold_3stage_v1.json`, is
+frozen history. The current candidate is the criterion-based blinded rescore in
+`configs/training/priority_manifests/openarm2_shirt_fold_3stage_v2.json`.
+`scripts/training/build_openarm2_shirt_fold_priority_manifest_v2.py --check`
+detects drift in the v2 review and generated manifest.
 
-Each stage has an independent 1–5 quality score. All labels describe successful
-folds, so a score of 1 is a poor-quality success rather than task failure. The
-artifact separately records 28 medium-confidence repeated-grasp attempts,
-defined as a short close/reopen followed by another close from the same gripper
-within 1.5 seconds. Recovery frames remain ordinary demonstrations. Smoothing
-review windows are also separate: slow surface or edge refinement is deliberate
-and receives exactly zero quality adjustment.
+Each stage has four stage-specific 0–2 criteria whose total maps mechanically
+to a 1–5 quality score. All labels describe successful folds, so a score of 1
+is a poor-quality success rather than task failure. The rubric, untouched blind
+responses, token mapping, temporal adjudication, and agreement audit are under
+`configs/training/quality_annotations/openarm2_shirt_fold_3stage_v2/`.
+
+The side-fold rescore has weak agreement with the old holistic labels, so v2
+does not treat either set as ground truth or apply an aggressive weight ratio.
+The 28 telemetry retry candidates are neutral until video review distinguishes
+confirmed misgrasps from deliberate regrasping. Slow smoothing and edge
+refinement remain deliberate, quality-neutral behaviors.
 
 The sampler follows the data-selection mechanism in [Larchenko's LeHome 2026
 write-up](https://arxiv.org/html/2606.27163), not its later on-policy learning
 claim. It samples with replacement in proportion to an exponential priority;
 the Pi0.5 flow-matching action loss is unchanged. Manual quality scores are
-mapped to clipped log-priorities `[-1, -0.5, 0, 0.5, 1]`, repeated-attempt
-approach windows receive `-0.5`, and the three stages receive equal aggregate
-probability mass. These annotations are not learned advantages and this run
-must not be called AWR. If auxiliary heads are added later, their losses require
-inverse-sampling correction; the current action-only run does not.
+mapped to clipped log-priorities `[-0.4, -0.2, 0, 0.2, 0.4]`, for a maximum
+2.23x sampling ratio. Retry candidates receive no adjustment, and aggregate
+stage mass follows the seed-1000 training split's observed 6,174 / 14,262 /
+8,798 frame distribution instead of forcing each stage to one third. These
+annotations are not learned advantages and this run must not be called AWR. If
+auxiliary heads are added later, their losses require inverse-sampling
+correction; the current action-only run does not.
 
-Run the frozen experiment with:
+The priority-only v2 recipe remains available as a diagnostic, but it is not
+the next run. Invoke it with:
 
 ```bash
 uv run anvil-trainer \
-  --config_path=configs/training/shirt_fold_pi05_hf_phase_aligned_priority_v1.yaml \
-  --priority-sampling-manifest=configs/training/priority_manifests/openarm2_shirt_fold_3stage_v1.json \
+  --config_path=configs/training/shirt_fold_pi05_hf_phase_aligned_priority_v2.yaml \
+  --priority-sampling-manifest=configs/training/priority_manifests/openarm2_shirt_fold_3stage_v2.json \
   --task-description="Fold the T-shirt properly" \
   --action-type=absolute \
   --split-ratio=8,1,1 \
-  --note="HF prior; three-stage quality-priority sampler v1; all 33 trimmed successes"
+  --note="HF prior; conservative blinded-rubric priority sampler v2; all 33 trimmed successes"
 ```
 
 Only training uses the priority sampler. Validation and test remain exhaustive,
@@ -200,21 +208,53 @@ unweighted episode splits. Every checkpoint copies the exact manifest and its
 SHA-256 into `pretrained_model/`, allowing a resumed run to inherit it without
 depending on a machine-local path.
 
-## Native SARM and RA-BC experiment
+The next experiment is not another plain-BC control. Existing plain fine-tunes
+are already too far from the acceptable behavior threshold to justify spending
+another run on that objective. The production-candidate screen combines this
+conservative sampler with audited dense SARM RA-BC, as specified below. This
+choice deliberately answers whether the intended integrated training system is
+promising; it does not isolate the causal contribution of either component.
 
-The reward-aware experiment is a separate follow-up to the manual priority
-sampler. It uses LeRobot's native SARM `dense_only` model to learn progress over
-the same three stages, then uses native RA-BC to weight the ordinary Pi0.5
-action loss. Do not combine manual priority sampling and RA-BC in the first
-controlled run: doing so would confound two different sampling/weighting
-mechanisms.
+This screen does not require new demonstrations. Compare its exhaustive
+validation/test loss, per-actuator loss, stage-stratified holdout loss, and
+robot folding quality with the already completed runs as historical context,
+not as a new randomized control. More steps are justified only if both train
+and holdout curves are still improving at step 5,000. Collect new episodes only
+after evaluation identifies a specific underrepresented garment state or
+failure mode that the 33 successful demonstrations cannot cover.
 
-The immutable contract is
-`configs/training/sarm_manifests/openarm2_shirt_fold_sarm_v1.json`. It preserves
-the policy experiment's seed-1000 27/3/3 episode split and derives SARM temporal
-proportions from the 27 training episodes only. The converter translates the
-review manifest's exclusive stage ends to the inclusive ends consumed by
-LeRobot SARM. It never changes the 34,850-frame phase-aligned source dataset.
+## Integrated quality sampling and dense SARM RA-BC
+
+Here, **SARM v2 means experiment/data-contract revision 2 using the released
+single-task SARM architecture**. It does not mean the distinct multi-task
+`SARM2` architecture. The reward checkpoint is reused because the v2 blind
+rescore changed quality sampling only; it changed no SARM target, stage
+boundary, frame, or episode split.
+
+The production-candidate screen uses LeRobot's native SARM `dense_only` model
+to learn progress over the same three stages, then combines two deliberately
+distinct mechanisms:
+
+- blinded stage quality changes only the probability that a training frame is
+  sampled; and
+- the SARM progress change over the policy's next 30 frames changes only that
+  sample's native RA-BC action-loss weight.
+
+Validation and test remain exhaustive and unweighted. Slow deliberate
+smoothing and unreviewed retry candidates remain neutral under both mechanisms.
+This is an integrated product experiment, not a component ablation, and must
+not be described as proving that either quality sampling or SARM caused any
+observed change.
+
+The original immutable contract is
+`configs/training/sarm_manifests/openarm2_shirt_fold_sarm_v1.json`. The
+criterion-based quality rescore did not change any stage boundary, dense target,
+frame, or split assignment, so the completed SARM reward checkpoint remains
+valid. `configs/training/sarm_manifests/openarm2_shirt_fold_sarm_v2.json` binds
+those unchanged targets to the v2 priority-manifest SHA rather than pretending
+the quality labels used to train SARM. Both contracts preserve the policy
+experiment's seed-1000 27/3/3 split and derive temporal proportions from the 27
+training episodes only.
 
 Materialize and independently validate the derived dataset with:
 
@@ -223,11 +263,16 @@ uv run python scripts/training/materialize_openarm2_shirt_fold_sarm_dataset.py
 uv run python scripts/training/materialize_openarm2_shirt_fold_sarm_dataset.py --check
 ```
 
-Train the reward model with
-`configs/training/shirt_fold_sarm_dense_v1.yaml`. SARM's bidirectional image
-window is appropriate for this offline data-selection experiment, but the
-reward model is not an online production component. After training, compute
-every-frame dense progress without interpolation:
+The completed reward run used
+`configs/training/shirt_fold_sarm_dense_v1.yaml`: checkpoint 1,200 from
+`train_reward_shirt_20260720_sarm_dense_v3`, W&B run `kttuwuef`, and Hub
+revision `108048371c101e77299b8b60ae5f214d30b295f2`. Its final train/eval
+losses were finite (0.0080 / 0.1053), and its wrapper, final sync, and Hub push
+all exited zero. SARM's bidirectional image window is appropriate for this
+offline training signal, but it is not a causal online production reward. The
+deployed policy does not require the SARM model.
+
+The completed run computed every-frame dense progress without interpolation:
 
 ```bash
 python -m lerobot.rewards.sarm.compute_rabc_weights \
@@ -238,21 +283,103 @@ python -m lerobot.rewards.sarm.compute_rabc_weights \
   --num-visualizations=6 \
   --output-path=datasets/shirt-fold/lerobot-hf-phase-aligned-sarm-v1/sarm_progress.parquet
 
-uv run python scripts/training/audit_openarm2_sarm_progress.py
-uv run python scripts/training/resolve_openarm2_sarm_rabc_recipe.py
+# V2 changed no dense target; retain the source bytes under a versioned name.
+cp datasets/shirt-fold/lerobot-hf-phase-aligned-sarm-v1/sarm_progress.parquet \
+  datasets/shirt-fold/lerobot-hf-phase-aligned-sarm-v1/sarm_progress_v2.parquet
+
+uv run python scripts/training/audit_openarm2_sarm_progress.py \
+  --priority-manifest=configs/training/priority_manifests/openarm2_shirt_fold_3stage_v2.json \
+  --contract=configs/training/sarm_manifests/openarm2_shirt_fold_sarm_v2.json \
+  --progress=datasets/shirt-fold/lerobot-hf-phase-aligned-sarm-v1/sarm_progress_v2.parquet \
+  --training-progress=datasets/shirt-fold/lerobot-hf-phase-aligned-sarm-v1/sarm_progress_train_v2.parquet \
+  --output-json=datasets/shirt-fold/lerobot-hf-phase-aligned-sarm-v1/sarm_progress_audit_v2.json
+
+PYTHONPATH=packages/anvil_trainer/src uv run python \
+  scripts/training/audit_openarm2_quality_sarm_integration.py --check
 ```
 
 The audit requires one finite `[0, 1]` value for every frame, emits a separately
 pinned train-only progress parquet so native RA-BC cannot compute normalization
 statistics from policy holdouts, reports progress
 agreement by split and stage, checks monotonicity, and separately reports the
-reviewed quality, repeated-grasp, and coarse smoothing strata. Repeated grasps
-remain evaluation signals rather than task-failure labels; smoothing windows
-remain diagnostic because their current boundaries are review windows, not
-precise action masks. The checked-in RA-BC recipe is deliberately fail-closed
-with zero provenance hashes. Only the generated recipe may be launched after
-the audit freezes the full and train-only progress SHA-256 values, audit SHA-256,
-and train-only kappa.
+reviewed quality and coarse smoothing strata. Repeated grasps remain evaluation
+signals rather than task-failure labels; smoothing windows remain diagnostic
+because their current boundaries are review windows, not precise action masks.
+
+The v2 audit freezes kappa at `0.05090876221656798`. The integration audit at
+`configs/training/quality_sarm_audits/openarm2_shirt_fold_quality_sarm_v2.json`
+mirrors native RA-BC and evaluates its interaction with the sampler. Manual
+sampling retains 95.8% effective sample size; the expected combined objective
+retains 79.1%; 97.65% of training frames have nonzero RA-BC weight; and combined
+stage mass remains 22.2% / 49.5% / 28.4%. Quality score and RA-BC weight have
+only -0.048 correlation, evidence that the two mechanisms are not simply
+duplicating the same ranking.
+
+Launch the single 5,000-step candidate with:
+
+```bash
+uv run anvil-trainer \
+  --config_path=configs/training/shirt_fold_pi05_hf_phase_aligned_quality_sarm_rabc_v2.yaml \
+  --priority-sampling-manifest=configs/training/priority_manifests/openarm2_shirt_fold_3stage_v2.json \
+  --task-description="Fold the T-shirt properly" \
+  --action-type=absolute \
+  --split-ratio=8,1,1 \
+  --note="HF prior; blind-quality sampling plus audited dense SARM RA-BC v2; 33 trimmed successes"
+```
+
+Before remote launch, copy or upload the exact v2 train-only progress parquet
+and audit JSON named by the recipe and verify their SHA-256 values. The trainer
+fails closed if the progress, audit, kappa, priority manifest, SARM contract, or
+30-frame policy chunk differs. Do not substitute a freshly regenerated artifact
+without updating the versioned contract and integration audit.
+
+## Released reward-model comparison: SARM v2 and Robometer
+
+The next reward comparison has exactly two arms, both backed by public released
+implementations:
+
+- single-task SARM with the v2 quality/sampling contract described above; and
+- Robometer at official Git revision
+  `5b815254bf31ee1bea3753c3a2da9f9033736d9a`, initialized from
+  `robometer/Robometer-4B@beef63bc914c5c189329d49c6d712d96d632aa34`.
+
+RARM is excluded because its authors have not released the implementation. No
+local approximation, similarly named manifest, or custom architecture may be
+presented as a RARM result.
+
+The Robometer data contract is
+`configs/training/robometer_manifests/openarm2_shirt_fold_robometer_v1.json`.
+It uses only the same trimmed base-camera stream and keeps the seed-1000
+27/3/3 episode split. Every split contains one full trajectory and three stage
+clips per original episode: 108 train, 12 validation, and 12 test trajectories.
+No clip can cross its source episode or split.
+
+All 33 demonstrations remain labeled successful. Full trajectories use
+`partial_success=1.0` for temporal progress. Each exact stage clip uses the
+blind stage-quality score divided by five as its partial-progress target and
+same-task preference rank. Released Robometer's
+`predict_last_frame_partial_progress=true` mask applies that target only to the
+clip's final frame, so intermediate stage frames are not incorrectly assigned
+zero progress. Smoothing remains inside the clips and is quality-neutral.
+
+Validate the conversion contract locally with:
+
+```bash
+python scripts/training/materialize_openarm2_robometer_dataset.py \
+  --dataset-root=datasets/shirt-fold/lerobot-hf-phase-aligned-sarm-v1 \
+  --output-root=/tmp/openarm2-robometer-v1 \
+  --check
+```
+
+The remote materialization must render and frame-count every exact clip, push
+three private Hub configs (`openarm2_train`, `openarm2_validation`, and
+`openarm2_test`), and record every clip SHA-256 in
+`robometer_dataset_audit_v1.json`. Robometer then runs the released 4B LoRA
+recipe for 1,000 reward-model steps with progress and preference heads enabled,
+the success head frozen, and holdout evaluation at 100-step intervals. A 5,000
+step policy run is allowed only after its full-frame progress artifact passes
+the same episode-isolation, finiteness, monotonicity, quality-stratification,
+and train-only RA-BC audits as the SARM arm.
 
 ## Deployment preflight
 
