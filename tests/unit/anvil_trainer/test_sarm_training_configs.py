@@ -96,10 +96,7 @@ def test_integrated_quality_sarm_candidate_is_fully_resolved() -> None:
     assert weighting["kappa"] == 0.05090876221656798
     assert weighting["progress_path"].endswith("sarm_progress_train_v2.parquet")
     assert extra == {
-        "audit_path": (
-            "datasets/shirt-fold/lerobot-hf-phase-aligned-sarm-v1/"
-            "sarm_progress_audit_v2.json"
-        ),
+        "audit_path": "sarm_progress_audit_v2.json",
         "audit_sha256": provenance["progress_audit_sha256"],
         "source_progress_sha256": provenance["source_progress_sha256"],
         "training_progress_sha256": provenance["training_progress_sha256"],

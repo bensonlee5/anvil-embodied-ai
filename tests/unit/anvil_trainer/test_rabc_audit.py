@@ -104,3 +104,34 @@ def test_verified_factory_rejects_progress_drift(tmp_path: Path) -> None:
             None,
             original_factory=lambda *_args, **_kwargs: None,
         )
+
+
+def test_verified_factory_resolves_artifacts_from_dataset_root(
+    tmp_path: Path,
+) -> None:
+    dataset_root = tmp_path / "dataset"
+    dataset_root.mkdir()
+    config, policy, _audit = _fixture(dataset_root)
+    config.progress_path = Path(config.progress_path).name
+    config.extra_params["audit_path"] = Path(
+        config.extra_params["audit_path"]
+    ).name
+    captured = {}
+
+    def original_factory(native_config, *_args, **_kwargs):
+        captured["config"] = native_config
+        return "verified"
+
+    result = make_audit_verified_sample_weighter(
+        config,
+        policy,
+        "cpu",
+        str(dataset_root),
+        "example/dataset",
+        original_factory=original_factory,
+    )
+
+    assert result == "verified"
+    assert captured["config"].progress_path == str(
+        (dataset_root / "sarm_progress.parquet").resolve()
+    )

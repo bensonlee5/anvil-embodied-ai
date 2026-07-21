@@ -35,6 +35,13 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _resolve_artifact_path(raw: str, dataset_root: str | None) -> Path:
+    path = Path(raw).expanduser()
+    if not path.is_absolute() and dataset_root:
+        path = Path(dataset_root).expanduser() / path
+    return path.resolve()
+
+
 def make_audit_verified_sample_weighter(
     config: SampleWeightingConfig | None,
     policy: Any,
@@ -56,7 +63,9 @@ def make_audit_verified_sample_weighter(
     missing = _AUDIT_KEYS - set(config.extra_params)
     if missing:
         raise RABCAuditError(f"RA-BC audit parameters are missing: {sorted(missing)}")
-    audit_path = Path(config.extra_params["audit_path"]).expanduser().resolve()
+    audit_path = _resolve_artifact_path(
+        str(config.extra_params["audit_path"]), dataset_root
+    )
     if not audit_path.is_file():
         raise RABCAuditError(f"RA-BC progress audit not found: {audit_path}")
     expected_audit_hash = str(config.extra_params["audit_sha256"])
@@ -78,7 +87,7 @@ def make_audit_verified_sample_weighter(
             raise RABCAuditError(
                 f"RA-BC audit {field} mismatch: expected {expected}, got {audit.get(field)}"
             )
-    progress_path = Path(config.progress_path or "").expanduser().resolve()
+    progress_path = _resolve_artifact_path(config.progress_path or "", dataset_root)
     if not progress_path.is_file():
         raise RABCAuditError(f"RA-BC progress parquet not found: {progress_path}")
     training_progress = audit.get("training_progress")
@@ -106,7 +115,11 @@ def make_audit_verified_sample_weighter(
     native_extra = {
         key: value for key, value in config.extra_params.items() if key not in _AUDIT_KEYS
     }
-    verified_config = replace(config, extra_params=native_extra)
+    verified_config = replace(
+        config,
+        progress_path=str(progress_path),
+        extra_params=native_extra,
+    )
     return original_factory(
         verified_config,
         policy,

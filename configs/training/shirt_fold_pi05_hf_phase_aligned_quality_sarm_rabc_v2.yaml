@@ -55,12 +55,12 @@ sample_weighting:
   type: rabc
   # This parquet contains only the exact 27 policy-training episodes, so native
   # RA-BC cannot derive delta statistics from validation or test episodes.
-  progress_path: datasets/shirt-fold/lerobot-hf-phase-aligned-sarm-v1/sarm_progress_train_v2.parquet
+  progress_path: sarm_progress_train_v2.parquet
   head_mode: dense
   kappa: 0.05090876221656798
   epsilon: 0.000001
   extra_params:
-    audit_path: datasets/shirt-fold/lerobot-hf-phase-aligned-sarm-v1/sarm_progress_audit_v2.json
+    audit_path: sarm_progress_audit_v2.json
     audit_sha256: a5dbe2f68efb41846a6b27ae6034b3566353a86e62458d530dac4d32c6816810
     source_progress_sha256: 02cd6f66bcc4d1054091bb838201687b14739fea9a88135cad41af314f8c75b5
     training_progress_sha256: 92d665db5f7329253dcd726ffc215e9e8b93115c6a083a640056dda27d18072b
