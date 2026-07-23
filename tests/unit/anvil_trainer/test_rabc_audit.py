@@ -24,8 +24,12 @@ def _fixture(tmp_path: Path) -> tuple[SampleWeightingConfig, SimpleNamespace, di
     progress = tmp_path / "sarm_progress.parquet"
     progress.write_bytes(b"progress")
     audit = {
-        "schema_version": "openarm2.sarm-progress-audit.v1",
+        "schema_version": "openarm2.sarm-semantic-progress-audit.v2",
         "progress_sha256": _sha256(progress),
+        "semantic_manifest_sha256": "1" * 64,
+        "semantic_sarm_contract_sha256": "2" * 64,
+        "progress_calibration_contract_sha256": "3" * 64,
+        "calibration_scope": "offline_train_weighting_only",
         "training_progress": {
             "path": str(progress),
             "sha256": _sha256(progress),
@@ -33,10 +37,9 @@ def _fixture(tmp_path: Path) -> tuple[SampleWeightingConfig, SimpleNamespace, di
             "episodes": [0],
         },
         "splits": {"train": {"episodes": [0]}},
-        "priority_manifest_sha256": "1" * 64,
-        "sarm_contract_sha256": "2" * 64,
         "chunk_size": 30,
         "rabc": {"recommended_kappa": 0.03125},
+        "gate": {"passed": True},
     }
     audit_path = tmp_path / "audit.json"
     audit_path.write_text(json.dumps(audit))
@@ -50,8 +53,9 @@ def _fixture(tmp_path: Path) -> tuple[SampleWeightingConfig, SimpleNamespace, di
             "audit_sha256": _sha256(audit_path),
             "source_progress_sha256": _sha256(progress),
             "training_progress_sha256": _sha256(progress),
-            "priority_manifest_sha256": "1" * 64,
-            "sarm_contract_sha256": "2" * 64,
+            "semantic_manifest_sha256": "1" * 64,
+            "semantic_sarm_contract_sha256": "2" * 64,
+            "progress_calibration_contract_sha256": "3" * 64,
             "fallback_weight": 1.0,
         },
     )
@@ -113,9 +117,7 @@ def test_verified_factory_resolves_artifacts_from_dataset_root(
     dataset_root.mkdir()
     config, policy, _audit = _fixture(dataset_root)
     config.progress_path = Path(config.progress_path).name
-    config.extra_params["audit_path"] = Path(
-        config.extra_params["audit_path"]
-    ).name
+    config.extra_params["audit_path"] = Path(config.extra_params["audit_path"]).name
     captured = {}
 
     def original_factory(native_config, *_args, **_kwargs):

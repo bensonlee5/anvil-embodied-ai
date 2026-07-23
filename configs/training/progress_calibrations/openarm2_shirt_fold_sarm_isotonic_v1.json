@@ -1,0 +1,19 @@
+{
+  "schema_version": "openarm2.sarm-progress-calibration.v1",
+  "calibration_id": "openarm2-shirt-fold-five-stage-isotonic-pchip-v1",
+  "description": "Offline-only calibration of released five-stage SARM progress. It removes absent-stage mass, applies an episode-local isotonic projection, and evaluates a monotone PCHIP curve on a fixed 15-frame knot grid. The raw reward artifact remains immutable.",
+  "source_semantic_sarm_contract_sha256": "b30aace47ba7e6b679964ac72c5ee518a31f1f22c947d4b3376760717462ad15",
+  "method": {
+    "kind": "episodewise_isotonic_pchip",
+    "knot_stride_frames": 15,
+    "noncausal_offline_only": true,
+    "preserve_raw_artifact": true
+  },
+  "progress_gate": {
+    "minimum_holdout_spearman": 0.6,
+    "maximum_holdout_mae": 0.2,
+    "severe_negative_delta_tolerance": 0.05,
+    "maximum_stage_severe_drop_fraction": 0.01,
+    "maximum_calibrated_optional_skip_jump": 0.1
+  }
+}

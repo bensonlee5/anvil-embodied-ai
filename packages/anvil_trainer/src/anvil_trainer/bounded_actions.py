@@ -57,15 +57,27 @@ class BoundedActionContract:
     clip_value: float
     smoothing_kernel: tuple[float, ...]
     max_training_clip_fraction: float
+    inference_smoothing_kernel: tuple[float, ...]
+    inference_smoothing_passes: int
+    gripper_event_threshold: float
 
     @classmethod
     def load(cls, path: str | Path) -> BoundedActionContract:
         source = Path(path).expanduser().resolve()
         payload = source.read_bytes()
         raw = json.loads(payload)
-        if raw.get("schema_version") != 1:
-            raise BoundedActionError("bounded action contract schema_version must be 1")
+        if raw.get("schema_version") != 2:
+            raise BoundedActionError("bounded action contract schema_version must be 2")
         fit = raw.get("train_only_fit", {})
+        smoothing = raw.get("inference_smoothing", {})
+        if smoothing.get("method") != "uniform_cubic_bspline":
+            raise BoundedActionError("inference smoothing must use uniform_cubic_bspline")
+        if smoothing.get("arm_only") is not True:
+            raise BoundedActionError("inference smoothing must be arm-only")
+        if smoothing.get("preserve_segment_endpoints") is not True:
+            raise BoundedActionError("inference smoothing must preserve segment endpoints")
+        if smoothing.get("gripper_mode") != "absolute_passthrough":
+            raise BoundedActionError("grippers must remain absolute passthrough values")
         result = cls(
             path=source,
             sha256=hashlib.sha256(payload).hexdigest(),
@@ -85,6 +97,9 @@ class BoundedActionContract:
             clip_value=float(fit.get("clip_value", 1.0)),
             smoothing_kernel=tuple(float(value) for value in fit.get("smoothing_kernel", [])),
             max_training_clip_fraction=float(fit.get("max_training_clip_fraction", 0.01)),
+            inference_smoothing_kernel=tuple(float(value) for value in smoothing.get("kernel", [])),
+            inference_smoothing_passes=int(smoothing.get("passes", 0)),
+            gripper_event_threshold=float(smoothing.get("gripper_event_threshold", 0.0)),
         )
         result.validate()
         return result
@@ -130,6 +145,18 @@ class BoundedActionContract:
             raise BoundedActionError("smoothing_kernel must have positive mass")
         if not 0 <= self.max_training_clip_fraction <= 1:
             raise BoundedActionError("max_training_clip_fraction must be in [0, 1]")
+        expected_bspline = (1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0)
+        if len(self.inference_smoothing_kernel) != 3 or not np.allclose(
+            self.inference_smoothing_kernel,
+            expected_bspline,
+            rtol=0.0,
+            atol=1e-15,
+        ):
+            raise BoundedActionError("inference smoothing kernel must be cubic B-spline")
+        if self.inference_smoothing_passes < 1:
+            raise BoundedActionError("inference smoothing passes must be positive")
+        if self.gripper_event_threshold <= 0:
+            raise BoundedActionError("gripper event threshold must be positive")
 
     @property
     def soft_lower(self) -> np.ndarray:
@@ -259,6 +286,9 @@ class BoundedRelativeActionsProcessorStep(RelativeActionsProcessorStep):
     clip_value: float = 1.0
     split_sha256: str = ""
     fit_episode_indices: list[int] = field(default_factory=list)
+    inference_smoothing_kernel: list[float] = field(default_factory=list)
+    inference_smoothing_passes: int = 0
+    gripper_event_threshold: float = 0.0
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         observation = transition.get(TransitionKey.OBSERVATION, {})
@@ -300,6 +330,9 @@ class BoundedRelativeActionsProcessorStep(RelativeActionsProcessorStep):
             "clip_value": self.clip_value,
             "split_sha256": self.split_sha256,
             "fit_episode_indices": self.fit_episode_indices,
+            "inference_smoothing_kernel": self.inference_smoothing_kernel,
+            "inference_smoothing_passes": self.inference_smoothing_passes,
+            "gripper_event_threshold": self.gripper_event_threshold,
         }
 
 
@@ -321,7 +354,7 @@ class BoundedAbsoluteActionsProcessorStep(AbsoluteActionsProcessorStep):
         if action is None:
             return result
         step = self.relative_step
-        result[TransitionKey.ACTION] = decode_bounded_actions(
+        decoded = decode_bounded_actions(
             action,
             state,
             lower=torch.as_tensor(step.lower),
@@ -331,6 +364,16 @@ class BoundedAbsoluteActionsProcessorStep(AbsoluteActionsProcessorStep):
             center=torch.as_tensor(step.horizon_center),
             scale=torch.as_tensor(step.horizon_scale),
             clip_value=step.clip_value,
+        )
+        result[TransitionKey.ACTION] = smooth_bounded_action_chunk(
+            decoded,
+            lower=torch.as_tensor(step.lower),
+            upper=torch.as_tensor(step.upper),
+            arm_indices=tuple(step.arm_indices),
+            absolute_indices=tuple(step.absolute_indices),
+            kernel=tuple(step.inference_smoothing_kernel),
+            passes=step.inference_smoothing_passes,
+            gripper_event_threshold=step.gripper_event_threshold,
         )
         return result
 
@@ -359,6 +402,69 @@ def smooth_horizon(values: np.ndarray, kernel: tuple[float, ...]) -> np.ndarray:
     return result
 
 
+def smooth_bounded_action_chunk(
+    actions: torch.Tensor,
+    *,
+    lower: torch.Tensor,
+    upper: torch.Tensor,
+    arm_indices: tuple[int, ...],
+    absolute_indices: tuple[int, ...],
+    kernel: tuple[float, ...],
+    passes: int,
+    gripper_event_threshold: float,
+) -> torch.Tensor:
+    """Smooth decoded arm positions without crossing gripper events.
+
+    The cubic B-spline kernel is a convex combination, segment endpoints are
+    preserved, and gripper channels are copied bit-for-bit. Consequently this
+    postprocessor cannot move an arm target outside the already decoded soft
+    limits or blur a grasp/release event.
+    """
+    if actions.ndim == 1 or actions.shape[-2] < 3:
+        return actions.clone()
+    if actions.ndim not in {2, 3}:
+        raise BoundedActionError("action chunk must have shape [T,D] or [B,T,D]")
+    if len(kernel) != 3 or passes < 1 or gripper_event_threshold <= 0:
+        raise BoundedActionError("invalid bounded action smoothing configuration")
+
+    squeeze = actions.ndim == 2
+    source = actions.unsqueeze(0) if squeeze else actions
+    result = source.clone()
+    original_grippers = source[..., list(absolute_indices)].clone()
+    weights = torch.as_tensor(kernel, device=source.device, dtype=source.dtype)
+    arm = list(arm_indices)
+    absolute = list(absolute_indices)
+
+    for batch_index in range(source.shape[0]):
+        gripper = source[batch_index, :, absolute]
+        changes = torch.any(
+            torch.abs(gripper[1:] - gripper[:-1]) >= gripper_event_threshold,
+            dim=-1,
+        )
+        cuts = [0]
+        cuts.extend((torch.nonzero(changes, as_tuple=False).flatten() + 1).tolist())
+        cuts.append(source.shape[1])
+        for start, end in zip(cuts[:-1], cuts[1:], strict=True):
+            if end - start < 3:
+                continue
+            segment = result[batch_index, start:end, arm]
+            for _ in range(passes):
+                smoothed = segment.clone()
+                smoothed[1:-1] = (
+                    weights[0] * segment[:-2]
+                    + weights[1] * segment[1:-1]
+                    + weights[2] * segment[2:]
+                )
+                segment = smoothed
+            result[batch_index, start:end, arm] = segment
+
+    lower = lower.to(device=result.device, dtype=result.dtype)
+    upper = upper.to(device=result.device, dtype=result.dtype)
+    result[..., arm] = result[..., arm].clamp(lower[arm], upper[arm])
+    result[..., absolute] = original_grippers
+    return result[0] if squeeze else result
+
+
 def make_processor_steps(
     contract: BoundedActionContract,
     *,
@@ -383,5 +489,8 @@ def make_processor_steps(
         clip_value=contract.clip_value,
         split_sha256=contract.split_sha256,
         fit_episode_indices=list(contract.training_episode_indices),
+        inference_smoothing_kernel=list(contract.inference_smoothing_kernel),
+        inference_smoothing_passes=contract.inference_smoothing_passes,
+        gripper_event_threshold=contract.gripper_event_threshold,
     )
     return relative, BoundedAbsoluteActionsProcessorStep(enabled=True, relative_step=relative)

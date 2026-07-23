@@ -164,6 +164,13 @@ def test_contract_audit_accepts_train_only_bounded_representation(tmp_path: Path
                             "representation_id": "bounded-v1",
                             "contract_sha256": digest,
                             "split_sha256": split,
+                            "inference_smoothing_kernel": [
+                                1.0 / 6.0,
+                                2.0 / 3.0,
+                                1.0 / 6.0,
+                            ],
+                            "inference_smoothing_passes": 2,
+                            "gripper_event_threshold": 0.005,
                         },
                     }
                 ]
@@ -192,6 +199,13 @@ def test_contract_audit_accepts_train_only_bounded_representation(tmp_path: Path
                     "split_sha256": split,
                     "stats_source": "frozen_training_episodes_only",
                     "horizon_sample_counts": [100] * 30,
+                    "inference_smoothing": {
+                        "method": "uniform_cubic_bspline",
+                        "kernel": [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0],
+                        "passes": 2,
+                        "gripper_mode": "absolute_passthrough",
+                        "gripper_event_threshold": 0.005,
+                    },
                 }
             }
         )
@@ -205,6 +219,13 @@ def test_contract_audit_accepts_train_only_bounded_representation(tmp_path: Path
         "postprocessor_enabled": True,
         "representation_id": "bounded-v1",
         "contract_sha256": digest,
+        "inference_smoothing": {
+            "method": "uniform_cubic_bspline",
+            "kernel": [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0],
+            "passes": 2,
+            "gripper_mode": "absolute_passthrough",
+            "gripper_event_threshold": 0.005,
+        },
         "normalization_contract": {
             "action_space": "state_relative_soft_limit_fraction",
             "chunk_size": 30,
@@ -212,5 +233,12 @@ def test_contract_audit_accepts_train_only_bounded_representation(tmp_path: Path
             "split_sha256": split,
             "stats_source": "frozen_training_episodes_only",
             "horizon_sample_counts": [100] * 30,
+            "inference_smoothing": {
+                "method": "uniform_cubic_bspline",
+                "kernel": [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0],
+                "passes": 2,
+                "gripper_mode": "absolute_passthrough",
+                "gripper_event_threshold": 0.005,
+            },
         },
     }

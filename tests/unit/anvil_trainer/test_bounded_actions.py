@@ -19,6 +19,7 @@ from anvil_trainer.bounded_actions import (
     BoundedActionContract,
     decode_bounded_actions,
     encode_bounded_actions,
+    smooth_bounded_action_chunk,
 )
 from anvil_trainer.config import TrainingConfig
 from anvil_trainer.patches import TransformRunner
@@ -26,7 +27,7 @@ from anvil_trainer.transforms import BoundedRobustnessTransform, DataIntegrityEr
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONTRACT_PATH = (
-    REPO_ROOT / "configs" / "training" / "action_contracts" / "openarm2_shirt_fold_bounded_v1.json"
+    REPO_ROOT / "configs" / "training" / "action_contracts" / "openarm2_shirt_fold_bounded_v2.json"
 )
 
 
@@ -101,6 +102,43 @@ def test_bounded_decoder_guarantees_soft_limits_for_any_finite_output() -> None:
     assert torch.isfinite(decoded).all()
     assert torch.all(decoded >= lower.to(decoded.dtype))
     assert torch.all(decoded <= upper.to(decoded.dtype))
+
+
+def test_cubic_bspline_smoothing_preserves_grippers_events_endpoints_and_limits() -> None:
+    contract = _contract()
+    lower = torch.tensor(contract.soft_lower, dtype=torch.float64)
+    upper = torch.tensor(contract.soft_upper, dtype=torch.float64)
+    midpoint = 0.5 * (lower + upper)
+    actions = midpoint.repeat(9, 1)
+    arm = list(contract.arm_indices)
+    absolute = list(contract.absolute_indices)
+    alternating = torch.tensor(
+        [0.0, 0.08, -0.08, 0.06, -0.06, 0.08, -0.08, 0.06, 0.0],
+        dtype=torch.float64,
+    )
+    actions[:, arm] += alternating[:, None]
+    actions[:4, absolute] = lower[absolute]
+    actions[4:, absolute] = upper[absolute]
+    original = actions.clone()
+
+    smoothed = smooth_bounded_action_chunk(
+        actions,
+        lower=lower,
+        upper=upper,
+        arm_indices=contract.arm_indices,
+        absolute_indices=contract.absolute_indices,
+        kernel=contract.inference_smoothing_kernel,
+        passes=contract.inference_smoothing_passes,
+        gripper_event_threshold=contract.gripper_event_threshold,
+    )
+
+    torch.testing.assert_close(smoothed[:, absolute], original[:, absolute])
+    torch.testing.assert_close(smoothed[[0, 3, 4, 8]][:, arm], original[[0, 3, 4, 8]][:, arm])
+    assert torch.all(smoothed[:, arm] >= lower[arm])
+    assert torch.all(smoothed[:, arm] <= upper[arm])
+    before_curvature = torch.diff(original[:, arm], n=2, dim=0).abs().mean()
+    after_curvature = torch.diff(smoothed[:, arm], n=2, dim=0).abs().mean()
+    assert after_curvature < before_curvature
 
 
 def _dataset(*, perturb_holdout: bool) -> SimpleNamespace:
@@ -190,6 +228,9 @@ def test_processor_install_replaces_inherited_relative_pair() -> None:
     assert postprocessor.steps[0].__class__._registry_name == "bounded_absolute_actions_processor"
     assert postprocessor.steps[0].relative_step is preprocessor.steps[0]
     assert preprocessor.steps[0].contract_sha256 == contract.sha256
+    assert preprocessor.steps[0].inference_smoothing_kernel == list(
+        contract.inference_smoothing_kernel
+    )
 
 
 def test_camera_dropout_never_drops_every_view(monkeypatch: pytest.MonkeyPatch) -> None:

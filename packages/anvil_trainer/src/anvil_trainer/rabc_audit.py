@@ -22,8 +22,9 @@ _AUDIT_KEYS = {
     "audit_sha256",
     "source_progress_sha256",
     "training_progress_sha256",
-    "priority_manifest_sha256",
-    "sarm_contract_sha256",
+    "semantic_manifest_sha256",
+    "semantic_sarm_contract_sha256",
+    "progress_calibration_contract_sha256",
 }
 
 
@@ -63,9 +64,7 @@ def make_audit_verified_sample_weighter(
     missing = _AUDIT_KEYS - set(config.extra_params)
     if missing:
         raise RABCAuditError(f"RA-BC audit parameters are missing: {sorted(missing)}")
-    audit_path = _resolve_artifact_path(
-        str(config.extra_params["audit_path"]), dataset_root
-    )
+    audit_path = _resolve_artifact_path(str(config.extra_params["audit_path"]), dataset_root)
     if not audit_path.is_file():
         raise RABCAuditError(f"RA-BC progress audit not found: {audit_path}")
     expected_audit_hash = str(config.extra_params["audit_sha256"])
@@ -75,12 +74,19 @@ def make_audit_verified_sample_weighter(
             f"RA-BC audit hash mismatch: expected {expected_audit_hash}, got {actual_audit_hash}"
         )
     audit = json.loads(audit_path.read_text())
-    if audit.get("schema_version") != "openarm2.sarm-progress-audit.v1":
+    if audit.get("schema_version") != "openarm2.sarm-semantic-progress-audit.v2":
         raise RABCAuditError("Unsupported or missing RA-BC progress-audit schema")
+    if audit.get("calibration_scope") != "offline_train_weighting_only":
+        raise RABCAuditError("RA-BC audit is not an offline train-weighting calibration")
+    if audit.get("gate", {}).get("passed") is not True:
+        raise RABCAuditError("RA-BC progress audit gate did not pass")
     exact_fields = {
         "progress_sha256": config.extra_params["source_progress_sha256"],
-        "priority_manifest_sha256": config.extra_params["priority_manifest_sha256"],
-        "sarm_contract_sha256": config.extra_params["sarm_contract_sha256"],
+        "semantic_manifest_sha256": config.extra_params["semantic_manifest_sha256"],
+        "semantic_sarm_contract_sha256": config.extra_params["semantic_sarm_contract_sha256"],
+        "progress_calibration_contract_sha256": config.extra_params[
+            "progress_calibration_contract_sha256"
+        ],
     }
     for field, expected in exact_fields.items():
         if audit.get(field) != expected:
@@ -95,7 +101,9 @@ def make_audit_verified_sample_weighter(
         raise RABCAuditError("RA-BC audit does not identify a train-only progress artifact")
     if training_progress.get("sha256") != config.extra_params["training_progress_sha256"]:
         raise RABCAuditError("RA-BC train-only progress hash does not match its audit")
-    if training_progress.get("episodes") != audit.get("splits", {}).get("train", {}).get("episodes"):
+    if training_progress.get("episodes") != audit.get("splits", {}).get("train", {}).get(
+        "episodes"
+    ):
         raise RABCAuditError("RA-BC train-only progress episodes do not match the audited split")
     if _sha256(progress_path) != training_progress["sha256"]:
         raise RABCAuditError("RA-BC train-only progress parquet hash does not match its audit")

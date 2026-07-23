@@ -231,6 +231,27 @@ def audit_policy_contract(
                 int(count) <= 0 for count in counts
             ):
                 errors.append("Bounded horizon sample counts must be positive at every step")
+            smoothing = normalization_contract.get("inference_smoothing") or {}
+            if smoothing.get("method") != "uniform_cubic_bspline":
+                errors.append("Bounded checkpoint must use cubic B-spline inference smoothing")
+            _expect_equal(
+                errors,
+                "bounded smoothing kernel",
+                (bounded_step or {}).get("config", {}).get("inference_smoothing_kernel"),
+                smoothing.get("kernel"),
+            )
+            _expect_equal(
+                errors,
+                "bounded smoothing passes",
+                (bounded_step or {}).get("config", {}).get("inference_smoothing_passes"),
+                smoothing.get("passes"),
+            )
+            _expect_equal(
+                errors,
+                "bounded gripper-event threshold",
+                (bounded_step or {}).get("config", {}).get("gripper_event_threshold"),
+                smoothing.get("gripper_event_threshold"),
+            )
 
     conversion_order = conversion.get("robot_order")
     if conversion_order:
@@ -277,6 +298,9 @@ def audit_policy_contract(
                 .get("config", {})
                 .get("representation_id"),
                 "contract_sha256": (bounded_step or {}).get("config", {}).get("contract_sha256"),
+                "inference_smoothing": (
+                    normalization_contract.get("inference_smoothing", {}) if bounded_enabled else {}
+                ),
                 "normalization_contract": normalization_contract if bounded_enabled else {},
             },
             "scheduler": {

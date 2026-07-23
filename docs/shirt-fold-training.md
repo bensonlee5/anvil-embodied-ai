@@ -384,10 +384,14 @@ and train-only RA-BC audits as the SARM arm.
 
 ## Bounded Larchenko-derived target recipe
 
-`configs/training/shirt_fold_pi05_hf_bounded_larchenko_v1.yaml` is the next
-existing-data candidate. It preserves the exact 33-session trim, seed-1000
-27/3/3 split, v2 quality sampler, and released SARM RA-BC signal. Its changes
-are deliberately limited to representation and robustness:
+`configs/training/shirt_fold_pi05_hf_bounded_larchenko_v1.yaml` is the frozen,
+pre-five-stage draft and is not a launch recipe. The current existing-data
+candidate is
+`configs/training/shirt_fold_pi05_hf_bounded_larchenko_5stage_sarm_v2.yaml`.
+It preserves the exact 33-session trim, seed-1000 27/3/3 split, conservative
+quality sampler, and released five-stage SARM checkpoint. Its changes are
+deliberately limited to offline reward calibration, representation, and
+robustness:
 
 - Each arm target is encoded as a signed fraction of the remaining motion from
   the current state to a 0.005-rad-buffered joint endpoint. Decoding clamps the
@@ -403,18 +407,34 @@ are deliberately limited to representation and robustness:
   the same physical bounds. Validation and test receive none of these
   augmentations.
 
-The representation authority is
-`configs/training/action_contracts/openarm2_shirt_fold_bounded_v1.json`. It
+The v1 representation authority remains frozen history. The current
+representation authority is
+`configs/training/action_contracts/openarm2_shirt_fold_bounded_v2.json`. It
 pins the right-first names, corrected Anvil OpenArm 2 limits, gripper endpoints,
 split hash, fit episodes, smoothing kernel, scale floor, and clipping policy.
 OpenRAL is not an input to this contract.
+
+The released reward bytes remain unchanged. The separately versioned
+`configs/training/progress_calibrations/openarm2_shirt_fold_sarm_isotonic_v1.json`
+removes absent-stage mass, applies an episode-local isotonic projection, and
+uses monotone PCHIP knots every 15 frames. This is explicitly non-causal and is
+valid only for weighting the existing offline training rows. It reduced the
+largest optional-stage boundary jump from 0.284 to 0.00564 while retaining
+validation/test Spearman 0.992/0.998 and MAE 0.0248/0.0142. Negative frame
+deltas smaller than 0.05 remain diagnostics rather than gate failures.
+
+At inference, the decoded 14 arm positions receive two passes of the uniform
+cubic B-spline kernel `[1/6, 2/3, 1/6]`. Segment endpoints are preserved,
+segments are split at gripper events, decoded soft limits are re-applied, and
+the two absolute gripper channels pass through unchanged. This smoother is
+serialized into the checkpoint processor.
 
 Run locally with:
 
 ```bash
 uv run anvil-trainer \
-  --config_path=configs/training/shirt_fold_pi05_hf_bounded_larchenko_v1.yaml \
-  --bounded-action-contract=configs/training/action_contracts/openarm2_shirt_fold_bounded_v1.json \
+  --config_path=configs/training/shirt_fold_pi05_hf_bounded_larchenko_5stage_sarm_v2.yaml \
+  --bounded-action-contract=configs/training/action_contracts/openarm2_shirt_fold_bounded_v2.json \
   --priority-sampling-manifest=configs/training/priority_manifests/openarm2_shirt_fold_3stage_v2.json \
   --camera-dropout-probability=0.10 \
   --state-noise-std-fraction=0.002 \

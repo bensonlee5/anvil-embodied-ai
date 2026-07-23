@@ -199,12 +199,12 @@ def test_shirt_fold_pi05_configs_differ_only_by_initialization_and_run_identity(
     assert comparable[0] == comparable[1]
 
 
-def test_bounded_larchenko_recipe_owns_action_scaling_and_enables_augmentation() -> None:
+def test_bounded_larchenko_v2_recipe_owns_action_scaling_and_enables_augmentation() -> None:
     config = yaml.safe_load(
-        (CONFIG_ROOT / "shirt_fold_pi05_hf_bounded_larchenko_v1.yaml").read_text()
+        (CONFIG_ROOT / "shirt_fold_pi05_hf_bounded_larchenko_5stage_sarm_v2.yaml").read_text()
     )
     policy = config["policy"]
-    assert config["dataset"]["root"].endswith("lerobot-hf-phase-aligned-sarm-v1")
+    assert config["dataset"]["root"].endswith("lerobot-hf-phase-aligned-sarm-5stage-v1")
     assert config["dataset"]["video_backend"] == "torchcodec"
     assert policy["use_relative_actions"] is False
     assert policy["relative_exclude_joints"] == []
@@ -212,6 +212,11 @@ def test_bounded_larchenko_recipe_owns_action_scaling_and_enables_augmentation()
     assert json.loads(policy["normalization_mapping"])["ACTION"] == "IDENTITY"
     assert config["steps"] == 5000
     assert config["save_freq"] == 500
+    weighting = config["sample_weighting"]
+    assert weighting["progress_path"] == "sarm_progress_train_5stage_calibrated_v2.parquet"
+    assert weighting["extra_params"]["semantic_manifest_sha256"] == (
+        "5b476d9cb72363093da636c032fc2a32db945bfbe37c86e04e2d0bbc71fcf768"
+    )
 
     image_config = draccus.decode(
         ImageTransformsConfig,

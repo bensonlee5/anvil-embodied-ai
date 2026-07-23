@@ -972,6 +972,13 @@ class TransformRunner:
                 "training_target_clip_fraction": clip_fraction,
                 "soft_lower": lower.tolist(),
                 "soft_upper": upper.tolist(),
+                "inference_smoothing": {
+                    "method": "uniform_cubic_bspline",
+                    "kernel": list(contract.inference_smoothing_kernel),
+                    "passes": contract.inference_smoothing_passes,
+                    "gripper_mode": "absolute_passthrough",
+                    "gripper_event_threshold": contract.gripper_event_threshold,
+                },
             }
         )
         log.info(

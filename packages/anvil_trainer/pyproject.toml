@@ -26,6 +26,7 @@ dependencies = [
     "lerobot[training,diffusion]~=0.6.0",
     "torch>=2.7",     # Resolved through the CUDA 13.2 PyTorch index configured in the root pyproject.toml
     "numpy>=2.0.0,<2.3.0",
+    "scipy>=1.14.0,<2.0.0",
     "wandb~=0.24",
     "pyyaml~=6.0",
     "tqdm~=4.67",
