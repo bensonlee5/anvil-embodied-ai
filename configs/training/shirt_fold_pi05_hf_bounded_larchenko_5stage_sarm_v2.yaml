@@ -104,8 +104,11 @@ output_dir: model_zoo/shirt-fold/pi05-hf-bounded-larchenko-5stage-sarm-v2-5k
 job_name: shirt-fold-pi05-hf-bounded-larchenko-5stage-sarm-v2-5k
 seed: 1000
 cudnn_deterministic: false
-num_workers: 0
-persistent_workers: false
+# Four persistent workers overlap the three-camera TorchCodec decode path with
+# GPU updates. This recipe is launched only on hosts with ample system RAM;
+# using a single worker leaves the GPU idle and misses the eight-hour budget.
+num_workers: 4
+persistent_workers: true
 batch_size: 16
 steps: 5000
 env_eval_freq: 0

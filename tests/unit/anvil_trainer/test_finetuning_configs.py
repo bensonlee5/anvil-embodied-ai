@@ -212,6 +212,8 @@ def test_bounded_larchenko_v2_recipe_owns_action_scaling_and_enables_augmentatio
     assert json.loads(policy["normalization_mapping"])["ACTION"] == "IDENTITY"
     assert config["steps"] == 5000
     assert config["save_freq"] == 500
+    assert config["num_workers"] == 4
+    assert config["persistent_workers"] is True
     weighting = config["sample_weighting"]
     assert weighting["progress_path"] == "sarm_progress_train_5stage_calibrated_v2.parquet"
     assert weighting["extra_params"]["semantic_manifest_sha256"] == (
