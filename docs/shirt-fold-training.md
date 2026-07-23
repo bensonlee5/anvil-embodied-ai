@@ -420,7 +420,11 @@ The v3 policy consumes
 released SARM audit after only the deterministic absent-stage mass correction.
 No isotonic fit, PCHIP curve, spline, or monotone projection is applied to
 reward values. Negative frame deltas are retained; `-0.05` is an audit
-threshold for reporting large reversals, not a transform or training gate.
+threshold for reporting large reversals, not a transform or training gate. The
+raw-v1 verifier still fails closed on artifact hashes, split membership, row
+count, kappa, chunk size, and the validation/test Spearman and MAE checks; it
+does not promote the historical stage-monotonicity or optional-skip checks into
+training gates.
 The v2 fitted calibration contract and checkpoint remain immutable history.
 
 At inference, the decoded 14 arm positions receive two passes of the uniform
