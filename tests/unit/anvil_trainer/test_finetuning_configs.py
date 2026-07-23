@@ -239,6 +239,41 @@ def test_bounded_larchenko_v2_recipe_owns_action_scaling_and_enables_augmentatio
     }
 
 
+def test_bounded_larchenko_raw_v3_removes_fitted_reward_calibration() -> None:
+    config = yaml.safe_load(
+        (
+            CONFIG_ROOT
+            / "shirt_fold_pi05_hf_bounded_larchenko_5stage_sarm_raw_v3.yaml"
+        ).read_text()
+    )
+    v2 = yaml.safe_load(
+        (CONFIG_ROOT / "shirt_fold_pi05_hf_bounded_larchenko_5stage_sarm_v2.yaml").read_text()
+    )
+    weighting = config["sample_weighting"]
+
+    assert weighting["progress_path"] == "sarm_progress_train_5stage_v1.parquet"
+    assert weighting["kappa"] == pytest.approx(0.04932563304901121)
+    assert weighting["extra_params"]["reward_calibration"] == "none"
+    assert weighting["extra_params"]["negative_delta_audit_tolerance"] == 0.05
+    assert "progress_calibration_contract_sha256" not in weighting["extra_params"]
+    assert "isotonic" not in json.dumps(config).lower()
+    assert "pchip" not in json.dumps(config).lower()
+
+    for key in (
+        "dataset",
+        "policy",
+        "seed",
+        "num_workers",
+        "persistent_workers",
+        "batch_size",
+        "steps",
+        "save_checkpoint",
+        "save_freq",
+        "wandb",
+    ):
+        assert config[key] == v2[key]
+
+
 @pytest.mark.parametrize(
     "filename",
     (

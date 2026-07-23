@@ -385,13 +385,14 @@ and train-only RA-BC audits as the SARM arm.
 ## Bounded Larchenko-derived target recipe
 
 `configs/training/shirt_fold_pi05_hf_bounded_larchenko_v1.yaml` is the frozen,
-pre-five-stage draft and is not a launch recipe. The current existing-data
-candidate is
-`configs/training/shirt_fold_pi05_hf_bounded_larchenko_5stage_sarm_v2.yaml`.
+pre-five-stage draft and is not a launch recipe. The isotonic/PCHIP experiment
+is frozen as
+`configs/training/shirt_fold_pi05_hf_bounded_larchenko_5stage_sarm_v2.yaml`;
+it must not be used for new work. The current existing-data candidate is
+`configs/training/shirt_fold_pi05_hf_bounded_larchenko_5stage_sarm_raw_v3.yaml`.
 It preserves the exact 33-session trim, seed-1000 27/3/3 split, conservative
 quality sampler, and released five-stage SARM checkpoint. Its changes are
-deliberately limited to offline reward calibration, representation, and
-robustness:
+deliberately limited to raw reward weighting, representation, and robustness:
 
 - Each arm target is encoded as a signed fraction of the remaining motion from
   the current state to a 0.005-rad-buffered joint endpoint. Decoding clamps the
@@ -414,14 +415,13 @@ pins the right-first names, corrected Anvil OpenArm 2 limits, gripper endpoints,
 split hash, fit episodes, smoothing kernel, scale floor, and clipping policy.
 OpenRAL is not an input to this contract.
 
-The released reward bytes remain unchanged. The separately versioned
-`configs/training/progress_calibrations/openarm2_shirt_fold_sarm_isotonic_v1.json`
-removes absent-stage mass, applies an episode-local isotonic projection, and
-uses monotone PCHIP knots every 15 frames. This is explicitly non-causal and is
-valid only for weighting the existing offline training rows. It reduced the
-largest optional-stage boundary jump from 0.284 to 0.00564 while retaining
-validation/test Spearman 0.992/0.998 and MAE 0.0248/0.0142. Negative frame
-deltas smaller than 0.05 remain diagnostics rather than gate failures.
+The v3 policy consumes
+`sarm_progress_train_5stage_v1.parquet`: 29,234 train-only rows emitted by the
+released SARM audit after only the deterministic absent-stage mass correction.
+No isotonic fit, PCHIP curve, spline, or monotone projection is applied to
+reward values. Negative frame deltas are retained; `-0.05` is an audit
+threshold for reporting large reversals, not a transform or training gate.
+The v2 fitted calibration contract and checkpoint remain immutable history.
 
 At inference, the decoded 14 arm positions receive two passes of the uniform
 cubic B-spline kernel `[1/6, 2/3, 1/6]`. Segment endpoints are preserved,
@@ -433,7 +433,7 @@ Run locally with:
 
 ```bash
 uv run anvil-trainer \
-  --config_path=configs/training/shirt_fold_pi05_hf_bounded_larchenko_5stage_sarm_v2.yaml \
+  --config_path=configs/training/shirt_fold_pi05_hf_bounded_larchenko_5stage_sarm_raw_v3.yaml \
   --bounded-action-contract=configs/training/action_contracts/openarm2_shirt_fold_bounded_v2.json \
   --priority-sampling-manifest=configs/training/priority_manifests/openarm2_shirt_fold_3stage_v2.json \
   --camera-dropout-probability=0.10 \
