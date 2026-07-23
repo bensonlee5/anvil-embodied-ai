@@ -32,12 +32,13 @@ class NativeEpisodeResult:
 
 
 def find_native_relative_step(preprocessor: Any) -> Any | None:
-    """Return the enabled LeRobot relative-action processor, when present."""
+    """Return the enabled physical action codec that caches observation state."""
     for step in getattr(preprocessor, "steps", ()) if preprocessor else ():
         registry_name = getattr(step.__class__, "_registry_name", "")
         if (
-            registry_name == "relative_actions_processor"
-            or step.__class__.__name__ == "RelativeActionsProcessorStep"
+            registry_name in {"relative_actions_processor", "bounded_relative_actions_processor"}
+            or step.__class__.__name__
+            in {"RelativeActionsProcessorStep", "BoundedRelativeActionsProcessorStep"}
         ) and bool(getattr(step, "enabled", False)):
             return step
     return None
@@ -63,7 +64,7 @@ def evaluate_native_relative_episode(
     """
     relative_step = find_native_relative_step(preprocessor)
     if relative_step is None:
-        raise RuntimeError("Checkpoint does not have an enabled relative_actions_processor")
+        raise RuntimeError("Checkpoint does not have an enabled state-relative action processor")
     if postprocessor is None:
         raise RuntimeError("Checkpoint postprocessor is required for absolute action restoration")
     if not hasattr(model, "predict_action_chunk"):

@@ -37,10 +37,17 @@ from typing import Any
 from anvil_shared.provenance import git_provenance
 from anvil_shared.splits import compute_split_episodes, load_split_info, save_split_info
 
+from anvil_trainer.bounded_actions import (
+    BoundedActionContract,
+    encode_bounded_actions,
+    make_processor_steps,
+    smooth_horizon,
+)
 from anvil_trainer.config import TrainingConfig
 from anvil_trainer.priority_sampling import PriorityEpisodeAwareSampler, PriorityManifest
 from anvil_trainer.rabc_audit import make_audit_verified_sample_weighter
 from anvil_trainer.transforms import (
+    BoundedRobustnessTransform,
     DataIntegrityError,
     DeltaActionTransform,
     ExcludeObservationTransform,
@@ -341,6 +348,7 @@ class TransformRunner:
             ExcludeObservationTransform(),
             TaskOverrideTransform(),
             DeltaActionTransform(),
+            BoundedRobustnessTransform(config),
         ]
         self.active_transforms = [t for t in transforms if t.is_enabled(config)]
         self._val_dataloader = None  # set by apply_val_loss_patch when make_dataset is called
@@ -354,6 +362,12 @@ class TransformRunner:
         self._val_freq = 0  # set from cfg.log_freq * 5 inside patched_make_dataset
         self._resume_step = 0  # for absolute step tracking in wandb
         self._normalization_contract: dict[str, Any] = {}
+        self._bounded_contract = (
+            BoundedActionContract.load(config.bounded_action_contract)
+            if config.bounded_action_contract
+            else None
+        )
+        self._bounded_statistics: tuple[Any, Any] | None = None
         self._priority_manifest: PriorityManifest | None = None
         if config.priority_sampling_manifest:
             if not config.dataset_root:
@@ -533,6 +547,11 @@ class TransformRunner:
             return f"'{self.config.task_override}'"
         elif isinstance(transform, DeltaActionTransform):
             return "action = action - observation.state"
+        elif isinstance(transform, BoundedRobustnessTransform):
+            return (
+                f"camera_dropout={self.config.camera_dropout_probability}, "
+                f"state_noise_fraction={self.config.state_noise_std_fraction}"
+            )
         return "enabled"
 
     def _compute_delta_action_stats(self, full_dataset: Any) -> dict | None:
@@ -830,6 +849,200 @@ class TransformRunner:
         )
         return stats
 
+    def _fit_bounded_action_statistics(
+        self,
+        full_dataset: Any,
+        policy_cfg: Any,
+        train_episodes: list[int],
+    ) -> tuple[Any, Any] | None:
+        """Fit robust per-actuator/per-horizon statistics on train episodes only."""
+        contract = self._bounded_contract
+        if contract is None:
+            return None
+        if getattr(policy_cfg, "type", None) != "pi05":
+            raise DataIntegrityError("bounded action representation currently requires Pi0.5")
+        if bool(getattr(policy_cfg, "use_relative_actions", False)):
+            raise DataIntegrityError(
+                "bounded actions replace Pi0.5 native relative actions; set use_relative_actions=false"
+            )
+        if int(getattr(policy_cfg, "chunk_size", 0)) != contract.chunk_size:
+            raise DataIntegrityError("bounded action contract chunk_size does not match the policy")
+        policy_names = tuple(getattr(policy_cfg, "action_feature_names", None) or ())
+        if policy_names != contract.action_names:
+            raise DataIntegrityError(
+                "bounded action contract names do not exactly match action_feature_names"
+            )
+        if sorted(train_episodes) != sorted(contract.training_episode_indices):
+            raise DataIntegrityError(
+                "resolved training episodes differ from the bounded action contract: "
+                f"resolved={sorted(train_episodes)}, contract={sorted(contract.training_episode_indices)}"
+            )
+
+        import numpy as np
+        import torch
+
+        hf = full_dataset.hf_dataset
+        actions = np.asarray(hf["action"], dtype=np.float64)
+        states = np.asarray(hf["observation.state"], dtype=np.float64)
+        if states.ndim == 3:
+            states = states[:, -1, :]
+        episode = np.asarray(hf["episode_index"], dtype=np.int64).reshape(-1)
+        if actions.shape != states.shape or actions.shape[1] != len(contract.action_names):
+            raise DataIntegrityError(
+                "bounded action fitting requires matching named action/state vectors"
+            )
+
+        train_mask = np.isin(episode, np.asarray(train_episodes, dtype=np.int64))
+        dimension = actions.shape[1]
+        centers = np.zeros((contract.chunk_size, dimension), dtype=np.float64)
+        scales = np.ones((contract.chunk_size, dimension), dtype=np.float64)
+        counts: list[int] = []
+        clipped = 0
+        attempted = 0
+        lower = contract.soft_lower
+        upper = contract.soft_upper
+
+        for horizon in range(contract.chunk_size):
+            starts = np.arange(0, len(actions) - horizon, dtype=np.int64)
+            valid = train_mask[starts] & (episode[starts] == episode[starts + horizon])
+            starts = starts[valid]
+            if len(starts) == 0:
+                raise DataIntegrityError(
+                    f"bounded action horizon {horizon} has no train-only samples"
+                )
+            target = actions[starts + horizon]
+            reference = states[starts]
+            endpoint_tolerance = 1.0e-6
+            clipped += int(
+                (
+                    (target < lower - endpoint_tolerance) | (target > upper + endpoint_tolerance)
+                ).sum()
+            )
+            attempted += int(target.size)
+            base = encode_bounded_actions(
+                torch.as_tensor(target[:, None, :], dtype=torch.float64),
+                torch.as_tensor(reference, dtype=torch.float64),
+                lower=torch.as_tensor(lower, dtype=torch.float64),
+                upper=torch.as_tensor(upper, dtype=torch.float64),
+                arm_indices=contract.arm_indices,
+                absolute_indices=contract.absolute_indices,
+                center=torch.zeros((1, dimension), dtype=torch.float64),
+                scale=torch.ones((1, dimension), dtype=torch.float64),
+                clip_value=1.0,
+            )[:, 0].numpy()
+            arm = list(contract.arm_indices)
+            low = np.quantile(base[:, arm], contract.quantile_low, axis=0)
+            high = np.quantile(base[:, arm], contract.quantile_high, axis=0)
+            centers[horizon, arm] = 0.5 * (low + high)
+            scales[horizon, arm] = np.maximum(
+                0.5 * (high - low) / contract.clip_value,
+                contract.minimum_scale,
+            )
+            counts.append(len(starts))
+
+        arm = list(contract.arm_indices)
+        centers[:, arm] = smooth_horizon(centers[:, arm], contract.smoothing_kernel)
+        scales[:, arm] = np.maximum(
+            smooth_horizon(scales[:, arm], contract.smoothing_kernel),
+            contract.minimum_scale,
+        )
+        clip_fraction = clipped / max(attempted, 1)
+        if clip_fraction > contract.max_training_clip_fraction:
+            raise DataIntegrityError(
+                "bounded action training targets exceed soft limits too often: "
+                f"{clip_fraction:.6f} > {contract.max_training_clip_fraction:.6f}"
+            )
+        if not np.isfinite(centers).all() or not np.isfinite(scales).all():
+            raise DataIntegrityError("bounded action statistics contain non-finite values")
+
+        self._bounded_statistics = (centers, scales)
+        self._normalization_contract.update(
+            {
+                "action_space": "state_relative_soft_limit_fraction",
+                "representation_id": contract.representation_id,
+                "contract_sha256": contract.sha256,
+                "chunk_size": contract.chunk_size,
+                "stats_source": "frozen_training_episodes_only",
+                "fit_episode_indices": list(contract.training_episode_indices),
+                "split_sha256": contract.split_sha256,
+                "horizon_sample_counts": counts,
+                "quantiles": [contract.quantile_low, contract.quantile_high],
+                "minimum_scale": contract.minimum_scale,
+                "clip_value": contract.clip_value,
+                "training_target_clip_fraction": clip_fraction,
+                "soft_lower": lower.tolist(),
+                "soft_upper": upper.tolist(),
+            }
+        )
+        log.info(
+            "[bounded_actions] Fit %dx%d train-only horizon statistics "
+            "(episodes=%d, target_clip_fraction=%.6f)",
+            contract.chunk_size,
+            dimension,
+            len(train_episodes),
+            clip_fraction,
+        )
+        return centers, scales
+
+    def _install_bounded_action_processors(
+        self,
+        policy_cfg: Any,
+        preprocessor: Any,
+        postprocessor: Any,
+    ) -> None:
+        """Replace the inherited relative codec and disable generic action normalization."""
+        if self._bounded_contract is None:
+            return
+        if self._bounded_statistics is None:
+            raise DataIntegrityError("bounded action statistics were not fit before processors")
+
+        from lerobot.configs.types import FeatureType, NormalizationMode
+        from lerobot.processor.normalize_processor import (
+            NormalizerProcessorStep,
+            UnnormalizerProcessorStep,
+        )
+        from lerobot.processor.relative_action_processor import (
+            AbsoluteActionsProcessorStep,
+            RelativeActionsProcessorStep,
+        )
+
+        if policy_cfg.normalization_mapping.get(FeatureType.ACTION) != NormalizationMode.IDENTITY:
+            raise DataIntegrityError(
+                "bounded action processor owns action normalization; set ACTION normalization to IDENTITY"
+            )
+        center, scale = self._bounded_statistics
+        bounded_relative, bounded_absolute = make_processor_steps(
+            self._bounded_contract,
+            center=center,
+            scale=scale,
+        )
+
+        relative_indices = [
+            index
+            for index, step in enumerate(preprocessor.steps)
+            if isinstance(step, RelativeActionsProcessorStep)
+        ]
+        absolute_indices = [
+            index
+            for index, step in enumerate(postprocessor.steps)
+            if isinstance(step, AbsoluteActionsProcessorStep)
+        ]
+        if len(relative_indices) != 1 or len(absolute_indices) != 1:
+            raise DataIntegrityError(
+                "bounded actions require exactly one inherited relative/absolute processor pair"
+            )
+        preprocessor.steps[relative_indices[0]] = bounded_relative
+        postprocessor.steps[absolute_indices[0]] = bounded_absolute
+        for pipeline in (preprocessor, postprocessor):
+            for step in pipeline.steps:
+                if isinstance(step, (NormalizerProcessorStep, UnnormalizerProcessorStep)):
+                    step.norm_map[FeatureType.ACTION] = NormalizationMode.IDENTITY
+        log.info(
+            "[bounded_actions] Installed %s (%s)",
+            self._bounded_contract.representation_id,
+            self._bounded_contract.sha256,
+        )
+
     def apply_metadata_patches(self) -> None:
         """Apply metadata patches before importing lerobot training."""
         for transform in self.active_transforms:
@@ -916,13 +1129,25 @@ class TransformRunner:
         original_getitem = LeRobotDataset.__getitem__
         transforms = self.active_transforms
         config = self.config
+        runner = self
 
-        def patched_getitem(self, idx):
+        def patched_getitem(dataset, idx):
             # Samplers and ordinary DataLoaders both supply relative indices.
-            item = original_getitem(self, idx)
+            item = original_getitem(dataset, idx)
+
+            selected = getattr(dataset, "episodes", None)
+            train_episodes = set(runner._split_info.get("train_episodes", []))
+            if selected is None:
+                is_training_dataset = not train_episodes or train_episodes == set(
+                    range(getattr(dataset, "num_episodes", 0))
+                )
+            else:
+                is_training_dataset = {int(value) for value in selected} == train_episodes
 
             # Apply transforms (no-op when transforms list is empty).
             for transform in transforms:
+                if transform.training_only and not is_training_dataset:
+                    continue
                 item = transform.apply(item, config)
             return item
 
@@ -976,13 +1201,15 @@ class TransformRunner:
             # processor. Native Pi0.5 relative actions use every valid future
             # action in the configured chunk; Anvil's legacy transform retains
             # its existing delta-stat path.
-            _patched_action_stats = val_state._compute_native_relative_action_stats(
-                full_dataset,
-                policy_cfg,
-                num_workers=cfg.num_workers,
-            )
-            if _patched_action_stats is None:
-                _patched_action_stats = val_state._compute_delta_action_stats(full_dataset)
+            _patched_action_stats = None
+            if val_state._bounded_contract is None:
+                _patched_action_stats = val_state._compute_native_relative_action_stats(
+                    full_dataset,
+                    policy_cfg,
+                    num_workers=cfg.num_workers,
+                )
+                if _patched_action_stats is None:
+                    _patched_action_stats = val_state._compute_delta_action_stats(full_dataset)
 
             if not has_holdout:
                 val_state._split_info = {
@@ -992,6 +1219,11 @@ class TransformRunner:
                     "val_episodes": [],
                     "test_episodes": [],
                 }
+                val_state._fit_bounded_action_statistics(
+                    full_dataset,
+                    policy_cfg,
+                    list(range(total_ep)),
+                )
                 log.info("[split] Holdout evaluation disabled; using all %d episodes", total_ep)
                 return full_dataset
 
@@ -1054,6 +1286,7 @@ class TransformRunner:
                     else {}
                 ),
             }
+            val_state._fit_bounded_action_statistics(full_dataset, policy_cfg, train_ep)
 
             def _make_dataloader(dataset):
                 return torch.utils.data.DataLoader(
@@ -1071,6 +1304,7 @@ class TransformRunner:
             if val_ep:
                 cfg.dataset.episodes = val_ep
                 val_dataset = original_make_dataset(cfg)
+                val_dataset.clear_image_transforms()
                 val_state._val_dataloader = _make_dataloader(val_dataset)
                 log.info(
                     "[split] val=%d ep (randomly selected, %d frames)",
@@ -1082,6 +1316,7 @@ class TransformRunner:
             if test_ep:
                 cfg.dataset.episodes = test_ep
                 test_dataset = original_make_dataset(cfg)
+                test_dataset.clear_image_transforms()
                 val_state._test_dataloader = _make_dataloader(test_dataset)
                 log.info(
                     "[split] test=%d ep (randomly selected, %d frames)",
@@ -1134,6 +1369,11 @@ class TransformRunner:
             policy_cfg = kwargs.get("policy_cfg", args[0] if args else None)
             preprocessor, postprocessor = _make_pre_post_processors_with_compat(
                 original_make_processors, *args, **kwargs
+            )
+            val_state._install_bounded_action_processors(
+                policy_cfg,
+                preprocessor,
+                postprocessor,
             )
             if getattr(policy_cfg, "type", None) == "vla_jepa":
                 removed_steps = reconcile_vla_jepa_postprocessor(policy_cfg, postprocessor)
@@ -1197,6 +1437,13 @@ class TransformRunner:
             anvil_cfg_base["note"] = self.config.note
         if self._priority_manifest is not None:
             anvil_cfg_base["priority_sampling"] = self._priority_manifest.provenance()
+        if self._bounded_contract is not None:
+            anvil_cfg_base["bounded_action_representation"] = {
+                "representation_id": self._bounded_contract.representation_id,
+                "contract_sha256": self._bounded_contract.sha256,
+                "camera_dropout_probability": self.config.camera_dropout_probability,
+                "state_noise_std_fraction": self.config.state_noise_std_fraction,
+            }
 
         val_state = self
 
@@ -1286,6 +1533,10 @@ class TransformRunner:
                 if val_state._priority_manifest is not None:
                     (pretrained_dir / "priority_sampling_manifest.json").write_bytes(
                         val_state._priority_manifest.path.read_bytes()
+                    )
+                if val_state._bounded_contract is not None:
+                    (pretrained_dir / "bounded_action_contract.json").write_bytes(
+                        val_state._bounded_contract.path.read_bytes()
                     )
 
                 log.info("[anvil_trainer] Saved configs to %s", pretrained_dir)

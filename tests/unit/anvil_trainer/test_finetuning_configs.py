@@ -4,10 +4,12 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
+import draccus
 import pytest
 import torch
 import yaml
 from lerobot.configs.parser import _flatten_to_cli_args
+from lerobot.transforms.transforms import ImageTransforms, ImageTransformsConfig
 
 from anvil_trainer.patches import (
     _flatten_config_to_cli_args,
@@ -195,6 +197,39 @@ def test_shirt_fold_pi05_configs_differ_only_by_initialization_and_run_identity(
         comparable.append(candidate)
 
     assert comparable[0] == comparable[1]
+
+
+def test_bounded_larchenko_recipe_owns_action_scaling_and_enables_augmentation() -> None:
+    config = yaml.safe_load(
+        (CONFIG_ROOT / "shirt_fold_pi05_hf_bounded_larchenko_v1.yaml").read_text()
+    )
+    policy = config["policy"]
+    assert config["dataset"]["root"].endswith("lerobot-hf-phase-aligned-sarm-v1")
+    assert config["dataset"]["video_backend"] == "torchcodec"
+    assert policy["use_relative_actions"] is False
+    assert policy["relative_exclude_joints"] == []
+    assert policy["action_feature_names"] == SHIRT_FOLD_ACTION_NAMES
+    assert json.loads(policy["normalization_mapping"])["ACTION"] == "IDENTITY"
+    assert config["steps"] == 5000
+    assert config["save_freq"] == 500
+
+    image_config = draccus.decode(
+        ImageTransformsConfig,
+        config["dataset"]["image_transforms"],
+    )
+    transforms = ImageTransforms(image_config)
+    assert image_config.enable is True
+    assert image_config.max_num_transforms == 3
+    assert set(transforms.transforms) == {
+        "brightness",
+        "contrast",
+        "saturation",
+        "hue",
+        "sharpness",
+        "affine",
+        "blur",
+        "cutout",
+    }
 
 
 @pytest.mark.parametrize(

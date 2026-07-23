@@ -51,11 +51,13 @@ def audit_policy_contract(
     state_names = list(dataset_state.get("names") or [])
     checkpoint_names = list(model_config.get("action_feature_names") or [])
     relative_step = _processor_step(preprocessor, "relative_actions_processor")
-    processor_names = list((relative_step or {}).get("config", {}).get("action_names") or [])
+    bounded_step = _processor_step(preprocessor, "bounded_relative_actions_processor")
+    action_step = bounded_step or relative_step
+    processor_names = list((action_step or {}).get("config", {}).get("action_names") or [])
 
     _expect_equal(errors, "dataset action/state names", action_names, state_names)
     _expect_equal(errors, "checkpoint/dataset action names", checkpoint_names, action_names)
-    _expect_equal(errors, "relative processor/dataset action names", processor_names, action_names)
+    _expect_equal(errors, "action processor/dataset action names", processor_names, action_names)
 
     state_dim = _feature_dim(model_config, "input_features", "observation.state")
     action_dim = _feature_dim(model_config, "output_features", "action")
@@ -136,12 +138,21 @@ def audit_policy_contract(
     relative_enabled = bool((relative_step or {}).get("config", {}).get("enabled", False))
     absolute_step = _processor_step(postprocessor, "absolute_actions_processor")
     absolute_enabled = bool((absolute_step or {}).get("config", {}).get("enabled", False))
+    bounded_enabled = bool((bounded_step or {}).get("config", {}).get("enabled", False))
+    bounded_absolute_step = _processor_step(postprocessor, "bounded_absolute_actions_processor")
+    bounded_absolute_enabled = bool(
+        (bounded_absolute_step or {}).get("config", {}).get("enabled", False)
+    )
+    if relative_enabled and bounded_enabled:
+        errors.append("Checkpoint enables both native-relative and bounded action processors")
     if model_config.get("use_relative_actions") and not relative_enabled:
         errors.append(
             "Checkpoint requests relative actions but preprocessor conversion is disabled"
         )
     if relative_enabled and not absolute_enabled:
         errors.append("Relative preprocessor is enabled but absolute postprocessor is disabled")
+    if bounded_enabled and not bounded_absolute_enabled:
+        errors.append("Bounded preprocessor is enabled but bounded postprocessor is disabled")
 
     normalization_contract = anvil_config.get("normalization_contract") or {}
     if model_config.get("use_relative_actions"):
@@ -174,6 +185,52 @@ def audit_policy_contract(
             )
             if int(normalization_contract.get("stats_sample_count") or 0) <= 0:
                 errors.append("Relative-action normalization sample count must be positive")
+    if bounded_enabled:
+        if model_config.get("use_relative_actions"):
+            errors.append("Bounded checkpoints must disable native use_relative_actions")
+        action_normalization = (model_config.get("normalization_mapping") or {}).get("ACTION")
+        if action_normalization not in {None, "IDENTITY"}:
+            errors.append(
+                "Bounded processor owns action scaling; checkpoint ACTION normalization must be IDENTITY"
+            )
+        if not normalization_contract:
+            errors.append("Bounded-action checkpoint is missing its normalization contract")
+        else:
+            _expect_equal(
+                errors,
+                "bounded normalization action space",
+                normalization_contract.get("action_space"),
+                "state_relative_soft_limit_fraction",
+            )
+            _expect_equal(
+                errors,
+                "bounded normalization/checkpoint chunk size",
+                normalization_contract.get("chunk_size"),
+                model_config.get("chunk_size"),
+            )
+            _expect_equal(
+                errors,
+                "bounded processor/normalization contract hash",
+                (bounded_step or {}).get("config", {}).get("contract_sha256"),
+                normalization_contract.get("contract_sha256"),
+            )
+            _expect_equal(
+                errors,
+                "bounded stats source",
+                normalization_contract.get("stats_source"),
+                "frozen_training_episodes_only",
+            )
+            _expect_equal(
+                errors,
+                "bounded split hash",
+                (bounded_step or {}).get("config", {}).get("split_sha256"),
+                normalization_contract.get("split_sha256"),
+            )
+            counts = normalization_contract.get("horizon_sample_counts") or []
+            if len(counts) != int(model_config.get("chunk_size") or 0) or any(
+                int(count) <= 0 for count in counts
+            ):
+                errors.append("Bounded horizon sample counts must be positive at every step")
 
     conversion_order = conversion.get("robot_order")
     if conversion_order:
@@ -212,6 +269,15 @@ def audit_policy_contract(
                 "postprocessor_enabled": absolute_enabled,
                 "exclude_joints": (relative_step or {}).get("config", {}).get("exclude_joints", []),
                 "normalization_contract": normalization_contract,
+            },
+            "bounded_actions": {
+                "preprocessor_enabled": bounded_enabled,
+                "postprocessor_enabled": bounded_absolute_enabled,
+                "representation_id": (bounded_step or {})
+                .get("config", {})
+                .get("representation_id"),
+                "contract_sha256": (bounded_step or {}).get("config", {}).get("contract_sha256"),
+                "normalization_contract": normalization_contract if bounded_enabled else {},
             },
             "scheduler": {
                 "chunk_size": model_config.get("chunk_size"),

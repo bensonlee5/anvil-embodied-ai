@@ -4,6 +4,7 @@ Each ``Transform`` subclass is enabled by a field on ``TrainingConfig`` and
 runs once per loaded sample.  Transforms can also optionally patch lerobot
 metadata before training starts — see ``patch_metadata``.
 """
+
 from __future__ import annotations
 
 import json
@@ -12,6 +13,9 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
+import torch
+
+from anvil_trainer.bounded_actions import BoundedActionContract
 from anvil_trainer.config import TrainingConfig
 
 log = logging.getLogger(__name__)
@@ -69,6 +73,79 @@ class Transform(ABC):
         when the :func:`patched_lerobot` context manager exits.
         """
 
+    @property
+    def training_only(self) -> bool:
+        """Whether this transform must be skipped for validation and test."""
+        return False
+
+
+class BoundedRobustnessTransform(Transform):
+    """Larchenko-style train-only camera dropout and bounded state noise.
+
+    Ordinary photometric/geometric augmentation remains LeRobot's responsibility;
+    its dataset reader samples those transforms independently for each camera.
+    This transform adds the two multi-input operations LeRobot cannot express:
+    dropping cameras while guaranteeing at least one view and perturbing state
+    inside the same buffered physical bounds used by the action codec.
+    """
+
+    def __init__(self, config: TrainingConfig):
+        self.contract = (
+            BoundedActionContract.load(config.bounded_action_contract)
+            if config.bounded_action_contract
+            else None
+        )
+
+    @property
+    def name(self) -> str:
+        return "bounded_robustness"
+
+    @property
+    def training_only(self) -> bool:
+        return True
+
+    def is_enabled(self, config: TrainingConfig) -> bool:
+        return bool(config.camera_dropout_probability > 0 or config.state_noise_std_fraction > 0)
+
+    def apply(self, item: dict[str, Any], config: TrainingConfig) -> dict[str, Any]:
+        camera_keys = sorted(key for key in item if key.startswith("observation.images."))
+        probability = config.camera_dropout_probability
+        if camera_keys and probability > 0:
+            drop = torch.rand(len(camera_keys)) < probability
+            if bool(drop.all()):
+                drop[int(torch.randint(len(camera_keys), (1,)).item())] = False
+            for key, should_drop in zip(camera_keys, drop.tolist(), strict=True):
+                if should_drop:
+                    item[key] = torch.zeros_like(item[key])
+
+        if config.state_noise_std_fraction > 0:
+            if self.contract is None:
+                raise DataIntegrityError(
+                    "state noise requires --bounded-action-contract for physical ranges"
+                )
+            state = item.get("observation.state")
+            if state is not None:
+                lower = torch.as_tensor(
+                    self.contract.soft_lower, dtype=state.dtype, device=state.device
+                )
+                upper = torch.as_tensor(
+                    self.contract.soft_upper, dtype=state.dtype, device=state.device
+                )
+                if state.shape[-1] != len(lower):
+                    raise DataIntegrityError(
+                        "bounded state-noise contract does not match observation.state"
+                    )
+                arm = list(self.contract.arm_indices)
+                perturbed = state.clone()
+                sigma = (upper[arm] - lower[arm]) * config.state_noise_std_fraction
+                perturbed[..., arm] = (
+                    state[..., arm] + torch.randn_like(state[..., arm]) * sigma
+                ).clamp(lower[arm], upper[arm])
+                # Gripper state is an observation, not the absolute command endpoint;
+                # changing/clamping it here would corrupt the HF gripper semantics.
+                item["observation.state"] = perturbed
+        return item
+
 
 # =============================================================================
 # ExcludeObservationTransform
@@ -111,7 +188,7 @@ class ExcludeObservationTransform(Transform):
         targets: list[tuple[Any, Any]] = []
         for module_name in (
             "lerobot.datasets.feature_utils",  # LeRobot <=0.5
-            "lerobot.policies.factory",        # LeRobot 0.6+
+            "lerobot.policies.factory",  # LeRobot 0.6+
         ):
             try:
                 module = import_module(module_name)
@@ -231,13 +308,15 @@ class DeltaActionTransform(Transform):
         state_names = self._parse_names(info, "observation.state")
 
         # Resolve exclude indices from action names
-        for joint in (config.delta_exclude_joints or []):
+        for joint in config.delta_exclude_joints or []:
             if joint in action_names:
                 idx = action_names.index(joint)
                 self._exclude_indices.append(idx)
                 log.info("[delta_actions] Excluding joint '%s' (index %d) from delta", joint, idx)
             else:
-                log.warning("[delta_actions] Joint '%s' not found in action names %s", joint, action_names)
+                log.warning(
+                    "[delta_actions] Joint '%s' not found in action names %s", joint, action_names
+                )
 
         if not action_names or not state_names:
             return  # names missing from info.json — positional fallback
@@ -258,9 +337,7 @@ class DeltaActionTransform(Transform):
 
         # Build action_idx → state_idx mapping (excluded joints map to -1)
         state_index = {n: i for i, n in enumerate(state_names)}
-        self._action_to_state_map = [
-            state_index.get(n, -1) for n in action_names
-        ]
+        self._action_to_state_map = [state_index.get(n, -1) for n in action_names]
 
     def _resolve_exclude_indices(self, config: TrainingConfig) -> list[int]:
         """Return cached exclude indices (used by TransformRunner stats computation)."""

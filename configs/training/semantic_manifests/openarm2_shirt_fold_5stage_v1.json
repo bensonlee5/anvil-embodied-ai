@@ -1,0 +1,2816 @@
+{
+  "schema_version": "openarm2.shirt-fold-semantic-segmentation.v1",
+  "description": "Five-stage semantic segmentation proposals for the 33 trimmed successful OpenARM2 shirt-fold demonstrations. Optional recentering and refinement are separated from fold motions; the three frozen v2 outcome-quality observations remain distinct from motion-stage labels.",
+  "dataset": {
+    "repo_id": "bohlt/openarm2-shirt-fold-phase-aligned-v1",
+    "revision": "8411e3e85eaf3e482b4ccb1cac9d4fc02891305e",
+    "episodes": 33,
+    "frames": 34850,
+    "fps": 30,
+    "fingerprints": {
+      "meta/info.json": "6022ac2f297aa46503934b3710be54004db78c93a1c3892e8382a1e24d590285",
+      "data/chunk-000/file-000.parquet": "2d8a6e2a851df08c4a4d1173d89b07aeefd886ee38c3505644a233c39453d867",
+      "meta/trim_manifest.json": "97019524cda0d85347979b00db56c6e19e26b0d962e1a17fee35c22832a0821f"
+    }
+  },
+  "stage_order": [
+    "side_one",
+    "recenter_pull",
+    "side_two",
+    "strip_refinement",
+    "bottom_to_top"
+  ],
+  "optional_stages": [
+    "recenter_pull",
+    "strip_refinement"
+  ],
+  "outcome_order": [
+    "side_one",
+    "side_two",
+    "bottom_to_top"
+  ],
+  "generation_contract": {
+    "status": "proposed_for_human_review",
+    "action_feature": "action",
+    "right_gripper_index": 7,
+    "left_gripper_index": 15,
+    "gripper_closed_threshold": 0.02,
+    "minimum_bimanual_run_frames": 5,
+    "bridge_open_gap_frames": 6,
+    "recenter_detection": {
+      "split_rule": "midpoint_of_largest_stable_dual-release_gap",
+      "first_run_start_fraction_max": 0.25,
+      "first_group_end_fraction_max": 0.55,
+      "fold_run_start_fraction_min": 0.45
+    },
+    "refinement_detection": {
+      "rule": "75pct_of_final_bimanual_cycle_to_old_side_two_end",
+      "fold_cycle_fraction": 0.75,
+      "requires_human_review": true
+    },
+    "absent_stage_encoding": "zero_length_half_open_interval",
+    "quality_contract": "Outcome quality remains attached to three observation frames and must not be interpreted as quality of recenter_pull, side_two motion, or strip_refinement in isolation."
+  },
+  "provenance": {
+    "source_manifest": "configs/training/priority_manifests/openarm2_shirt_fold_3stage_v2.json",
+    "source_manifest_sha256": "ab0f67fbf0f944cfd7a7e59cbfe15bbc5f6e380144746f06eac4b2333b016424",
+    "action_data": "datasets/shirt-fold/lerobot-hf-phase-aligned/data/chunk-000/file-000.parquet",
+    "action_data_sha256": "2d8a6e2a851df08c4a4d1173d89b07aeefd886ee38c3505644a233c39453d867"
+  },
+  "episodes": [
+    {
+      "episode_index": 0,
+      "frame_count": 892,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 132,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 132,
+          "end_frame": 346,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 346,
+          "end_frame": 577,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 577,
+          "end_frame": 681,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 681,
+          "end_frame": 892,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 131,
+          "observed_after_stage": "side_one",
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 680,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 891,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 167,
+            "end_frame": 259
+          },
+          {
+            "start_frame": 433,
+            "end_frame": 465
+          },
+          {
+            "start_frame": 487,
+            "end_frame": 503
+          },
+          {
+            "start_frame": 523,
+            "end_frame": 625
+          }
+        ],
+        "recenter_gap_frames": 174
+      }
+    },
+    {
+      "episode_index": 1,
+      "frame_count": 1194,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 269,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 269,
+          "end_frame": 525,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 525,
+          "end_frame": 821,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 821,
+          "end_frame": 961,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 961,
+          "end_frame": 1194,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 268,
+          "observed_after_stage": "side_one",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 960,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1193,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 333,
+            "end_frame": 444
+          },
+          {
+            "start_frame": 606,
+            "end_frame": 732
+          },
+          {
+            "start_frame": 795,
+            "end_frame": 893
+          }
+        ],
+        "recenter_gap_frames": 162
+      }
+    },
+    {
+      "episode_index": 2,
+      "frame_count": 833,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 166,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": false,
+          "start_frame": 166,
+          "end_frame": 166,
+          "segmentation_confidence": "medium",
+          "boundary_source": "no_separated_early_bimanual_cycle"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 166,
+          "end_frame": 389,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 389,
+          "end_frame": 522,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 522,
+          "end_frame": 833,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 165,
+          "observed_after_stage": "side_one",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 521,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 832,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 268,
+            "end_frame": 429
+          }
+        ],
+        "recenter_gap_frames": null
+      }
+    },
+    {
+      "episode_index": 3,
+      "frame_count": 1215,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 241,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 241,
+          "end_frame": 565,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 565,
+          "end_frame": 766,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 766,
+          "end_frame": 903,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 903,
+          "end_frame": 1215,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 240,
+          "observed_after_stage": "side_one",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 902,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1214,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 328,
+            "end_frame": 355
+          },
+          {
+            "start_frame": 372,
+            "end_frame": 474
+          },
+          {
+            "start_frame": 655,
+            "end_frame": 803
+          }
+        ],
+        "recenter_gap_frames": 181
+      }
+    },
+    {
+      "episode_index": 4,
+      "frame_count": 1105,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 176,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 176,
+          "end_frame": 408,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 408,
+          "end_frame": 628,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 628,
+          "end_frame": 726,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 726,
+          "end_frame": 1105,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 175,
+          "observed_after_stage": "side_one",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 725,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1104,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 206,
+            "end_frame": 340
+          },
+          {
+            "start_frame": 476,
+            "end_frame": 505
+          },
+          {
+            "start_frame": 550,
+            "end_frame": 679
+          }
+        ],
+        "recenter_gap_frames": 136
+      }
+    },
+    {
+      "episode_index": 5,
+      "frame_count": 1241,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 235,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": false,
+          "start_frame": 235,
+          "end_frame": 235,
+          "segmentation_confidence": "medium",
+          "boundary_source": "no_separated_early_bimanual_cycle"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 235,
+          "end_frame": 501,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 501,
+          "end_frame": 652,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 652,
+          "end_frame": 1241,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 234,
+          "observed_after_stage": "side_one",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 651,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1240,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 296,
+            "end_frame": 569
+          }
+        ],
+        "recenter_gap_frames": null
+      }
+    },
+    {
+      "episode_index": 6,
+      "frame_count": 1046,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 157,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 157,
+          "end_frame": 401,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 401,
+          "end_frame": 595,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 595,
+          "end_frame": 696,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 696,
+          "end_frame": 1046,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 156,
+          "observed_after_stage": "side_one",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 695,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1045,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 178,
+            "end_frame": 334
+          },
+          {
+            "start_frame": 467,
+            "end_frame": 493
+          },
+          {
+            "start_frame": 506,
+            "end_frame": 637
+          }
+        ],
+        "recenter_gap_frames": 133
+      }
+    },
+    {
+      "episode_index": 7,
+      "frame_count": 1022,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 138,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 138,
+          "end_frame": 402,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 402,
+          "end_frame": 596,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 596,
+          "end_frame": 721,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 721,
+          "end_frame": 1022,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 137,
+          "observed_after_stage": "side_one",
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 720,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1021,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 166,
+            "end_frame": 319
+          },
+          {
+            "start_frame": 484,
+            "end_frame": 495
+          },
+          {
+            "start_frame": 508,
+            "end_frame": 633
+          }
+        ],
+        "recenter_gap_frames": 165
+      }
+    },
+    {
+      "episode_index": 8,
+      "frame_count": 1026,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 179,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 179,
+          "end_frame": 455,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 455,
+          "end_frame": 616,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 616,
+          "end_frame": 712,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 712,
+          "end_frame": 1026,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 178,
+          "observed_after_stage": "side_one",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 711,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1025,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 200,
+            "end_frame": 381
+          },
+          {
+            "start_frame": 530,
+            "end_frame": 645
+          }
+        ],
+        "recenter_gap_frames": 149
+      }
+    },
+    {
+      "episode_index": 9,
+      "frame_count": 1298,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 157,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 157,
+          "end_frame": 534,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 534,
+          "end_frame": 689,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 689,
+          "end_frame": 796,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 796,
+          "end_frame": 1298,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 156,
+          "observed_after_stage": "side_one",
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 795,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1297,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 193,
+            "end_frame": 208
+          },
+          {
+            "start_frame": 234,
+            "end_frame": 483
+          },
+          {
+            "start_frame": 585,
+            "end_frame": 723
+          }
+        ],
+        "recenter_gap_frames": 102
+      }
+    },
+    {
+      "episode_index": 10,
+      "frame_count": 1032,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 172,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": false,
+          "start_frame": 172,
+          "end_frame": 172,
+          "segmentation_confidence": "medium",
+          "boundary_source": "no_separated_early_bimanual_cycle"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 172,
+          "end_frame": 536,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 536,
+          "end_frame": 669,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 669,
+          "end_frame": 1032,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 171,
+          "observed_after_stage": "side_one",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 668,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1031,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 401,
+            "end_frame": 517
+          },
+          {
+            "start_frame": 538,
+            "end_frame": 581
+          }
+        ],
+        "recenter_gap_frames": null
+      }
+    },
+    {
+      "episode_index": 11,
+      "frame_count": 875,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 169,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 169,
+          "end_frame": 393,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 393,
+          "end_frame": 522,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 522,
+          "end_frame": 631,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 631,
+          "end_frame": 875,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 168,
+          "observed_after_stage": "side_one",
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 630,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 874,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 215,
+            "end_frame": 361
+          },
+          {
+            "start_frame": 425,
+            "end_frame": 466
+          },
+          {
+            "start_frame": 486,
+            "end_frame": 554
+          }
+        ],
+        "recenter_gap_frames": 64
+      }
+    },
+    {
+      "episode_index": 12,
+      "frame_count": 936,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 199,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 199,
+          "end_frame": 435,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 435,
+          "end_frame": 602,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 602,
+          "end_frame": 682,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 682,
+          "end_frame": 936,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 198,
+          "observed_after_stage": "side_one",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 681,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 935,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 226,
+            "end_frame": 395
+          },
+          {
+            "start_frame": 475,
+            "end_frame": 644
+          }
+        ],
+        "recenter_gap_frames": 80
+      }
+    },
+    {
+      "episode_index": 13,
+      "frame_count": 1160,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 249,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 249,
+          "end_frame": 546,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 546,
+          "end_frame": 693,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 693,
+          "end_frame": 766,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 766,
+          "end_frame": 1160,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 248,
+          "observed_after_stage": "side_one",
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 765,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1159,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 265,
+            "end_frame": 480
+          },
+          {
+            "start_frame": 612,
+            "end_frame": 720
+          }
+        ],
+        "recenter_gap_frames": 132
+      }
+    },
+    {
+      "episode_index": 14,
+      "frame_count": 909,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 153,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 153,
+          "end_frame": 416,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 416,
+          "end_frame": 581,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 581,
+          "end_frame": 682,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 682,
+          "end_frame": 909,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 152,
+          "observed_after_stage": "side_one",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 681,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 908,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 172,
+            "end_frame": 352
+          },
+          {
+            "start_frame": 480,
+            "end_frame": 487
+          },
+          {
+            "start_frame": 505,
+            "end_frame": 614
+          }
+        ],
+        "recenter_gap_frames": 128
+      }
+    },
+    {
+      "episode_index": 15,
+      "frame_count": 900,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 181,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 181,
+          "end_frame": 399,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 399,
+          "end_frame": 527,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 527,
+          "end_frame": 645,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 645,
+          "end_frame": 900,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 180,
+          "observed_after_stage": "side_one",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 644,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 899,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 203,
+            "end_frame": 337
+          },
+          {
+            "start_frame": 460,
+            "end_frame": 550
+          }
+        ],
+        "recenter_gap_frames": 123
+      }
+    },
+    {
+      "episode_index": 16,
+      "frame_count": 1061,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 262,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 262,
+          "end_frame": 536,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 536,
+          "end_frame": 712,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 712,
+          "end_frame": 798,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 798,
+          "end_frame": 1061,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 261,
+          "observed_after_stage": "side_one",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 797,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1060,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 289,
+            "end_frame": 456
+          },
+          {
+            "start_frame": 617,
+            "end_frame": 743
+          }
+        ],
+        "recenter_gap_frames": 161
+      }
+    },
+    {
+      "episode_index": 17,
+      "frame_count": 1197,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 304,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 304,
+          "end_frame": 560,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 560,
+          "end_frame": 829,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 829,
+          "end_frame": 948,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 948,
+          "end_frame": 1197,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 303,
+          "observed_after_stage": "side_one",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 947,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1196,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 324,
+            "end_frame": 472
+          },
+          {
+            "start_frame": 649,
+            "end_frame": 751
+          },
+          {
+            "start_frame": 762,
+            "end_frame": 781
+          },
+          {
+            "start_frame": 837,
+            "end_frame": 889
+          }
+        ],
+        "recenter_gap_frames": 177
+      }
+    },
+    {
+      "episode_index": 18,
+      "frame_count": 1020,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 204,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 204,
+          "end_frame": 464,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 464,
+          "end_frame": 628,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 628,
+          "end_frame": 704,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 704,
+          "end_frame": 1020,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 203,
+          "observed_after_stage": "side_one",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 703,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1019,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 222,
+            "end_frame": 402
+          },
+          {
+            "start_frame": 525,
+            "end_frame": 662
+          }
+        ],
+        "recenter_gap_frames": 123
+      }
+    },
+    {
+      "episode_index": 19,
+      "frame_count": 1082,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 244,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 244,
+          "end_frame": 522,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 522,
+          "end_frame": 677,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 677,
+          "end_frame": 799,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 799,
+          "end_frame": 1082,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 243,
+          "observed_after_stage": "side_one",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 798,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1081,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 256,
+            "end_frame": 466
+          },
+          {
+            "start_frame": 578,
+            "end_frame": 710
+          }
+        ],
+        "recenter_gap_frames": 112
+      }
+    },
+    {
+      "episode_index": 20,
+      "frame_count": 973,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 202,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": false,
+          "start_frame": 202,
+          "end_frame": 202,
+          "segmentation_confidence": "medium",
+          "boundary_source": "no_separated_early_bimanual_cycle"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 202,
+          "end_frame": 404,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 404,
+          "end_frame": 462,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 462,
+          "end_frame": 973,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 201,
+          "observed_after_stage": "side_one",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 461,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 972,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 312,
+            "end_frame": 435
+          }
+        ],
+        "recenter_gap_frames": null
+      }
+    },
+    {
+      "episode_index": 21,
+      "frame_count": 1095,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 272,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 272,
+          "end_frame": 560,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 560,
+          "end_frame": 728,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 728,
+          "end_frame": 829,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 829,
+          "end_frame": 1095,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 271,
+          "observed_after_stage": "side_one",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 828,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1094,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 330,
+            "end_frame": 499
+          },
+          {
+            "start_frame": 620,
+            "end_frame": 764
+          }
+        ],
+        "recenter_gap_frames": 121
+      }
+    },
+    {
+      "episode_index": 22,
+      "frame_count": 963,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 247,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": false,
+          "start_frame": 247,
+          "end_frame": 247,
+          "segmentation_confidence": "medium",
+          "boundary_source": "no_separated_early_bimanual_cycle"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 247,
+          "end_frame": 486,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 486,
+          "end_frame": 571,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 571,
+          "end_frame": 963,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 246,
+          "observed_after_stage": "side_one",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 570,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 962,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 421,
+            "end_frame": 508
+          }
+        ],
+        "recenter_gap_frames": null
+      }
+    },
+    {
+      "episode_index": 23,
+      "frame_count": 1255,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 249,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 249,
+          "end_frame": 605,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 605,
+          "end_frame": 797,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 797,
+          "end_frame": 893,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 893,
+          "end_frame": 1255,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 248,
+          "observed_after_stage": "side_one",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 892,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1254,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 375,
+            "end_frame": 534
+          },
+          {
+            "start_frame": 675,
+            "end_frame": 715
+          },
+          {
+            "start_frame": 735,
+            "end_frame": 838
+          }
+        ],
+        "recenter_gap_frames": 141
+      }
+    },
+    {
+      "episode_index": 24,
+      "frame_count": 991,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 248,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 248,
+          "end_frame": 506,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 506,
+          "end_frame": 656,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 656,
+          "end_frame": 753,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 753,
+          "end_frame": 991,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 247,
+          "observed_after_stage": "side_one",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 752,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 990,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 269,
+            "end_frame": 456
+          },
+          {
+            "start_frame": 556,
+            "end_frame": 689
+          }
+        ],
+        "recenter_gap_frames": 100
+      }
+    },
+    {
+      "episode_index": 25,
+      "frame_count": 1255,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 296,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 296,
+          "end_frame": 594,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 594,
+          "end_frame": 775,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 775,
+          "end_frame": 894,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 894,
+          "end_frame": 1255,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 295,
+          "observed_after_stage": "side_one",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 893,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1254,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 329,
+            "end_frame": 541
+          },
+          {
+            "start_frame": 646,
+            "end_frame": 674
+          },
+          {
+            "start_frame": 692,
+            "end_frame": 818
+          }
+        ],
+        "recenter_gap_frames": 105
+      }
+    },
+    {
+      "episode_index": 26,
+      "frame_count": 910,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 191,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 191,
+          "end_frame": 415,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 415,
+          "end_frame": 549,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 549,
+          "end_frame": 654,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 654,
+          "end_frame": 910,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 190,
+          "observed_after_stage": "side_one",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 653,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 909,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 210,
+            "end_frame": 357
+          },
+          {
+            "start_frame": 473,
+            "end_frame": 575
+          }
+        ],
+        "recenter_gap_frames": 116
+      }
+    },
+    {
+      "episode_index": 27,
+      "frame_count": 1017,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 239,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": false,
+          "start_frame": 239,
+          "end_frame": 239,
+          "segmentation_confidence": "medium",
+          "boundary_source": "no_separated_early_bimanual_cycle"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 239,
+          "end_frame": 543,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 543,
+          "end_frame": 628,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 628,
+          "end_frame": 1017,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 238,
+          "observed_after_stage": "side_one",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 627,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1016,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 410,
+            "end_frame": 428
+          },
+          {
+            "start_frame": 447,
+            "end_frame": 587
+          }
+        ],
+        "recenter_gap_frames": null
+      }
+    },
+    {
+      "episode_index": 28,
+      "frame_count": 1112,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 276,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 276,
+          "end_frame": 498,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 498,
+          "end_frame": 705,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 705,
+          "end_frame": 866,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 866,
+          "end_frame": 1112,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 275,
+          "observed_after_stage": "side_one",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 865,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1111,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 302,
+            "end_frame": 430
+          },
+          {
+            "start_frame": 566,
+            "end_frame": 628
+          },
+          {
+            "start_frame": 651,
+            "end_frame": 751
+          }
+        ],
+        "recenter_gap_frames": 136
+      }
+    },
+    {
+      "episode_index": 29,
+      "frame_count": 1010,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 246,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 246,
+          "end_frame": 478,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 478,
+          "end_frame": 642,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 642,
+          "end_frame": 708,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 708,
+          "end_frame": 1010,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 245,
+          "observed_after_stage": "side_one",
+          "quality_score": 2,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 707,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1009,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 272,
+            "end_frame": 396
+          },
+          {
+            "start_frame": 559,
+            "end_frame": 670
+          }
+        ],
+        "recenter_gap_frames": 163
+      }
+    },
+    {
+      "episode_index": 30,
+      "frame_count": 1124,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 273,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 273,
+          "end_frame": 555,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 555,
+          "end_frame": 718,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 718,
+          "end_frame": 797,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 797,
+          "end_frame": 1124,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 272,
+          "observed_after_stage": "side_one",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 796,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1123,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 337,
+            "end_frame": 492
+          },
+          {
+            "start_frame": 618,
+            "end_frame": 751
+          }
+        ],
+        "recenter_gap_frames": 126
+      }
+    },
+    {
+      "episode_index": 31,
+      "frame_count": 1003,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 228,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 228,
+          "end_frame": 463,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 463,
+          "end_frame": 623,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 623,
+          "end_frame": 687,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 687,
+          "end_frame": 1003,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 227,
+          "observed_after_stage": "side_one",
+          "quality_score": 5,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 686,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 3,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1002,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 260,
+            "end_frame": 414
+          },
+          {
+            "start_frame": 512,
+            "end_frame": 660
+          }
+        ],
+        "recenter_gap_frames": 98
+      }
+    },
+    {
+      "episode_index": 32,
+      "frame_count": 1098,
+      "stages": [
+        {
+          "name": "side_one",
+          "present": true,
+          "start_frame": 0,
+          "end_frame": 303,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        },
+        {
+          "name": "recenter_pull",
+          "present": true,
+          "start_frame": 303,
+          "end_frame": 571,
+          "segmentation_confidence": "high",
+          "boundary_source": "largest_stable_dual-release_gap"
+        },
+        {
+          "name": "side_two",
+          "present": true,
+          "start_frame": 571,
+          "end_frame": 777,
+          "segmentation_confidence": "medium",
+          "boundary_source": "between_recenter_and_refinement_proposals"
+        },
+        {
+          "name": "strip_refinement",
+          "present": true,
+          "start_frame": 777,
+          "end_frame": 841,
+          "segmentation_confidence": "low",
+          "boundary_source": "kinematic_proposal_at_75pct_of_final_bimanual_cycle"
+        },
+        {
+          "name": "bottom_to_top",
+          "present": true,
+          "start_frame": 841,
+          "end_frame": 1098,
+          "segmentation_confidence": "high",
+          "boundary_source": "frozen_three_stage_v2_boundary"
+        }
+      ],
+      "outcomes": [
+        {
+          "name": "side_one",
+          "observation_frame": 302,
+          "observed_after_stage": "side_one",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "side_two",
+          "observation_frame": 840,
+          "observed_after_stage": "strip_refinement",
+          "quality_score": 4,
+          "quality_confidence": "medium"
+        },
+        {
+          "name": "bottom_to_top",
+          "observation_frame": 1097,
+          "observed_after_stage": "bottom_to_top",
+          "quality_score": 1,
+          "quality_confidence": "medium"
+        }
+      ],
+      "boundary_evidence": {
+        "bimanual_closed_runs": [
+          {
+            "start_frame": 371,
+            "end_frame": 514
+          },
+          {
+            "start_frame": 628,
+            "end_frame": 712
+          },
+          {
+            "start_frame": 782,
+            "end_frame": 826
+          }
+        ],
+        "recenter_gap_frames": 114
+      }
+    }
+  ]
+}

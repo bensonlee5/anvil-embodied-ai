@@ -32,8 +32,9 @@ The trim is reproducible from
 `lerobot-hf-phase-aligned.trim-plan.json`; generated datasets and adapter
 caches remain local or in artifact storage and are not committed to Git.
 Do not concatenate the Hugging Face OpenArm Mini demonstrations with the Anvil
-episodes. Their left-first ordering, degree units, and different link geometry
-make them a reference dataset, not compatible training rows.
+episodes. The pinned HF checkpoint is also right-first, but its degree units,
+OpenArm-v1 link geometry, gripper range, and processor statistics still make
+those rows incompatible with the Anvil target processor.
 
 Trimming removes the homing/setup phase and final idle phase. Consequently,
 inference must begin near a demonstrated `start_state` from
@@ -381,10 +382,60 @@ step policy run is allowed only after its full-frame progress artifact passes
 the same episode-isolation, finiteness, monotonicity, quality-stratification,
 and train-only RA-BC audits as the SARM arm.
 
+## Bounded Larchenko-derived target recipe
+
+`configs/training/shirt_fold_pi05_hf_bounded_larchenko_v1.yaml` is the next
+existing-data candidate. It preserves the exact 33-session trim, seed-1000
+27/3/3 split, v2 quality sampler, and released SARM RA-BC signal. Its changes
+are deliberately limited to representation and robustness:
+
+- Each arm target is encoded as a signed fraction of the remaining motion from
+  the current state to a 0.005-rad-buffered joint endpoint. Decoding clamps the
+  fraction before reconstruction, so every finite prediction is inside the
+  soft position bounds by construction.
+- Grippers remain absolute transitions and are mapped only between the frozen
+  `[-0.003, 0.050]` rad command endpoints. They are not subtracted from state.
+- Robust arm centers/scales are fit separately for every actuator and each of
+  the 30 horizon positions, using only the 27 training episodes. The fit fails
+  if the resolved split differs from the versioned contract.
+- Photometric/geometric transforms are sampled independently for each camera.
+  Camera dropout never removes all three views, and state noise is clamped to
+  the same physical bounds. Validation and test receive none of these
+  augmentations.
+
+The representation authority is
+`configs/training/action_contracts/openarm2_shirt_fold_bounded_v1.json`. It
+pins the right-first names, corrected Anvil OpenArm 2 limits, gripper endpoints,
+split hash, fit episodes, smoothing kernel, scale floor, and clipping policy.
+OpenRAL is not an input to this contract.
+
+Run locally with:
+
+```bash
+uv run anvil-trainer \
+  --config_path=configs/training/shirt_fold_pi05_hf_bounded_larchenko_v1.yaml \
+  --bounded-action-contract=configs/training/action_contracts/openarm2_shirt_fold_bounded_v1.json \
+  --priority-sampling-manifest=configs/training/priority_manifests/openarm2_shirt_fold_3stage_v2.json \
+  --camera-dropout-probability=0.10 \
+  --state-noise-std-fraction=0.002 \
+  --task-description="Fold the T-shirt properly" \
+  --action-type=absolute \
+  --split-ratio=8,1,1
+```
+
+The saved processor JSON contains the full fitted horizon statistics and the
+contract/split hashes. `anvil_config.json` records the same hashes and fit
+provenance, and every checkpoint copies `bounded_action_contract.json` for
+standalone inference and audit. This representation is a model-output guard,
+not a replacement for velocity, acceleration, collision, stale-observation,
+or hardware safety enforcement.
+
 ## Deployment preflight
 
-Use the shadow inference config before enabling commands. The shirt-fold live
-and shadow configs deliberately apply no local absolute or delta action limiter;
-the only requested enforcement is the downstream `anvil-loader` safety layer.
-Stage the arms near a demonstrated trimmed start pose and verify radians,
-right-first ordering, camera routing, and processor metadata before live motion.
+Use the shadow inference config before enabling commands. A bounded checkpoint
+provides its own position-safe decoding; older checkpoints do not. In both
+cases the downstream `anvil-loader` safety layer remains authoritative for
+velocity, acceleration, timing, and hardware enforcement. Stage the arms near
+a demonstrated trimmed start pose and verify radians, right-first ordering,
+camera routing, processor metadata, and the bounded contract hash before live
+motion.

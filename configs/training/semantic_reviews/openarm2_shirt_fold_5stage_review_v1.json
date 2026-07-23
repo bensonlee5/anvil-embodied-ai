@@ -1,0 +1,40 @@
+{
+  "schema_version": "openarm2.shirt-fold-semantic-review.v1",
+  "description": "Complete agent visual/kinematic review of the five-stage proposal for a reward-model screen. This is not a human ground-truth claim; low-confidence refinement boundaries remain an explicit audit risk.",
+  "semantic_manifest_sha256": "5b476d9cb72363093da636c032fc2a32db945bfbe37c86e04e2d0bbc71fcf768",
+  "reviewed_at_utc": "2026-07-23T01:34:35Z",
+  "reviewer": "codex_visual_kinematic_review",
+  "review_method": {
+    "camera_views": [
+      "observation.images.base",
+      "observation.images.left_wrist",
+      "observation.images.right_wrist"
+    ],
+    "episode_coverage": "all_33_trimmed_episodes",
+    "temporal_samples_per_old_side_two_interval": 7,
+    "sample_fractions": [0.0, 0.15, 0.3, 0.45, 0.6, 0.8, 0.98],
+    "kinematic_evidence": "right_and_left_gripper_closed_cycles_from_pinned_action_parquet"
+  },
+  "reviewed_episode_ids": [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+    11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+    21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+    31, 32
+  ],
+  "decisions": {
+    "side_one": "accept_frozen_three_stage_boundary",
+    "recenter_pull": "accept_presence_and_mid_release_gap_boundary_for_reward_screen",
+    "side_two": "accept_interval_between_recenter_and_refinement_proposals",
+    "strip_refinement": "accept_as_provisional_distinct_late_manipulation_phase",
+    "bottom_to_top": "accept_frozen_three_stage_boundary"
+  },
+  "optional_stage_audit": {
+    "recenter_pull_absent_episode_ids": [2, 5, 10, 20, 22, 27],
+    "strip_refinement_absent_episode_ids": []
+  },
+  "gate": {
+    "status": "pass_for_reward_model_screen_only",
+    "policy_training_requires_dense_progress_audit": true,
+    "known_risk": "strip_refinement_start_is_a_low_confidence_kinematic_proposal_and_must_not_be_presented_as_human_ground_truth"
+  }
+}

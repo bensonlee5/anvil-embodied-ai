@@ -24,6 +24,27 @@ def _processor_device_overrides(config_path: Path, device: str) -> dict[str, dic
     return {}
 
 
+def _register_checkpoint_processor_extensions(*config_paths: Path) -> None:
+    """Import Anvil processor classes only when a checkpoint declares them."""
+    registry_names = {
+        step.get("registry_name")
+        for path in config_paths
+        for step in json.loads(path.read_text()).get("steps", [])
+    }
+    bounded = {
+        "bounded_relative_actions_processor",
+        "bounded_absolute_actions_processor",
+    }
+    if registry_names & bounded:
+        try:
+            import anvil_trainer.bounded_actions  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "Checkpoint uses Anvil's bounded action representation but "
+                "anvil_trainer.bounded_actions is not installed"
+            ) from exc
+
+
 def set_deterministic_mode(seed: int = 42):
     """
     Set PyTorch to deterministic mode for reproducible inference.
@@ -351,18 +372,15 @@ class ModelLoader:
             post_config = self.model_path / "policy_postprocessor.json"
 
             if pre_config.exists() and post_config.exists():
+                _register_checkpoint_processor_extensions(pre_config, post_config)
                 # Device is an execution-time choice, not checkpoint semantics.
                 # Override only the serialized device steps so the saved
                 # normalization and every other processor remain authoritative.
                 pre_processor, post_processor = make_pre_post_processors(
                     model.config,
                     pretrained_path=str(self.model_path),
-                    preprocessor_overrides=_processor_device_overrides(
-                        pre_config, self.device
-                    ),
-                    postprocessor_overrides=_processor_device_overrides(
-                        post_config, self.device
-                    ),
+                    preprocessor_overrides=_processor_device_overrides(pre_config, self.device),
+                    postprocessor_overrides=_processor_device_overrides(post_config, self.device),
                 )
                 self._pre_processor = pre_processor
                 self._post_processor = post_processor
@@ -391,7 +409,10 @@ class ModelLoader:
                 )
                 if post_processor is None:
                     post_processor = fallback_post
-                self._log("info", "Built pi05 processor from policy factory (no policy_preprocessor.json found)")
+                self._log(
+                    "info",
+                    "Built pi05 processor from policy factory (no policy_preprocessor.json found)",
+                )
             except Exception as e:
                 self._log("warn", f"Could not build pi05 processor from factory: {e}")
 

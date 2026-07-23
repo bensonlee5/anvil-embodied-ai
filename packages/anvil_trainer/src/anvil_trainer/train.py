@@ -24,6 +24,7 @@ Environment variables:
     LEROBOT_EXCLUDE_OBSERVS: Comma-separated observation suffixes to drop
     LEROBOT_TASK_OVERRIDE: Override task string for all samples
 """
+
 from __future__ import annotations
 
 import logging
@@ -32,7 +33,7 @@ import sys
 from pathlib import Path
 
 from anvil_trainer.config import TrainingConfig, _resolve_note
-from anvil_trainer.patches import TransformRunner, patched_lerobot
+from anvil_trainer.patches import TransformRunner, patched_lerobot  # noqa: F401
 
 # Backward-compat re-exports: symbols that previously lived in this module.
 # Existing tests and user code may import them from `anvil_trainer.train`.
@@ -89,12 +90,19 @@ def train(config: TrainingConfig | None = None) -> None:
         # LeRobot 0.5.1 saves train_config.json inside each checkpoint.
         # Use the specific checkpoint (e.g. "020000") if given, otherwise "last".
         ckpt_cfg_path = (
-            Path(config.resume_job_path) / "checkpoints"
-            / config.resume_checkpoint / "pretrained_model" / "train_config.json"
+            Path(config.resume_job_path)
+            / "checkpoints"
+            / config.resume_checkpoint
+            / "pretrained_model"
+            / "train_config.json"
         )
         if ckpt_cfg_path.exists() and not any(a.startswith("--config_path=") for a in sys.argv):
             sys.argv.append(f"--config_path={ckpt_cfg_path}")
-            log.info("[anvil_trainer] Resuming with config from checkpoint '%s': %s", config.resume_checkpoint, ckpt_cfg_path)
+            log.info(
+                "[anvil_trainer] Resuming with config from checkpoint '%s': %s",
+                config.resume_checkpoint,
+                ckpt_cfg_path,
+            )
 
     # Install all lerobot patches; they are torn down on block exit even if
     # lerobot_train() raises.
@@ -106,10 +114,12 @@ def train(config: TrainingConfig | None = None) -> None:
         # appears in the same format, just before the "Output dir:" line.
         if config.resume_job_path:
             import lerobot.scripts.lerobot_train as _lt
+
             _orig_init_logging = _lt.init_logging
 
             def _resume_init_logging(*args, **kwargs):
                 import lerobot.scripts.lerobot_train as _lt_inner
+
                 _lt_inner.init_logging = _orig_init_logging  # self-restore
                 _orig_init_logging(*args, **kwargs)
                 ckpt = config.resume_checkpoint
@@ -118,6 +128,7 @@ def train(config: TrainingConfig | None = None) -> None:
                     if last_link.is_symlink():
                         ckpt = f"last → {last_link.resolve().name}"
                 import logging as _logging
+
                 _logging.info(
                     "[anvil_trainer] Resuming: %s  (checkpoint: %s)",
                     config.resume_job_path,
@@ -210,6 +221,19 @@ Anvil-specific flags (stripped before passing to LeRobot):
       manifest. The action loss remains unweighted. May also be set through
       ANVIL_PRIORITY_SAMPLING_MANIFEST. Validation and test remain exhaustive.
 
+  --bounded-action-contract=PATH
+      Replace native relative actions with the versioned state-relative
+      soft-limit codec. The contract pins names, limits, gripper endpoints,
+      fit episodes, and split hash; fitted horizon statistics are checkpointed.
+
+  --camera-dropout-probability=P
+      Independently drop training cameras with probability P while always
+      retaining at least one view. Validation and test are unchanged.
+
+  --state-noise-std-fraction=F
+      Add train-only Gaussian state noise with standard deviation F times each
+      bounded feature range, then clamp to the contract's soft limits.
+
   --job_name=NAME
       Human-readable run name. Checkpoints saved to model_zoo/<name>/.
       Auto-generated from policy type + timestamp if omitted.
@@ -231,7 +255,7 @@ LeRobot flags (passed through):
 def _capture_lerobot_help() -> str:
     """Capture lerobot's help output without exiting."""
     import io
-    from contextlib import redirect_stdout, redirect_stderr
+    from contextlib import redirect_stderr, redirect_stdout
 
     buf = io.StringIO()
     saved_argv = sys.argv[:]
@@ -239,6 +263,7 @@ def _capture_lerobot_help() -> str:
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
             from lerobot.scripts.lerobot_train import train as lerobot_train
+
             lerobot_train()
     except SystemExit:
         pass

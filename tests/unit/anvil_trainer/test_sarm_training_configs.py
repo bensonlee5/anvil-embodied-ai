@@ -39,6 +39,42 @@ def test_sarm_reward_recipe_transcribes_the_frozen_contract() -> None:
     assert config["steps"] == 1200
 
 
+def test_five_stage_sarm_screen_transcribes_reviewed_semantics() -> None:
+    contract = json.loads(
+        (
+            CONFIG_ROOT
+            / "sarm_manifests/openarm2_shirt_fold_sarm_5stage_v1.json"
+        ).read_text()
+    )
+    config = yaml.safe_load(
+        (CONFIG_ROOT / "shirt_fold_sarm_5stage_dense_v1.yaml").read_text()
+    )
+    reward = config["reward_model"]
+    split = contract["split"]
+
+    assert config["dataset"] == {
+        "repo_id": "bohlt/openarm2-shirt-fold-phase-aligned-sarm-5stage-v1",
+        "revision": "1cc0cd37f070bbd34f22f4d821130842e08ae698",
+        "root": "datasets/shirt-fold/lerobot-hf-phase-aligned-sarm-5stage-v1",
+        "episodes": split["train"] + split["validation"] + split["test"],
+        "eval_split": 0.18,
+        "video_backend": "torchcodec",
+        "use_imagenet_stats": False,
+        "image_transforms": {"enable": False},
+    }
+    assert reward["type"] == "sarm"
+    assert reward["annotation_mode"] == "dense_only"
+    assert reward["num_dense_stages"] == 5
+    assert reward["dense_subtask_names"] == contract["dense_stage_order"]
+    assert reward["dense_temporal_proportions"] == list(
+        contract["temporal_proportions"].values()
+    )
+    assert reward["repo_id"] == "bohlt/openarm2-shirt-fold-sarm-5stage-v1"
+    assert config["steps"] == 1200
+    assert config["batch_size"] == 64
+    assert config["save_freq"] == 200
+
+
 def test_rabc_recipe_is_isolated_and_fails_closed_until_audit_resolution() -> None:
     control = yaml.safe_load(
         (CONFIG_ROOT / "shirt_fold_pi05_hf_phase_aligned.yaml").read_text()

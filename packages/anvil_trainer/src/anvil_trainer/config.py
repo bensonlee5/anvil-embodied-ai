@@ -8,6 +8,7 @@ reject unknown flags.
 ``_resolve_note`` implements the --note / --note-append semantics, including
 the resume-time auto-preserve behaviour.
 """
+
 from __future__ import annotations
 
 import json
@@ -112,18 +113,29 @@ class TrainingConfig:
     # delta_obs_t:     delta[k] = action[t+k] - obs[t]  (all k share the same obs reference)
     # delta_sequential: delta[0] = action[t] - obs[t], delta[k] = action[t+k] - action[t+k-1]
     action_type: str = "absolute"
-    delta_exclude_joints: list[str] | None = None  # Joint names to keep in absolute space when using delta actions
-    delta_stats_n_steps: int = 1  # Look-ahead steps for delta stats (1 = single-frame, N = k=0..N-1 multi-step)
+    delta_exclude_joints: list[str] | None = (
+        None  # Joint names to keep in absolute space when using delta actions
+    )
+    delta_stats_n_steps: int = (
+        1  # Look-ahead steps for delta stats (1 = single-frame, N = k=0..N-1 multi-step)
+    )
     dataset_root: str | None = None
     output_dir: str | None = None
-    resume_job_path: str | None = None   # Job root dir (before checkpoints/)
-    resume_checkpoint: str = "last"       # Checkpoint to resume from ("last" or e.g. "020000")
-    split_ratio: list[float] = field(default_factory=lambda: [8.0, 1.0, 1.0])  # train/val/test episode split ratios
-    max_episodes: int | None = None  # Randomly subsample N episodes before train/val/test split (None = use all)
+    resume_job_path: str | None = None  # Job root dir (before checkpoints/)
+    resume_checkpoint: str = "last"  # Checkpoint to resume from ("last" or e.g. "020000")
+    split_ratio: list[float] = field(
+        default_factory=lambda: [8.0, 1.0, 1.0]
+    )  # train/val/test episode split ratios
+    max_episodes: int | None = (
+        None  # Randomly subsample N episodes before train/val/test split (None = use all)
+    )
     priority_sampling_manifest: str | None = None  # Immutable frame-priority annotations
+    bounded_action_contract: str | None = None  # Versioned soft-limit/per-horizon codec
+    camera_dropout_probability: float = 0.0  # Train-only; individual cameras, never all
+    state_noise_std_fraction: float = 0.0  # Train-only fraction of each bounded joint range
     # Vision backbone for ACT/Diffusion: resnet18 | resnet34 | resnet50
     backbone: str = "resnet18"
-    note: str | None = None         # Free-text note for this run (also sent to wandb as run notes)
+    note: str | None = None  # Free-text note for this run (also sent to wandb as run notes)
     note_append: str | None = None  # Append to existing note during --resume
 
     def __post_init__(self) -> None:
@@ -167,7 +179,9 @@ class TrainingConfig:
         )
         exclude_observs = [k.strip() for k in excl_str.split(",") if k.strip()] or None
 
-        task_override = _pop_argv("task-description") or os.environ.get("LEROBOT_TASK_OVERRIDE", "") or None
+        task_override = (
+            _pop_argv("task-description") or os.environ.get("LEROBOT_TASK_OVERRIDE", "") or None
+        )
 
         action_type = _pop_argv("action-type") or "absolute"
         # Backward compat: --use-delta-actions maps to delta_obs_t
@@ -210,11 +224,27 @@ class TrainingConfig:
             or os.environ.get("ANVIL_PRIORITY_SAMPLING_MANIFEST")
             or None
         )
+        bounded_action_contract = (
+            _pop_argv("bounded-action-contract")
+            or os.environ.get("ANVIL_BOUNDED_ACTION_CONTRACT")
+            or None
+        )
+        camera_dropout_probability = float(
+            _pop_argv("camera-dropout-probability")
+            or os.environ.get("ANVIL_CAMERA_DROPOUT_PROBABILITY", "0")
+        )
+        state_noise_std_fraction = float(
+            _pop_argv("state-noise-std-fraction")
+            or os.environ.get("ANVIL_STATE_NOISE_STD_FRACTION", "0")
+        )
+        if not 0.0 <= camera_dropout_probability < 1.0:
+            raise ValueError("--camera-dropout-probability must be in [0, 1)")
+        if not 0.0 <= state_noise_std_fraction <= 0.1:
+            raise ValueError("--state-noise-std-fraction must be in [0, 0.1]")
 
         # peek (no remove) — needed for naming and backbone injection
-        dataset_root = (
-            _pop_argv("dataset.root", remove=False)
-            or _config_value(file_config, "dataset", "root")
+        dataset_root = _pop_argv("dataset.root", remove=False) or _config_value(
+            file_config, "dataset", "root"
         )
         dataset_name = Path(dataset_root).name if dataset_root else "dataset"
 
@@ -233,7 +263,11 @@ class TrainingConfig:
                     try:
                         _t = json.loads((_pp / "config.json").read_text()).get("type", "")
                         if not _t:  # fallback: parent train_config.json
-                            _t = json.loads((_pp.parent / "train_config.json").read_text()).get("policy", {}).get("type", "")
+                            _t = (
+                                json.loads((_pp.parent / "train_config.json").read_text())
+                                .get("policy", {})
+                                .get("type", "")
+                            )
                         if _t:
                             policy_type = _t
                     except Exception:
@@ -264,9 +298,7 @@ class TrainingConfig:
             if resume_checkpoint != "last":
                 target_dir = Path(resume_job_path) / "checkpoints" / resume_checkpoint
                 if not target_dir.exists():
-                    raise FileNotFoundError(
-                        f"[anvil_trainer] Checkpoint not found: {target_dir}"
-                    )
+                    raise FileNotFoundError(f"[anvil_trainer] Checkpoint not found: {target_dir}")
                 last_link = Path(resume_job_path) / "checkpoints" / "last"
                 if last_link.is_symlink() or not last_link.exists():
                     last_link.unlink(missing_ok=True)
@@ -301,12 +333,29 @@ class TrainingConfig:
                         "[anvil_trainer] --resume: inherited priority sampling manifest %s",
                         saved_manifest,
                     )
+            if bounded_action_contract is None:
+                saved_contract = (
+                    Path(resume_job_path)
+                    / "checkpoints"
+                    / resume_checkpoint
+                    / "pretrained_model"
+                    / "bounded_action_contract.json"
+                )
+                if saved_contract.is_file():
+                    bounded_action_contract = str(saved_contract)
+                    log.info(
+                        "[anvil_trainer] --resume: inherited bounded action contract %s",
+                        saved_contract,
+                    )
 
             # Auto-inherit action_type and delta_exclude_joints from checkpoint if not set on CLI
             if action_type == "absolute":
                 ckpt_anvil = (
-                    Path(resume_job_path) / "checkpoints" / resume_checkpoint
-                    / "pretrained_model" / "anvil_config.json"
+                    Path(resume_job_path)
+                    / "checkpoints"
+                    / resume_checkpoint
+                    / "pretrained_model"
+                    / "anvil_config.json"
                 )
                 if ckpt_anvil.exists():
                     try:
@@ -317,7 +366,8 @@ class TrainingConfig:
                         action_type = _inherited
                         if action_type != "absolute":
                             log.info(
-                                "[anvil_trainer] --resume: inherited action_type=%s from checkpoint", action_type,
+                                "[anvil_trainer] --resume: inherited action_type=%s from checkpoint",
+                                action_type,
                             )
                         if delta_exclude_joints is None and prev.get("delta_exclude_joints"):
                             delta_exclude_joints = prev["delta_exclude_joints"]
@@ -367,7 +417,7 @@ class TrainingConfig:
         # Rewrite in-place (even on resume) — draccus rejects the old flag as unknown.
         for i, arg in enumerate(sys.argv):
             if arg == "--eval_freq" or arg.startswith("--eval_freq="):
-                sys.argv[i] = "--env_eval_freq" + arg[len("--eval_freq"):]
+                sys.argv[i] = "--env_eval_freq" + arg[len("--eval_freq") :]
                 log.info("[anvil_trainer] Rewrote legacy %s to %s", arg, sys.argv[i])
 
         # Defaults injection — skip if resuming to avoid draccus decoding errors
@@ -453,7 +503,9 @@ class TrainingConfig:
                         backbone,
                         sorted(_BACKBONE_MAP),
                     )
-                _vb, _pw = _BACKBONE_MAP.get(backbone, ("resnet18", "ResNet18_Weights.IMAGENET1K_V1"))
+                _vb, _pw = _BACKBONE_MAP.get(
+                    backbone, ("resnet18", "ResNet18_Weights.IMAGENET1K_V1")
+                )
                 if not any(a.startswith("--policy.vision_backbone=") for a in sys.argv):
                     sys.argv.append(f"--policy.vision_backbone={_vb}")
                 if not any(a.startswith("--policy.pretrained_backbone_weights=") for a in sys.argv):
@@ -482,6 +534,9 @@ class TrainingConfig:
             split_ratio=split_ratio,
             max_episodes=max_episodes,
             priority_sampling_manifest=priority_sampling_manifest,
+            bounded_action_contract=bounded_action_contract,
+            camera_dropout_probability=camera_dropout_probability,
+            state_noise_std_fraction=state_noise_std_fraction,
             backbone=backbone,
             note=note,
             note_append=note_append,
@@ -506,6 +561,9 @@ class TrainingConfig:
             dataset_root=data.get("dataset_root"),
             split_ratio=data.get("split_ratio", [8.0, 1.0, 1.0]),
             priority_sampling_manifest=data.get("priority_sampling_manifest"),
+            bounded_action_contract=data.get("bounded_action_contract"),
+            camera_dropout_probability=float(data.get("camera_dropout_probability", 0.0)),
+            state_noise_std_fraction=float(data.get("state_noise_std_fraction", 0.0)),
             backbone=data.get("backbone", "resnet18"),
         )
 
@@ -516,7 +574,9 @@ class TrainingConfig:
 
         info_path = Path(self.dataset_root) / "meta" / "info.json"
         if not info_path.exists():
-            log.warning("[anvil_trainer] Cannot validate --exclude-observs: %s not found", info_path)
+            log.warning(
+                "[anvil_trainer] Cannot validate --exclude-observs: %s not found", info_path
+            )
             return
 
         with open(info_path) as f:
@@ -556,8 +616,11 @@ def _resolve_note(config: TrainingConfig) -> str | None:
     # Resume: read old note from the target checkpoint's anvil_config.json
     old_note: str | None = None
     last_anvil = (
-        Path(config.resume_job_path) / "checkpoints" / config.resume_checkpoint
-        / "pretrained_model" / "anvil_config.json"
+        Path(config.resume_job_path)
+        / "checkpoints"
+        / config.resume_checkpoint
+        / "pretrained_model"
+        / "anvil_config.json"
     )
     if last_anvil.exists():
         try:

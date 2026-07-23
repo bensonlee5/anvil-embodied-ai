@@ -14,6 +14,11 @@ Usage:
     # anvil-trainer --dataset.repo_id=local --dataset.root=/path/to/dataset
 """
 
+from anvil_trainer.bounded_actions import (
+    BoundedAbsoluteActionsProcessorStep,
+    BoundedActionContract,
+    BoundedRelativeActionsProcessorStep,
+)
 from anvil_trainer.config import TrainingConfig
 from anvil_trainer.patches import TransformRunner
 from anvil_trainer.train import main, train
@@ -28,6 +33,9 @@ __version__ = "0.1.0"
 
 __all__ = [
     "TrainingConfig",
+    "BoundedActionContract",
+    "BoundedRelativeActionsProcessorStep",
+    "BoundedAbsoluteActionsProcessorStep",
     "Transform",
     "ExcludeObservationTransform",
     "TaskOverrideTransform",

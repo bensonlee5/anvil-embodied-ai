@@ -119,7 +119,7 @@ def main() -> None:
     if preprocessor is None or postprocessor is None:
         raise SystemExit("Checkpoint processor pipelines did not load")
     if find_native_relative_step(preprocessor) is None:
-        raise SystemExit("Checkpoint does not contain an enabled native relative-action processor")
+        raise SystemExit("Checkpoint does not contain an enabled state-relative action processor")
 
     max_delta = float(contract["checks"]["max_position_delta"])
     debug_snapshot_report = None
