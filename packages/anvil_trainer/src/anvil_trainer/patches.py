@@ -31,6 +31,7 @@ import contextlib
 import json
 import logging
 import math
+from copy import copy, deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -227,6 +228,52 @@ def _restore_task_space_policy_surface(
             "failed to restore the exact task-space policy output surface: "
             f"shape={runtime_shape}, names={runtime_names}"
         )
+
+
+def _task_space_dataset_metadata(
+    dataset_meta: Any,
+    contract: TaskSpaceActionContract,
+) -> Any:
+    """Expose the task target to policy construction without mutating the dataset.
+
+    LeRobot normally infers a policy's output feature directly from the source
+    dataset. Task-space training intentionally keeps the source dataset in the
+    16-D joint representation while presenting a 14-D target to the policy.
+    A shallow metadata clone with a copied feature table is enough to make that
+    distinction explicit; the original metadata remains authoritative for
+    source-action validation and train-only statistics.
+    """
+    if dataset_meta is None:
+        raise DataIntegrityError("task-space policy construction requires dataset metadata")
+    proxy = copy(dataset_meta)
+    proxy.info = copy(dataset_meta.info)
+    proxy.info.features = deepcopy(dataset_meta.features)
+    action_feature = dict(proxy.info.features.get("action", {}))
+    action_feature["shape"] = (len(contract.task_action_names),)
+    action_feature["names"] = list(contract.task_action_names)
+    proxy.info.features["action"] = action_feature
+    return proxy
+
+
+def _act_loss_per_dim(batch: dict[str, Any], actions_hat: Any) -> list[float]:
+    """Return padding-aware ACT L1 reconstruction loss in contract order."""
+    import torch
+
+    actions = batch.get("action")
+    action_is_pad = batch.get("action_is_pad")
+    if actions is None or action_is_pad is None:
+        raise DataIntegrityError("ACT per-output loss requires action and action_is_pad")
+    if actions.shape != actions_hat.shape:
+        raise DataIntegrityError(
+            "ACT prediction/target shapes differ: "
+            f"prediction={tuple(actions_hat.shape)}, target={tuple(actions.shape)}"
+        )
+    valid = (~action_is_pad).unsqueeze(-1)
+    denominator = valid.sum(dim=(0, 1)).clamp_min(1)
+    losses = ((actions - actions_hat).abs() * valid).sum(dim=(0, 1)) / denominator
+    if not torch.isfinite(losses).all():
+        raise DataIntegrityError("ACT per-output loss contains non-finite values")
+    return [float(value) for value in losses.detach().cpu()]
 
 
 def _action_batch_size(batch: dict[str, Any]) -> int:
@@ -748,14 +795,19 @@ class TransformRunner:
             return None
 
     @staticmethod
-    def _validate_pi05_dataset_contract(
+    def _validate_policy_dataset_contract(
         policy_cfg: Any,
         full_dataset: Any,
         task_space_contract: TaskSpaceActionContract | None = None,
     ) -> None:
-        """Fail before training when Pi0.5 vector or camera contracts diverge."""
-        if getattr(policy_cfg, "type", None) != "pi05":
+        """Fail before training when a policy vector or camera contract diverges."""
+        policy_type = getattr(policy_cfg, "type", None)
+        if policy_type != "pi05" and task_space_contract is None:
             return
+        if task_space_contract is not None and policy_type not in {"pi05", "act"}:
+            raise DataIntegrityError(
+                "task-space actions support only the validated pi05 and act policy surfaces"
+            )
 
         features = full_dataset.meta.features
         action_feature = features.get("action", {})
@@ -766,16 +818,16 @@ class TransformRunner:
 
         if not action_names or action_names != state_names:
             raise DataIntegrityError(
-                "[pi05_contract] Dataset action/state feature names must be present and identical"
+                "[policy_contract] Dataset action/state feature names must be present and identical"
             )
         expected_policy_names = (
             list(task_space_contract.task_action_names)
             if task_space_contract is not None
             else action_names
         )
-        if policy_names != expected_policy_names:
+        if policy_type == "pi05" and policy_names != expected_policy_names:
             raise DataIntegrityError(
-                "[pi05_contract] Policy action_feature_names do not match the effective "
+                "[policy_contract] Policy action_feature_names do not match the effective "
                 f"representation: policy={policy_names}, expected={expected_policy_names}"
             )
         if (
@@ -783,21 +835,21 @@ class TransformRunner:
             and tuple(action_names) != task_space_contract.source_action_names
         ):
             raise DataIntegrityError(
-                "[pi05_contract] Dataset joint names do not match the task-space source contract"
+                "[policy_contract] Dataset joint names do not match the task-space source contract"
             )
 
         action_shape = tuple(action_feature.get("shape") or ())
         state_shape = tuple(state_feature.get("shape") or ())
         if not action_shape or action_shape != state_shape or len(action_names) != action_shape[0]:
             raise DataIntegrityError(
-                "[pi05_contract] Dataset action/state shapes and named dimensions must match: "
+                "[policy_contract] Dataset action/state shapes and named dimensions must match: "
                 f"action={action_shape}, state={state_shape}, names={len(action_names)}"
             )
 
         policy_state_shape = tuple(policy_cfg.input_features["observation.state"].shape)
         if policy_state_shape != state_shape:
             raise DataIntegrityError(
-                "[pi05_contract] Policy/dataset state shapes differ: "
+                "[policy_contract] Policy/dataset state shapes differ: "
                 f"policy={policy_state_shape}, dataset={state_shape}"
             )
 
@@ -805,7 +857,7 @@ class TransformRunner:
         dataset_cameras = list(full_dataset.meta.camera_keys)
         if set(policy_cameras) != set(dataset_cameras):
             raise DataIntegrityError(
-                "[pi05_contract] Policy/dataset camera keys differ: "
+                "[policy_contract] Policy/dataset camera keys differ: "
                 f"policy={policy_cameras}, dataset={dataset_cameras}"
             )
 
@@ -814,7 +866,7 @@ class TransformRunner:
             dataset_shape = tuple(features[key]["shape"])
             if policy_shape != dataset_shape:
                 raise DataIntegrityError(
-                    f"[pi05_contract] Camera shape mismatch for {key}: "
+                    f"[policy_contract] Camera shape mismatch for {key}: "
                     f"policy={policy_shape}, dataset={dataset_shape}"
                 )
 
@@ -826,11 +878,14 @@ class TransformRunner:
         )
         if policy_action_shape != expected_action_shape:
             raise DataIntegrityError(
-                "[pi05_contract] Policy/effective action shapes differ: "
+                "[policy_contract] Policy/effective action shapes differ: "
                 f"policy={policy_action_shape}, expected={expected_action_shape}"
             )
+        if task_space_contract is not None:
+            policy_cfg.action_feature_names = list(task_space_contract.task_action_names)
         log.info(
-            "[pi05_contract] Validated %d named action/state dimensions and cameras=%s",
+            "[policy_contract] Validated %s with %d named source dimensions and cameras=%s",
+            policy_type,
             action_shape[0],
             dataset_cameras,
         )
@@ -1131,12 +1186,12 @@ class TransformRunner:
         contract = self._task_space_contract
         if contract is None:
             return None
-        if getattr(policy_cfg, "type", None) != "pi05":
-            raise DataIntegrityError("task-space actions currently require Pi0.5")
+        policy_type = getattr(policy_cfg, "type", None)
+        if policy_type not in {"pi05", "act"}:
+            raise DataIntegrityError("task-space actions require Pi0.5 or ACT")
         if bool(getattr(policy_cfg, "use_relative_actions", False)):
             raise DataIntegrityError(
-                "task-space actions replace Pi0.5 native relative actions; "
-                "set use_relative_actions=false"
+                "task-space actions replace native relative actions; set use_relative_actions=false"
             )
         if int(getattr(policy_cfg, "chunk_size", 0)) != contract.chunk_size:
             raise DataIntegrityError("task-space contract chunk_size does not match the policy")
@@ -1161,10 +1216,7 @@ class TransformRunner:
         if states.ndim == 3:
             states = states[:, 0, :]
         episodes = np.asarray(hf["episode_index"], dtype=np.int64).reshape(-1)
-        if (
-            actions.shape != states.shape
-            or actions.shape[1] != len(contract.source_action_names)
-        ):
+        if actions.shape != states.shape or actions.shape[1] != len(contract.source_action_names):
             raise DataIntegrityError(
                 "task-space fitting requires matching 16-D named joint action/state vectors"
             )
@@ -1288,13 +1340,50 @@ class TransformRunner:
             for index, step in enumerate(postprocessor.steps)
             if isinstance(step, AbsoluteActionsProcessorStep)
         ]
-        if len(relative_indices) != 1 or len(absolute_indices) != 1:
+        policy_type = getattr(policy_cfg, "type", None)
+        if policy_type == "pi05":
+            if len(relative_indices) != 1 or len(absolute_indices) != 1:
+                raise DataIntegrityError(
+                    "Pi0.5 task-space actions require exactly one inherited "
+                    "relative/absolute processor pair"
+                )
+            preprocessor.steps[relative_indices[0]] = task_relative
+            postprocessor.steps[absolute_indices[0]] = task_absolute
+        elif policy_type == "act":
+            if relative_indices or absolute_indices:
+                raise DataIntegrityError(
+                    "ACT task-space actions require a native absolute-action pipeline"
+                )
+            normalizer_indices = [
+                index
+                for index, step in enumerate(preprocessor.steps)
+                if isinstance(step, NormalizerProcessorStep)
+            ]
+            unnormalizer_indices = [
+                index
+                for index, step in enumerate(postprocessor.steps)
+                if isinstance(step, UnnormalizerProcessorStep)
+            ]
+            if len(normalizer_indices) != 1 or len(unnormalizer_indices) != 1:
+                raise DataIntegrityError(
+                    "ACT task-space actions require exactly one normalizer and unnormalizer"
+                )
+            normalizer_index = normalizer_indices[0]
+            unnormalizer_index = unnormalizer_indices[0]
+            preprocessor.steps = [
+                *preprocessor.steps[:normalizer_index],
+                task_relative,
+                *preprocessor.steps[normalizer_index:],
+            ]
+            postprocessor.steps = [
+                *postprocessor.steps[: unnormalizer_index + 1],
+                task_absolute,
+                *postprocessor.steps[unnormalizer_index + 1 :],
+            ]
+        else:
             raise DataIntegrityError(
-                "task-space actions require exactly one inherited relative/absolute "
-                "processor pair"
+                f"task-space processors are not validated for policy type {policy_type!r}"
             )
-        preprocessor.steps[relative_indices[0]] = task_relative
-        postprocessor.steps[absolute_indices[0]] = task_absolute
         for pipeline in (preprocessor, postprocessor):
             for step in pipeline.steps:
                 if isinstance(step, (NormalizerProcessorStep, UnnormalizerProcessorStep)):
@@ -1455,7 +1544,7 @@ class TransformRunner:
             total_ep = full_dataset.num_episodes
             val_state._camera_keys = tuple(full_dataset.meta.camera_keys)
             policy_cfg = cfg.trainable_config
-            val_state._validate_pi05_dataset_contract(
+            val_state._validate_policy_dataset_contract(
                 policy_cfg,
                 full_dataset,
                 val_state._task_space_contract,
@@ -1472,10 +1561,7 @@ class TransformRunner:
             # action in the configured chunk; Anvil's legacy transform retains
             # its existing delta-stat path.
             _patched_action_stats = None
-            if (
-                val_state._bounded_contract is None
-                and val_state._task_space_contract is None
-            ):
+            if val_state._bounded_contract is None and val_state._task_space_contract is None:
                 _patched_action_stats = val_state._compute_native_relative_action_stats(
                     full_dataset,
                     policy_cfg,
@@ -1652,7 +1738,24 @@ class TransformRunner:
                 if val_state._task_space_contract is not None
                 else {}
             )
-            policy = original_make_policy(*args, **kwargs)
+            call_args = list(args)
+            call_kwargs = dict(kwargs)
+            if val_state._task_space_contract is not None:
+                dataset_meta = call_kwargs.get(
+                    "ds_meta",
+                    call_args[1] if len(call_args) > 1 else None,
+                )
+                task_metadata = _task_space_dataset_metadata(
+                    dataset_meta,
+                    val_state._task_space_contract,
+                )
+                if "ds_meta" in call_kwargs:
+                    call_kwargs["ds_meta"] = task_metadata
+                elif len(call_args) > 1:
+                    call_args[1] = task_metadata
+                else:
+                    call_kwargs["ds_meta"] = task_metadata
+            policy = original_make_policy(*call_args, **call_kwargs)
             if val_state._task_space_contract is not None:
                 _restore_task_space_policy_surface(
                     policy_cfg,
@@ -1765,12 +1868,8 @@ class TransformRunner:
                 "deployment_status": self._task_space_contract.deployment_status,
                 "kinematic_model_id": self._task_space_contract.model_id,
                 "kinematic_model_sha256": self._task_space_contract.model_sha256,
-                "source_action_feature_names": list(
-                    self._task_space_contract.source_action_names
-                ),
-                "task_action_feature_names": list(
-                    self._task_space_contract.task_action_names
-                ),
+                "source_action_feature_names": list(self._task_space_contract.source_action_names),
+                "task_action_feature_names": list(self._task_space_contract.task_action_names),
                 "camera_dropout_probability": self.config.camera_dropout_probability,
                 "state_noise_std_fraction": self.config.state_noise_std_fraction,
             }
@@ -1880,6 +1979,51 @@ class TransformRunner:
             self._patch(train_utils_mod, "save_checkpoint", patched_save_checkpoint)
         self._patch(lerobot_train_mod, "save_checkpoint", patched_save_checkpoint)
         log.info("[anvil_trainer] Patched save_checkpoint for test loss + anvil_config.json")
+
+    def apply_act_per_output_loss_patch(self) -> None:
+        """Add ACT per-sample weighting and named reconstruction diagnostics."""
+        from lerobot.policies.act import modeling_act
+        from lerobot.utils.constants import ACTION, OBS_IMAGES
+
+        def patched_forward(policy, batch, reduction: str = "mean"):
+            import torch
+
+            if reduction not in {"mean", "none"}:
+                raise ValueError(f"ACT reduction must be 'mean' or 'none', got {reduction!r}")
+            model_batch = batch
+            if policy.config.image_features:
+                model_batch = dict(batch)
+                model_batch[OBS_IMAGES] = [model_batch[key] for key in policy.config.image_features]
+
+            actions_hat, (mu_hat, log_sigma_x2_hat) = policy.model(model_batch)
+            actions = model_batch[ACTION]
+            valid = (~model_batch["action_is_pad"]).unsqueeze(-1)
+            abs_err = (actions - actions_hat).abs()
+            valid_steps = valid.sum(dim=(1, 2)).clamp_min(1)
+            action_dim = abs_err.shape[-1]
+            per_sample_l1 = (abs_err * valid).sum(dim=(1, 2)) / (valid_steps * action_dim)
+            global_l1 = (abs_err * valid).sum() / (valid.sum() * action_dim).clamp_min(1)
+
+            loss_dict: dict[str, Any] = {
+                "l1_loss": global_l1.item(),
+                "loss_per_dim": _act_loss_per_dim(model_batch, actions_hat),
+            }
+            if policy.config.use_vae and log_sigma_x2_hat is not None:
+                per_sample_kld = (
+                    -0.5 * (1 + log_sigma_x2_hat - mu_hat.pow(2) - log_sigma_x2_hat.exp())
+                ).sum(-1)
+                loss_dict["kld_loss"] = per_sample_kld.mean().item()
+            else:
+                per_sample_kld = torch.zeros_like(per_sample_l1)
+
+            if reduction == "none":
+                loss = per_sample_l1 + per_sample_kld * policy.config.kl_weight
+            else:
+                loss = global_l1 + per_sample_kld.mean() * policy.config.kl_weight
+            return loss, loss_dict
+
+        self._patch(modeling_act.ACTPolicy, "forward", patched_forward)
+        log.info("[act] Patched forward for per-sample RA-BC loss and named per-output L1 metrics")
 
     def apply_val_loss_hook(self) -> None:
         """Monkey-patch update_policy for periodic val loss computation at val_freq intervals."""
@@ -2030,6 +2174,7 @@ def patched_lerobot(config: TrainingConfig):
     runner.apply_rabc_audit_patch()
     runner.apply_val_loss_patch()
     runner.apply_checkpoint_patch()
+    runner.apply_act_per_output_loss_patch()
     runner.apply_val_loss_hook()
     try:
         yield runner

@@ -15,13 +15,21 @@ from anvil_embodiment.kinematics import get_model_spec
 from anvil_embodiment.trajectory import ConstrainedBimanualTrajectorySolver
 from lerobot.configs import PipelineFeatureType, PolicyFeature
 from lerobot.configs.types import FeatureType, NormalizationMode
+from lerobot.policies.act.configuration_act import ACTConfig
+from lerobot.policies.act.modeling_act import ACTPolicy
+from lerobot.policies.act.processor_act import make_act_pre_post_processors
 from lerobot.processor.relative_action_processor import (
     AbsoluteActionsProcessorStep,
     RelativeActionsProcessorStep,
 )
 
 from anvil_trainer.config import TrainingConfig
-from anvil_trainer.patches import TransformRunner, _restore_task_space_policy_surface
+from anvil_trainer.patches import (
+    TransformRunner,
+    _act_loss_per_dim,
+    _restore_task_space_policy_surface,
+    _task_space_dataset_metadata,
+)
 from anvil_trainer.task_space_actions import (
     TaskSpaceActionContract,
     TaskSpaceRelativeActionsProcessorStep,
@@ -72,11 +80,53 @@ def test_task_space_recipe_keeps_matched_raw_sarm_surface() -> None:
     assert json.loads(recipe["policy"]["output_features"])["action"]["shape"] == [14]
     assert recipe["policy"]["use_relative_actions"] is False
     assert recipe["sample_weighting"]["extra_params"]["reward_calibration"] == "none"
-    assert recipe["sample_weighting"]["progress_path"] == (
-        "sarm_progress_train_5stage_v1.parquet"
-    )
+    assert recipe["sample_weighting"]["progress_path"] == ("sarm_progress_train_5stage_v1.parquet")
     assert recipe["batch_size"] == 16
     assert recipe["steps"] == 5000
+
+
+def test_act_task_space_recipe_changes_only_the_policy_baseline_surface() -> None:
+    pi05 = yaml.safe_load(
+        (
+            REPO_ROOT
+            / "configs"
+            / "training"
+            / "shirt_fold_pi05_hf_task_space_outward_5stage_sarm_raw_v4.yaml"
+        ).read_text()
+    )
+    act = yaml.safe_load(
+        (
+            REPO_ROOT
+            / "configs"
+            / "training"
+            / "shirt_fold_act_hf_task_space_outward_5stage_sarm_raw_v1.yaml"
+        ).read_text()
+    )
+
+    assert act["dataset"] == pi05["dataset"]
+    assert act["sample_weighting"] == pi05["sample_weighting"]
+    for key in (
+        "seed",
+        "num_workers",
+        "persistent_workers",
+        "batch_size",
+        "steps",
+        "log_freq",
+        "save_freq",
+    ):
+        assert act[key] == pi05[key]
+    assert act["policy"]["chunk_size"] == 30
+    assert act["policy"]["n_action_steps"] == 30
+    assert act["policy"]["output_features"]["action"]["shape"] == [14]
+    assert act["policy"]["normalization_mapping"] == {
+        "VISUAL": "MEAN_STD",
+        "STATE": "MEAN_STD",
+        "ACTION": "IDENTITY",
+    }
+    assert "path" not in act["policy"]
+    assert act["policy"]["vision_backbone"] == "resnet18"
+    assert act["policy"]["use_vae"] is True
+    assert act["policy"]["kl_weight"] == 10.0
 
 
 def test_task_space_policy_surface_is_restored_after_dataset_inference() -> None:
@@ -103,6 +153,34 @@ def test_task_space_policy_surface_is_restored_after_dataset_inference() -> None
     for config in (policy_cfg, runtime_cfg):
         assert config.output_features["action"].shape == (14,)
         assert config.action_feature_names == list(contract.task_action_names)
+
+
+def test_task_space_metadata_proxy_does_not_mutate_joint_source() -> None:
+    contract = _contract()
+    source_features = {
+        "action": {
+            "dtype": "float32",
+            "shape": (16,),
+            "names": list(contract.source_action_names),
+        }
+    }
+
+    class Metadata:
+        def __init__(self, features):
+            self.info = SimpleNamespace(features=features)
+
+        @property
+        def features(self):
+            return self.info.features
+
+    source = Metadata(source_features)
+
+    proxy = _task_space_dataset_metadata(source, contract)
+
+    assert proxy.features["action"]["shape"] == (14,)
+    assert proxy.features["action"]["names"] == list(contract.task_action_names)
+    assert source.features["action"]["shape"] == (16,)
+    assert source.features["action"]["names"] == list(contract.source_action_names)
 
 
 def test_task_space_collapses_joint_configuration_when_tcp_motion_is_zero() -> None:
@@ -187,9 +265,7 @@ def test_task_space_target_decode_recovers_fk_pose_and_gripper() -> None:
 
 def test_solver_preserves_tcp_while_moving_elbows_outward_with_hard_bounds() -> None:
     contract = _contract()
-    solver = ConstrainedBimanualTrajectorySolver(
-        get_model_spec(contract.model_id), contract.solver
-    )
+    solver = ConstrainedBimanualTrajectorySolver(get_model_spec(contract.model_id), contract.solver)
     current = np.zeros(16, dtype=np.float64)
     current[[7, 15]] = 0.02
     positions: list[np.ndarray] = []
@@ -208,7 +284,9 @@ def test_solver_preserves_tcp_while_moving_elbows_outward_with_hard_bounds() -> 
 
     assert result.valid
     assert all(item.outward_alignment >= 0.85 for item in result.diagnostics)
-    assert all(item.position_error_m <= contract.solver.position_tolerance_m for item in result.diagnostics)
+    assert all(
+        item.position_error_m <= contract.solver.position_tolerance_m for item in result.diagnostics
+    )
     lower = contract.source_soft_lower
     upper = contract.source_soft_upper
     assert np.all(result.values >= lower - 1.0e-12)
@@ -217,9 +295,7 @@ def test_solver_preserves_tcp_while_moving_elbows_outward_with_hard_bounds() -> 
         delta = np.abs(result.values[0, start : start + 7] - current[start : start + 7])
         assert np.all(
             delta
-            <= np.asarray(contract.solver.max_velocity_rad_s)
-            * contract.solver.dt_seconds
-            + 1.0e-12
+            <= np.asarray(contract.solver.max_velocity_rad_s) * contract.solver.dt_seconds + 1.0e-12
         )
 
 
@@ -239,9 +315,9 @@ def test_task_space_smoothing_preserves_gripper_events_and_segment_endpoints() -
 
     torch.testing.assert_close(smoothed[:, [6, 13]], original[:, [6, 13]])
     torch.testing.assert_close(smoothed[[0, 3, 4, 7], 0], original[[0, 3, 4, 7], 0])
-    assert torch.diff(smoothed[:, 0], n=2).abs().mean() < torch.diff(
-        original[:, 0], n=2
-    ).abs().mean()
+    assert (
+        torch.diff(smoothed[:, 0], n=2).abs().mean() < torch.diff(original[:, 0], n=2).abs().mean()
+    )
 
 
 def _dataset(*, perturb_holdout: bool) -> SimpleNamespace:
@@ -296,7 +372,7 @@ def _dataset(*, perturb_holdout: bool) -> SimpleNamespace:
     )
 
 
-def _policy() -> SimpleNamespace:
+def _policy(*, policy_type: str = "pi05") -> SimpleNamespace:
     contract = _contract()
     cameras = {
         key: PolicyFeature(type=FeatureType.VISUAL, shape=(3, 270, 480))
@@ -307,7 +383,7 @@ def _policy() -> SimpleNamespace:
         )
     }
     return SimpleNamespace(
-        type="pi05",
+        type=policy_type,
         use_relative_actions=False,
         chunk_size=contract.chunk_size,
         action_feature_names=list(contract.task_action_names),
@@ -352,23 +428,113 @@ def test_task_space_statistics_are_train_only_and_install_processors() -> None:
     )
     assert postprocessor.steps[0].relative_step is preprocessor.steps[0]
     features = {
-        PipelineFeatureType.ACTION: {
-            "action": PolicyFeature(type=FeatureType.ACTION, shape=(16,))
-        },
+        PipelineFeatureType.ACTION: {"action": PolicyFeature(type=FeatureType.ACTION, shape=(16,))},
         PipelineFeatureType.OBSERVATION: {},
     }
-    assert preprocessor.steps[0].transform_features(features)[
-        PipelineFeatureType.ACTION
-    ]["action"].shape == (14,)
+    assert preprocessor.steps[0].transform_features(features)[PipelineFeatureType.ACTION][
+        "action"
+    ].shape == (14,)
 
 
-def test_task_space_pi05_contract_rejects_joint_output_surface() -> None:
+def test_task_space_act_processors_wrap_identity_action_normalization() -> None:
+    contract = _contract()
+    config = TrainingConfig(task_space_action_contract=str(CONTRACT_PATH))
+    runner = TransformRunner(config)
+    train = list(contract.training_episode_indices)
+    stats = runner._fit_task_space_action_statistics(
+        _dataset(perturb_holdout=False),
+        _policy(policy_type="act"),
+        train,
+    )
+    assert stats is not None
+
+    policy = ACTConfig(
+        device="cpu",
+        chunk_size=30,
+        n_action_steps=30,
+        input_features=_policy(policy_type="act").input_features,
+        output_features={"action": PolicyFeature(type=FeatureType.ACTION, shape=(14,))},
+        normalization_mapping={
+            FeatureType.VISUAL: NormalizationMode.MEAN_STD,
+            FeatureType.STATE: NormalizationMode.MEAN_STD,
+            FeatureType.ACTION: NormalizationMode.IDENTITY,
+        },
+    )
+    policy.action_feature_names = list(contract.task_action_names)
+    preprocessor, postprocessor = make_act_pre_post_processors(policy)
+
+    runner._install_task_space_action_processors(policy, preprocessor, postprocessor)
+
+    assert [step.__class__._registry_name for step in preprocessor.steps].count(
+        "task_space_relative_actions_processor"
+    ) == 1
+    assert [step.__class__._registry_name for step in postprocessor.steps].count(
+        "task_space_absolute_actions_processor"
+    ) == 1
+
+
+def test_act_per_output_loss_ignores_padded_actions() -> None:
+    targets = torch.tensor([[[1.0, 2.0], [10.0, 20.0]], [[3.0, 4.0], [5.0, 6.0]]])
+    predictions = torch.zeros_like(targets)
+    batch = {
+        "action": targets,
+        "action_is_pad": torch.tensor([[False, True], [False, False]]),
+    }
+
+    assert _act_loss_per_dim(batch, predictions) == pytest.approx([3.0, 4.0])
+
+
+def test_act_forward_supports_rabc_per_sample_reduction() -> None:
+    runner = TransformRunner(TrainingConfig())
+    runner.apply_act_per_output_loss_patch()
+    try:
+        policy = ACTPolicy(
+            ACTConfig(
+                device="cpu",
+                chunk_size=3,
+                n_action_steps=3,
+                input_features={
+                    "observation.environment_state": PolicyFeature(
+                        type=FeatureType.ENV, shape=(3,)
+                    ),
+                    "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(2,)),
+                },
+                output_features={"action": PolicyFeature(type=FeatureType.ACTION, shape=(2,))},
+                dim_model=32,
+                n_heads=4,
+                dim_feedforward=64,
+                n_encoder_layers=1,
+                n_decoder_layers=1,
+                latent_dim=4,
+                n_vae_encoder_layers=1,
+            )
+        )
+        batch = {
+            "observation.environment_state": torch.randn(2, 3),
+            "observation.state": torch.randn(2, 2),
+            "action": torch.randn(2, 3, 2),
+            "action_is_pad": torch.zeros(2, 3, dtype=torch.bool),
+        }
+
+        per_sample, per_sample_metrics = policy.forward(batch, reduction="none")
+        mean, mean_metrics = policy.forward(batch, reduction="mean")
+
+        assert per_sample.shape == (2,)
+        assert torch.isfinite(per_sample).all()
+        assert torch.isfinite(mean)
+        assert len(per_sample_metrics["loss_per_dim"]) == 2
+        assert len(mean_metrics["loss_per_dim"]) == 2
+    finally:
+        runner.restore_all_patches()
+
+
+def test_task_space_policy_contract_rejects_joint_output_surface() -> None:
     contract = _contract()
     policy = _policy()
     policy.output_features["action"] = PolicyFeature(type=FeatureType.ACTION, shape=(16,))
 
     with pytest.raises(DataIntegrityError, match="effective action shapes differ"):
-        TransformRunner._validate_pi05_dataset_contract(
+        TransformRunner._validate_policy_dataset_contract(
             policy, _dataset(perturb_holdout=False), contract
         )
 
@@ -399,9 +565,7 @@ def test_task_processor_factory_pins_contract_hash() -> None:
     center = np.zeros((contract.chunk_size, 14))
     scale = np.ones_like(center)
 
-    relative, absolute = make_task_space_processor_steps(
-        contract, center=center, scale=scale
-    )
+    relative, absolute = make_task_space_processor_steps(contract, center=center, scale=scale)
 
     assert relative.contract_sha256 == contract.sha256
     assert relative.source_action_names == list(contract.source_action_names)

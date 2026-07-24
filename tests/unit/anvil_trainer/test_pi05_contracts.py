@@ -93,14 +93,14 @@ def _policy(*, cameras: list[str] | None = None) -> SimpleNamespace:
 
 
 def test_pi05_contract_accepts_exact_dataset_features() -> None:
-    TransformRunner._validate_pi05_dataset_contract(_policy(), _dataset())
+    TransformRunner._validate_policy_dataset_contract(_policy(), _dataset())
 
 
 def test_pi05_contract_rejects_inherited_checkpoint_camera() -> None:
     policy = _policy(cameras=[*CAMERAS, "observation.images.base_0_rgb"])
 
     with pytest.raises(DataIntegrityError, match="camera keys differ"):
-        TransformRunner._validate_pi05_dataset_contract(policy, _dataset())
+        TransformRunner._validate_policy_dataset_contract(policy, _dataset())
 
 
 def test_native_relative_stats_replace_absolute_dataset_stats() -> None:
