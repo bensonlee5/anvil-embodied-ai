@@ -190,6 +190,45 @@ class _PerActuatorLossMeter:
         return metrics
 
 
+def _restore_task_space_policy_surface(
+    policy_cfg: Any,
+    policy: Any,
+    contract: TaskSpaceActionContract,
+    expected_output_features: dict[str, Any],
+) -> None:
+    """Restore task outputs after LeRobot infers source-dataset features.
+
+    A task-space policy deliberately consumes 16-D joint state while predicting
+    a 14-D task target. LeRobot's ``make_policy`` normally replaces both the
+    output feature and its names from the dataset, so restore the already
+    validated recipe surface on the training and runtime policy configs.
+    """
+    action_key = "action"
+    expected_feature = expected_output_features.get(action_key)
+    expected_shape = tuple(getattr(expected_feature, "shape", ()))
+    if expected_shape != (len(contract.task_action_names),):
+        raise DataIntegrityError(
+            "task-space output feature was not preserved before policy creation: "
+            f"shape={expected_shape}, expected={(len(contract.task_action_names),)}"
+        )
+
+    runtime_cfg = getattr(policy, "config", None)
+    if runtime_cfg is None:
+        raise DataIntegrityError("task-space policy has no runtime config to restore")
+
+    for config in (policy_cfg, runtime_cfg):
+        config.output_features = dict(expected_output_features)
+        config.action_feature_names = list(contract.task_action_names)
+
+    runtime_shape = tuple(runtime_cfg.output_features[action_key].shape)
+    runtime_names = tuple(runtime_cfg.action_feature_names)
+    if runtime_shape != expected_shape or runtime_names != contract.task_action_names:
+        raise DataIntegrityError(
+            "failed to restore the exact task-space policy output surface: "
+            f"shape={runtime_shape}, names={runtime_names}"
+        )
+
+
 def _action_batch_size(batch: dict[str, Any]) -> int:
     """Return the batch size used to sample-weight holdout metrics."""
     action = batch.get("action")
@@ -1601,6 +1640,36 @@ class TransformRunner:
             s,
             has_holdout,
         )
+
+        # Preserve the task target surface across LeRobot's source-dataset
+        # feature inference in make_policy.
+        original_make_policy = policy_factory_mod.make_policy
+
+        def preserving_make_policy(*args, **kwargs):
+            policy_cfg = kwargs.get("cfg", args[0] if args else None)
+            expected_output_features = (
+                dict(policy_cfg.output_features)
+                if val_state._task_space_contract is not None
+                else {}
+            )
+            policy = original_make_policy(*args, **kwargs)
+            if val_state._task_space_contract is not None:
+                _restore_task_space_policy_surface(
+                    policy_cfg,
+                    policy,
+                    val_state._task_space_contract,
+                    expected_output_features,
+                )
+                log.info(
+                    "[task_space_actions] Restored policy output surface to %d named dimensions",
+                    len(val_state._task_space_contract.task_action_names),
+                )
+            return policy
+
+        self._patch(policy_factory_mod, "make_policy", preserving_make_policy)
+        if hasattr(lerobot_train_mod, "make_policy"):
+            self._patch(lerobot_train_mod, "make_policy", preserving_make_policy)
+        log.info("[task_space_actions] Patched make_policy to preserve task-action outputs")
 
         # Capture preprocessor when it's created by lerobot
         original_make_processors = policy_factory_mod.make_pre_post_processors

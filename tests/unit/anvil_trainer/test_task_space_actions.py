@@ -21,7 +21,7 @@ from lerobot.processor.relative_action_processor import (
 )
 
 from anvil_trainer.config import TrainingConfig
-from anvil_trainer.patches import TransformRunner
+from anvil_trainer.patches import TransformRunner, _restore_task_space_policy_surface
 from anvil_trainer.task_space_actions import (
     TaskSpaceActionContract,
     TaskSpaceRelativeActionsProcessorStep,
@@ -77,6 +77,32 @@ def test_task_space_recipe_keeps_matched_raw_sarm_surface() -> None:
     )
     assert recipe["batch_size"] == 16
     assert recipe["steps"] == 5000
+
+
+def test_task_space_policy_surface_is_restored_after_dataset_inference() -> None:
+    contract = _contract()
+    task_feature = PolicyFeature(type=FeatureType.ACTION, shape=(14,))
+    joint_feature = PolicyFeature(type=FeatureType.ACTION, shape=(16,))
+    policy_cfg = SimpleNamespace(
+        output_features={"action": joint_feature},
+        action_feature_names=list(contract.source_action_names),
+    )
+    runtime_cfg = SimpleNamespace(
+        output_features={"action": joint_feature},
+        action_feature_names=list(contract.source_action_names),
+    )
+    policy = SimpleNamespace(config=runtime_cfg)
+
+    _restore_task_space_policy_surface(
+        policy_cfg,
+        policy,
+        contract,
+        {"action": task_feature},
+    )
+
+    for config in (policy_cfg, runtime_cfg):
+        assert config.output_features["action"].shape == (14,)
+        assert config.action_feature_names == list(contract.task_action_names)
 
 
 def test_task_space_collapses_joint_configuration_when_tcp_motion_is_zero() -> None:
