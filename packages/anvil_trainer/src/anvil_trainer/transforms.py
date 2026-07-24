@@ -17,6 +17,7 @@ import torch
 
 from anvil_trainer.bounded_actions import BoundedActionContract
 from anvil_trainer.config import TrainingConfig
+from anvil_trainer.task_space_actions import TaskSpaceActionContract
 
 log = logging.getLogger(__name__)
 
@@ -93,7 +94,11 @@ class BoundedRobustnessTransform(Transform):
         self.contract = (
             BoundedActionContract.load(config.bounded_action_contract)
             if config.bounded_action_contract
-            else None
+            else (
+                TaskSpaceActionContract.load(config.task_space_action_contract)
+                if config.task_space_action_contract
+                else None
+            )
         )
 
     @property
@@ -121,21 +126,41 @@ class BoundedRobustnessTransform(Transform):
         if config.state_noise_std_fraction > 0:
             if self.contract is None:
                 raise DataIntegrityError(
-                    "state noise requires --bounded-action-contract for physical ranges"
+                    "state noise requires a bounded or task-space action contract "
+                    "with physical source-joint ranges"
                 )
             state = item.get("observation.state")
             if state is not None:
                 lower = torch.as_tensor(
-                    self.contract.soft_lower, dtype=state.dtype, device=state.device
+                    (
+                        self.contract.soft_lower
+                        if isinstance(self.contract, BoundedActionContract)
+                        else self.contract.source_soft_lower
+                    ),
+                    dtype=state.dtype,
+                    device=state.device,
                 )
                 upper = torch.as_tensor(
-                    self.contract.soft_upper, dtype=state.dtype, device=state.device
+                    (
+                        self.contract.soft_upper
+                        if isinstance(self.contract, BoundedActionContract)
+                        else self.contract.source_soft_upper
+                    ),
+                    dtype=state.dtype,
+                    device=state.device,
                 )
                 if state.shape[-1] != len(lower):
                     raise DataIntegrityError(
                         "bounded state-noise contract does not match observation.state"
                     )
-                arm = list(self.contract.arm_indices)
+                arm = (
+                    list(self.contract.arm_indices)
+                    if isinstance(self.contract, BoundedActionContract)
+                    else [
+                        *self.contract.right_joint_indices,
+                        *self.contract.left_joint_indices,
+                    ]
+                )
                 perturbed = state.clone()
                 sigma = (upper[arm] - lower[arm]) * config.state_noise_std_fraction
                 perturbed[..., arm] = (

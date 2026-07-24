@@ -226,6 +226,11 @@ Anvil-specific flags (stripped before passing to LeRobot):
       soft-limit codec. The contract pins names, limits, gripper endpoints,
       fit episodes, and split hash; fitted horizon statistics are checkpointed.
 
+  --task-space-action-contract=PATH
+      Replace joint-action targets with versioned bimanual TCP deltas and
+      absolute grippers. At inference, a fail-closed constrained solver owns
+      redundant joint posture, hard bounds, and the outward-elbow objective.
+
   --camera-dropout-probability=P
       Independently drop training cameras with probability P while always
       retaining at least one view. Validation and test are unchanged.

@@ -239,6 +239,10 @@ class MujocoArmKinematics:
         self.model = mujoco.MjModel.from_xml_string(arm_mjcf(spec, side))
         self.data = mujoco.MjData(self.model)
         self.site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "tcp")
+        self.body_ids = {
+            name: mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+            for name in ("root", *(f"link{index}" for index in range(1, 8)))
+        }
         self.qpos_ids = np.asarray(
             [
                 self.model.jnt_qposadr[
@@ -275,6 +279,29 @@ class MujocoArmKinematics:
         jacr = np.zeros((3, self.model.nv), dtype=np.float64)
         self._mujoco.mj_jacSite(self.model, self.data, jacp, jacr, self.site_id)
         return np.concatenate([jacp[:, self.dof_ids], jacr[:, self.dof_ids]], axis=0)
+
+    def body_position(self, joints: np.ndarray, body_name: str) -> np.ndarray:
+        """Return a named link origin in the robot base frame."""
+        if body_name not in self.body_ids:
+            raise ValueError(f"unknown arm body: {body_name}")
+        self.pose(joints)
+        return self.data.xpos[self.body_ids[body_name]].copy()
+
+    def body_position_jacobian(self, joints: np.ndarray, body_name: str) -> np.ndarray:
+        """Return the translational Jacobian for a named link origin."""
+        if body_name not in self.body_ids:
+            raise ValueError(f"unknown arm body: {body_name}")
+        self.pose(joints)
+        jacp = np.zeros((3, self.model.nv), dtype=np.float64)
+        jacr = np.zeros((3, self.model.nv), dtype=np.float64)
+        self._mujoco.mj_jacBody(
+            self.model,
+            self.data,
+            jacp,
+            jacr,
+            self.body_ids[body_name],
+        )
+        return jacp[:, self.dof_ids]
 
 
 def _quat_matrix_np(quat: tuple[float, float, float, float]) -> np.ndarray:

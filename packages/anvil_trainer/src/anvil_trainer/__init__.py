@@ -21,6 +21,11 @@ from anvil_trainer.bounded_actions import (
 )
 from anvil_trainer.config import TrainingConfig
 from anvil_trainer.patches import TransformRunner
+from anvil_trainer.task_space_actions import (
+    TaskSpaceAbsoluteActionsProcessorStep,
+    TaskSpaceActionContract,
+    TaskSpaceRelativeActionsProcessorStep,
+)
 from anvil_trainer.train import main, train
 from anvil_trainer.transforms import (
     DeltaActionTransform,
@@ -36,6 +41,9 @@ __all__ = [
     "BoundedActionContract",
     "BoundedRelativeActionsProcessorStep",
     "BoundedAbsoluteActionsProcessorStep",
+    "TaskSpaceActionContract",
+    "TaskSpaceRelativeActionsProcessorStep",
+    "TaskSpaceAbsoluteActionsProcessorStep",
     "Transform",
     "ExcludeObservationTransform",
     "TaskOverrideTransform",

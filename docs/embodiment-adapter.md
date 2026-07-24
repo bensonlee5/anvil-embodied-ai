@@ -61,6 +61,12 @@ mixed-embodiment path should supervise a canonical TCP trajectory and gripper
 intent with an embodiment token; source and target joint labels must never be
 concatenated as if they described the same mechanism.
 
+The first versioned implementation of that target-side representation is
+documented in [task-space-actions.md](task-space-actions.md). It uses geometric
+outward-elbow nullspace control and hard joint/velocity/acceleration bounds, but
+remains offline-only until full collision and hardware-controller parity gates
+are closed.
+
 ## Why joint-angle matching is still useful
 
 Direct v1-to-v2 angle equality is not the primary target because different link

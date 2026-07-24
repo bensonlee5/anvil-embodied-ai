@@ -131,6 +131,7 @@ class TrainingConfig:
     )
     priority_sampling_manifest: str | None = None  # Immutable frame-priority annotations
     bounded_action_contract: str | None = None  # Versioned soft-limit/per-horizon codec
+    task_space_action_contract: str | None = None  # Versioned TCP/outward-elbow codec
     camera_dropout_probability: float = 0.0  # Train-only; individual cameras, never all
     state_noise_std_fraction: float = 0.0  # Train-only fraction of each bounded joint range
     # Vision backbone for ACT/Diffusion: resnet18 | resnet34 | resnet50
@@ -142,6 +143,10 @@ class TrainingConfig:
         if self.exclude_observs is None and self.exclude_observation is not None:
             self.exclude_observs = self.exclude_observation
         self.exclude_observation = self.exclude_observs
+        if self.bounded_action_contract and self.task_space_action_contract:
+            raise ValueError(
+                "bounded_action_contract and task_space_action_contract are mutually exclusive"
+            )
 
     @property
     def use_delta_actions(self) -> bool:
@@ -229,6 +234,15 @@ class TrainingConfig:
             or os.environ.get("ANVIL_BOUNDED_ACTION_CONTRACT")
             or None
         )
+        task_space_action_contract = (
+            _pop_argv("task-space-action-contract")
+            or os.environ.get("ANVIL_TASK_SPACE_ACTION_CONTRACT")
+            or None
+        )
+        if bounded_action_contract and task_space_action_contract:
+            raise ValueError(
+                "--bounded-action-contract and --task-space-action-contract are mutually exclusive"
+            )
         camera_dropout_probability = float(
             _pop_argv("camera-dropout-probability")
             or os.environ.get("ANVIL_CAMERA_DROPOUT_PROBABILITY", "0")
@@ -345,6 +359,20 @@ class TrainingConfig:
                     bounded_action_contract = str(saved_contract)
                     log.info(
                         "[anvil_trainer] --resume: inherited bounded action contract %s",
+                        saved_contract,
+                    )
+            if task_space_action_contract is None:
+                saved_contract = (
+                    Path(resume_job_path)
+                    / "checkpoints"
+                    / resume_checkpoint
+                    / "pretrained_model"
+                    / "task_space_action_contract.json"
+                )
+                if saved_contract.is_file():
+                    task_space_action_contract = str(saved_contract)
+                    log.info(
+                        "[anvil_trainer] --resume: inherited task-space action contract %s",
                         saved_contract,
                     )
 
@@ -535,6 +563,7 @@ class TrainingConfig:
             max_episodes=max_episodes,
             priority_sampling_manifest=priority_sampling_manifest,
             bounded_action_contract=bounded_action_contract,
+            task_space_action_contract=task_space_action_contract,
             camera_dropout_probability=camera_dropout_probability,
             state_noise_std_fraction=state_noise_std_fraction,
             backbone=backbone,
@@ -562,6 +591,7 @@ class TrainingConfig:
             split_ratio=data.get("split_ratio", [8.0, 1.0, 1.0]),
             priority_sampling_manifest=data.get("priority_sampling_manifest"),
             bounded_action_contract=data.get("bounded_action_contract"),
+            task_space_action_contract=data.get("task_space_action_contract"),
             camera_dropout_probability=float(data.get("camera_dropout_probability", 0.0)),
             state_noise_std_fraction=float(data.get("state_noise_std_fraction", 0.0)),
             backbone=data.get("backbone", "resnet18"),

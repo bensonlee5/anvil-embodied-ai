@@ -23,6 +23,7 @@ classifiers = [
 
 dependencies = [
     "anvil-shared",             # shared pure-python helpers (splits, etc.)
+    "anvil-embodiment",         # task-space FK and constrained trajectory decoding
     "lerobot[training,diffusion]~=0.6.0",
     "torch>=2.7",     # Resolved through the CUDA 13.2 PyTorch index configured in the root pyproject.toml
     "numpy>=2.0.0,<2.3.0",
@@ -69,6 +70,7 @@ anvil-trainer = "anvil_trainer.train:main"
 
 [tool.uv.sources]
 anvil-shared = { workspace = true }
+anvil-embodiment = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

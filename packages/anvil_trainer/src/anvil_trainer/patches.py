@@ -46,6 +46,11 @@ from anvil_trainer.bounded_actions import (
 from anvil_trainer.config import TrainingConfig
 from anvil_trainer.priority_sampling import PriorityEpisodeAwareSampler, PriorityManifest
 from anvil_trainer.rabc_audit import make_audit_verified_sample_weighter
+from anvil_trainer.task_space_actions import (
+    TaskSpaceActionContract,
+    encode_task_space_actions,
+    make_task_space_processor_steps,
+)
 from anvil_trainer.transforms import (
     BoundedRobustnessTransform,
     DataIntegrityError,
@@ -368,6 +373,12 @@ class TransformRunner:
             else None
         )
         self._bounded_statistics: tuple[Any, Any] | None = None
+        self._task_space_contract = (
+            TaskSpaceActionContract.load(config.task_space_action_contract)
+            if config.task_space_action_contract
+            else None
+        )
+        self._task_space_statistics: tuple[Any, Any] | None = None
         self._priority_manifest: PriorityManifest | None = None
         if config.priority_sampling_manifest:
             if not config.dataset_root:
@@ -698,7 +709,11 @@ class TransformRunner:
             return None
 
     @staticmethod
-    def _validate_pi05_dataset_contract(policy_cfg: Any, full_dataset: Any) -> None:
+    def _validate_pi05_dataset_contract(
+        policy_cfg: Any,
+        full_dataset: Any,
+        task_space_contract: TaskSpaceActionContract | None = None,
+    ) -> None:
         """Fail before training when Pi0.5 vector or camera contracts diverge."""
         if getattr(policy_cfg, "type", None) != "pi05":
             return
@@ -714,10 +729,22 @@ class TransformRunner:
             raise DataIntegrityError(
                 "[pi05_contract] Dataset action/state feature names must be present and identical"
             )
-        if policy_names != action_names:
+        expected_policy_names = (
+            list(task_space_contract.task_action_names)
+            if task_space_contract is not None
+            else action_names
+        )
+        if policy_names != expected_policy_names:
             raise DataIntegrityError(
-                "[pi05_contract] Policy action_feature_names do not exactly match the dataset: "
-                f"policy={policy_names}, dataset={action_names}"
+                "[pi05_contract] Policy action_feature_names do not match the effective "
+                f"representation: policy={policy_names}, expected={expected_policy_names}"
+            )
+        if (
+            task_space_contract is not None
+            and tuple(action_names) != task_space_contract.source_action_names
+        ):
+            raise DataIntegrityError(
+                "[pi05_contract] Dataset joint names do not match the task-space source contract"
             )
 
         action_shape = tuple(action_feature.get("shape") or ())
@@ -753,10 +780,15 @@ class TransformRunner:
                 )
 
         policy_action_shape = tuple(policy_cfg.output_features["action"].shape)
-        if policy_action_shape != action_shape:
+        expected_action_shape = (
+            (len(task_space_contract.task_action_names),)
+            if task_space_contract is not None
+            else action_shape
+        )
+        if policy_action_shape != expected_action_shape:
             raise DataIntegrityError(
-                "[pi05_contract] Policy/dataset action shapes differ: "
-                f"policy={policy_action_shape}, dataset={action_shape}"
+                "[pi05_contract] Policy/effective action shapes differ: "
+                f"policy={policy_action_shape}, expected={expected_action_shape}"
             )
         log.info(
             "[pi05_contract] Validated %d named action/state dimensions and cameras=%s",
@@ -1050,6 +1082,190 @@ class TransformRunner:
             self._bounded_contract.sha256,
         )
 
+    def _fit_task_space_action_statistics(
+        self,
+        full_dataset: Any,
+        policy_cfg: Any,
+        train_episodes: list[int],
+    ) -> tuple[Any, Any] | None:
+        """Fit robust task-space statistics from the frozen train episodes only."""
+        contract = self._task_space_contract
+        if contract is None:
+            return None
+        if getattr(policy_cfg, "type", None) != "pi05":
+            raise DataIntegrityError("task-space actions currently require Pi0.5")
+        if bool(getattr(policy_cfg, "use_relative_actions", False)):
+            raise DataIntegrityError(
+                "task-space actions replace Pi0.5 native relative actions; "
+                "set use_relative_actions=false"
+            )
+        if int(getattr(policy_cfg, "chunk_size", 0)) != contract.chunk_size:
+            raise DataIntegrityError("task-space contract chunk_size does not match the policy")
+        policy_names = tuple(getattr(policy_cfg, "action_feature_names", None) or ())
+        if policy_names != contract.task_action_names:
+            raise DataIntegrityError(
+                "task-space action names do not exactly match action_feature_names"
+            )
+        if sorted(train_episodes) != sorted(contract.training_episode_indices):
+            raise DataIntegrityError(
+                "resolved training episodes differ from the task-space action contract: "
+                f"resolved={sorted(train_episodes)}, "
+                f"contract={sorted(contract.training_episode_indices)}"
+            )
+
+        import numpy as np
+        import torch
+
+        hf = full_dataset.hf_dataset
+        actions = np.asarray(hf["action"], dtype=np.float64)
+        states = np.asarray(hf["observation.state"], dtype=np.float64)
+        if states.ndim == 3:
+            states = states[:, 0, :]
+        episodes = np.asarray(hf["episode_index"], dtype=np.int64).reshape(-1)
+        if (
+            actions.shape != states.shape
+            or actions.shape[1] != len(contract.source_action_names)
+        ):
+            raise DataIntegrityError(
+                "task-space fitting requires matching 16-D named joint action/state vectors"
+            )
+
+        train_mask = np.isin(episodes, np.asarray(train_episodes, dtype=np.int64))
+        task_dimension = len(contract.task_action_names)
+        centers = np.zeros((contract.chunk_size, task_dimension), dtype=np.float64)
+        scales = np.ones((contract.chunk_size, task_dimension), dtype=np.float64)
+        counts: list[int] = []
+        raw_horizons: list[np.ndarray] = []
+        identity_center = torch.zeros((1, task_dimension), dtype=torch.float64)
+        identity_scale = torch.ones_like(identity_center)
+
+        for horizon in range(contract.chunk_size):
+            starts = np.arange(0, len(actions) - horizon, dtype=np.int64)
+            valid = train_mask[starts] & (episodes[starts] == episodes[starts + horizon])
+            starts = starts[valid]
+            if len(starts) == 0:
+                raise DataIntegrityError(
+                    f"task-space action horizon {horizon} has no train-only samples"
+                )
+            encoded = encode_task_space_actions(
+                torch.as_tensor(actions[starts + horizon]).unsqueeze(1),
+                torch.as_tensor(states[starts]),
+                contract=contract,
+                center=identity_center,
+                scale=identity_scale,
+            )[:, 0].numpy()
+            raw_horizons.append(encoded)
+            counts.append(len(encoded))
+            low = np.quantile(encoded, contract.quantile_low, axis=0)
+            high = np.quantile(encoded, contract.quantile_high, axis=0)
+            centers[horizon] = 0.5 * (low + high)
+            scales[horizon] = np.maximum(
+                0.5 * (high - low),
+                contract.minimum_scale,
+            )
+            # Absolute grippers already have a complete physical [-1,1] map.
+            centers[horizon, [6, 13]] = 0.0
+            scales[horizon, [6, 13]] = 1.0
+
+        clipped = 0
+        attempted = 0
+        for horizon, raw in enumerate(raw_horizons):
+            normalized = (raw - centers[horizon]) / scales[horizon]
+            clipped += int(np.count_nonzero(np.abs(normalized) > contract.clip_value))
+            attempted += normalized.size
+        clip_fraction = clipped / max(attempted, 1)
+        if not np.isfinite(centers).all() or not np.isfinite(scales).all():
+            raise DataIntegrityError("task-space fitted statistics contain non-finite values")
+        self._task_space_statistics = (centers, scales)
+        self._normalization_contract.update(
+            {
+                "action_space": "bimanual_tcp_delta_with_absolute_grippers",
+                "representation_id": contract.representation_id,
+                "contract_sha256": contract.sha256,
+                "chunk_size": contract.chunk_size,
+                "stats_source": "frozen_training_episodes_only",
+                "fit_episode_indices": list(contract.training_episode_indices),
+                "split_sha256": contract.split_sha256,
+                "horizon_sample_counts": counts,
+                "quantiles": [contract.quantile_low, contract.quantile_high],
+                "minimum_scale": contract.minimum_scale,
+                "clip_value": contract.clip_value,
+                "training_target_clip_fraction": clip_fraction,
+                "solver_model_id": contract.model_id,
+                "solver_model_sha256": contract.model_sha256,
+                "solver_failure_mode": "fail_closed",
+            }
+        )
+        log.info(
+            "[task_space_actions] Fit %dx%d train-only horizon statistics "
+            "(episodes=%d, target_clip_fraction=%.6f)",
+            contract.chunk_size,
+            task_dimension,
+            len(train_episodes),
+            clip_fraction,
+        )
+        return centers, scales
+
+    def _install_task_space_action_processors(
+        self,
+        policy_cfg: Any,
+        preprocessor: Any,
+        postprocessor: Any,
+    ) -> None:
+        """Replace the inherited joint codec with the task-space/solver pair."""
+        if self._task_space_contract is None:
+            return
+        if self._task_space_statistics is None:
+            raise DataIntegrityError("task-space statistics were not fit before processors")
+
+        from lerobot.configs.types import FeatureType, NormalizationMode
+        from lerobot.processor.normalize_processor import (
+            NormalizerProcessorStep,
+            UnnormalizerProcessorStep,
+        )
+        from lerobot.processor.relative_action_processor import (
+            AbsoluteActionsProcessorStep,
+            RelativeActionsProcessorStep,
+        )
+
+        if policy_cfg.normalization_mapping.get(FeatureType.ACTION) != NormalizationMode.IDENTITY:
+            raise DataIntegrityError(
+                "task-space processor owns action normalization; "
+                "set ACTION normalization to IDENTITY"
+            )
+        center, scale = self._task_space_statistics
+        task_relative, task_absolute = make_task_space_processor_steps(
+            self._task_space_contract,
+            center=center,
+            scale=scale,
+        )
+        relative_indices = [
+            index
+            for index, step in enumerate(preprocessor.steps)
+            if isinstance(step, RelativeActionsProcessorStep)
+        ]
+        absolute_indices = [
+            index
+            for index, step in enumerate(postprocessor.steps)
+            if isinstance(step, AbsoluteActionsProcessorStep)
+        ]
+        if len(relative_indices) != 1 or len(absolute_indices) != 1:
+            raise DataIntegrityError(
+                "task-space actions require exactly one inherited relative/absolute "
+                "processor pair"
+            )
+        preprocessor.steps[relative_indices[0]] = task_relative
+        postprocessor.steps[absolute_indices[0]] = task_absolute
+        for pipeline in (preprocessor, postprocessor):
+            for step in pipeline.steps:
+                if isinstance(step, (NormalizerProcessorStep, UnnormalizerProcessorStep)):
+                    step.norm_map[FeatureType.ACTION] = NormalizationMode.IDENTITY
+        log.info(
+            "[task_space_actions] Installed %s (%s)",
+            self._task_space_contract.representation_id,
+            self._task_space_contract.sha256,
+        )
+
     def apply_metadata_patches(self) -> None:
         """Apply metadata patches before importing lerobot training."""
         for transform in self.active_transforms:
@@ -1200,16 +1416,27 @@ class TransformRunner:
             total_ep = full_dataset.num_episodes
             val_state._camera_keys = tuple(full_dataset.meta.camera_keys)
             policy_cfg = cfg.trainable_config
-            val_state._validate_pi05_dataset_contract(policy_cfg, full_dataset)
+            val_state._validate_pi05_dataset_contract(
+                policy_cfg,
+                full_dataset,
+                val_state._task_space_contract,
+            )
             action_feature = full_dataset.meta.features.get("action", {})
-            val_state._action_feature_names = tuple(action_feature.get("names") or ())
+            val_state._action_feature_names = (
+                val_state._task_space_contract.task_action_names
+                if val_state._task_space_contract is not None
+                else tuple(action_feature.get("names") or ())
+            )
 
             # Build action stats in the same representation consumed by the
             # processor. Native Pi0.5 relative actions use every valid future
             # action in the configured chunk; Anvil's legacy transform retains
             # its existing delta-stat path.
             _patched_action_stats = None
-            if val_state._bounded_contract is None:
+            if (
+                val_state._bounded_contract is None
+                and val_state._task_space_contract is None
+            ):
                 _patched_action_stats = val_state._compute_native_relative_action_stats(
                     full_dataset,
                     policy_cfg,
@@ -1227,6 +1454,11 @@ class TransformRunner:
                     "test_episodes": [],
                 }
                 val_state._fit_bounded_action_statistics(
+                    full_dataset,
+                    policy_cfg,
+                    list(range(total_ep)),
+                )
+                val_state._fit_task_space_action_statistics(
                     full_dataset,
                     policy_cfg,
                     list(range(total_ep)),
@@ -1294,6 +1526,7 @@ class TransformRunner:
                 ),
             }
             val_state._fit_bounded_action_statistics(full_dataset, policy_cfg, train_ep)
+            val_state._fit_task_space_action_statistics(full_dataset, policy_cfg, train_ep)
 
             def _make_dataloader(dataset):
                 return torch.utils.data.DataLoader(
@@ -1382,6 +1615,11 @@ class TransformRunner:
                 preprocessor,
                 postprocessor,
             )
+            val_state._install_task_space_action_processors(
+                policy_cfg,
+                preprocessor,
+                postprocessor,
+            )
             if getattr(policy_cfg, "type", None) == "vla_jepa":
                 removed_steps = reconcile_vla_jepa_postprocessor(policy_cfg, postprocessor)
                 if removed_steps:
@@ -1448,6 +1686,22 @@ class TransformRunner:
             anvil_cfg_base["bounded_action_representation"] = {
                 "representation_id": self._bounded_contract.representation_id,
                 "contract_sha256": self._bounded_contract.sha256,
+                "camera_dropout_probability": self.config.camera_dropout_probability,
+                "state_noise_std_fraction": self.config.state_noise_std_fraction,
+            }
+        if self._task_space_contract is not None:
+            anvil_cfg_base["task_space_action_representation"] = {
+                "representation_id": self._task_space_contract.representation_id,
+                "contract_sha256": self._task_space_contract.sha256,
+                "deployment_status": self._task_space_contract.deployment_status,
+                "kinematic_model_id": self._task_space_contract.model_id,
+                "kinematic_model_sha256": self._task_space_contract.model_sha256,
+                "source_action_feature_names": list(
+                    self._task_space_contract.source_action_names
+                ),
+                "task_action_feature_names": list(
+                    self._task_space_contract.task_action_names
+                ),
                 "camera_dropout_probability": self.config.camera_dropout_probability,
                 "state_noise_std_fraction": self.config.state_noise_std_fraction,
             }
@@ -1544,6 +1798,10 @@ class TransformRunner:
                 if val_state._bounded_contract is not None:
                     (pretrained_dir / "bounded_action_contract.json").write_bytes(
                         val_state._bounded_contract.path.read_bytes()
+                    )
+                if val_state._task_space_contract is not None:
+                    (pretrained_dir / "task_space_action_contract.json").write_bytes(
+                        val_state._task_space_contract.path.read_bytes()
                     )
 
                 log.info("[anvil_trainer] Saved configs to %s", pretrained_dir)

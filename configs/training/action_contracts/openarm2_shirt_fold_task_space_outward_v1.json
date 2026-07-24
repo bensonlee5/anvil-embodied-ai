@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "representation_id": "anvil-openarm2-bimanual-tcp-delta-outward-elbow-v1",
+  "deployment_status": "offline_only",
+  "deployment_blockers": [
+    "full-geometry self-collision constraints",
+    "table and scene collision constraints",
+    "hardware controller velocity and acceleration parity audit"
+  ],
+  "chunk_size": 30,
+  "source_action_feature_names": [
+    "right_joint_1.pos",
+    "right_joint_2.pos",
+    "right_joint_3.pos",
+    "right_joint_4.pos",
+    "right_joint_5.pos",
+    "right_joint_6.pos",
+    "right_joint_7.pos",
+    "right_gripper.pos",
+    "left_joint_1.pos",
+    "left_joint_2.pos",
+    "left_joint_3.pos",
+    "left_joint_4.pos",
+    "left_joint_5.pos",
+    "left_joint_6.pos",
+    "left_joint_7.pos",
+    "left_gripper.pos"
+  ],
+  "task_action_feature_names": [
+    "right_tcp.delta_x",
+    "right_tcp.delta_y",
+    "right_tcp.delta_z",
+    "right_tcp.delta_rx",
+    "right_tcp.delta_ry",
+    "right_tcp.delta_rz",
+    "right_gripper.absolute",
+    "left_tcp.delta_x",
+    "left_tcp.delta_y",
+    "left_tcp.delta_z",
+    "left_tcp.delta_rx",
+    "left_tcp.delta_ry",
+    "left_tcp.delta_rz",
+    "left_gripper.absolute"
+  ],
+  "source_indices": {
+    "right_arm": [0, 1, 2, 3, 4, 5, 6],
+    "left_arm": [8, 9, 10, 11, 12, 13, 14],
+    "grippers": [7, 15]
+  },
+  "task_frame": {
+    "name": "robot_base",
+    "source_to_task": {
+      "translation_m": [0.0, 0.0, 0.0],
+      "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]
+    },
+    "translation_delta": "target_tcp_minus_observation_tcp",
+    "rotation_delta": "base_frame_log_map_of_target_rotation_times_observation_rotation_transpose",
+    "horizon_reference": "all_horizons_relative_to_observation_time_t"
+  },
+  "kinematic_model": {
+    "model_id": "anvil_openarm_v2",
+    "sha256": "d754398e61803c100072bfeeb6327b2cb449fe63a92eacc8157c7252163047a5"
+  },
+  "grippers": {
+    "mode": "absolute",
+    "lower": [-0.003, -0.003],
+    "upper": [0.05, 0.05]
+  },
+  "train_only_fit": {
+    "episode_indices": [0, 1, 3, 4, 5, 7, 8, 9, 10, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 28, 29, 30, 31, 32],
+    "split_sha256": "dac42679c3d43b9a6c76e28fb6e23aad6d85599524b73433bb37df662b02795f",
+    "quantile_low": 0.01,
+    "quantile_high": 0.99,
+    "minimum_scale": 0.02,
+    "clip_value": 3.0
+  },
+  "task_space_smoothing": {
+    "method": "uniform_cubic_bspline",
+    "kernel": [0.16666666666666666, 0.6666666666666666, 0.16666666666666666],
+    "passes": 2,
+    "pose_only": true,
+    "preserve_segment_endpoints": true,
+    "gripper_mode": "absolute_passthrough",
+    "gripper_event_threshold": 0.005
+  },
+  "trajectory_solver": {
+    "method": "damped_least_squares_with_nullspace_posture",
+    "dt_seconds": 0.03333333333333333,
+    "joint_limit_margin_rad": 0.005,
+    "joint_limit_source": "pinned anvil_openarm_v2 kinematic model; margin is applied inward",
+    "max_velocity_rad_s": [2.4, 2.0, 2.4, 2.4, 3.0, 3.0, 3.5],
+    "velocity_limit_source": "pinned local Anvil-style SDLS simulator values; deployed hardware parity pending",
+    "max_acceleration_rad_s2": [144.0, 120.0, 144.0, 144.0, 180.0, 180.0, 210.0],
+    "acceleration_limit_source": "two times each velocity limit per 30 Hz control interval; finite reversal bound pending hardware parity audit",
+    "max_iterations": 80,
+    "damping": 0.03,
+    "max_iteration_step_rad": 0.08,
+    "position_tolerance_m": 0.0075,
+    "orientation_tolerance_rad": 0.05,
+    "continuity_weight": 0.02,
+    "joint_center_weight": 0.005,
+    "outward_elbow": {
+      "right": {
+        "shoulder_body": "link2",
+        "elbow_body": "link4",
+        "outward_axis": [0.0, -1.0, 0.0],
+        "weight": 0.02,
+        "finite_difference_rad": 0.0001,
+        "target_alignment": 0.85
+      },
+      "left": {
+        "shoulder_body": "link2",
+        "elbow_body": "link4",
+        "outward_axis": [0.0, 1.0, 0.0],
+        "weight": 0.02,
+        "finite_difference_rad": 0.0001,
+        "target_alignment": 0.85
+      }
+    },
+    "priority_order": [
+      "hard joint position, velocity, and acceleration bounds",
+      "TCP position and orientation tracking",
+      "outward elbow swivel in the task Jacobian nullspace",
+      "trajectory continuity and joint centering"
+    ],
+    "failure_mode": "fail_closed"
+  }
+}
